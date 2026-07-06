@@ -33,6 +33,7 @@ from src.db.models import (
     Post,
     PostMetricSnapshot,
 )
+from src.db.models_growth_snapshot import ParticipantSnapshot
 from src.db.session import session_scope
 from src.services.events import Event, EventType, get_event_bus
 from src.logger import get_logger
@@ -309,8 +310,11 @@ class OwnedChannelCollector(BaseCollector):
             row.username = getattr(entity, "username", None)
             row.title = getattr(entity, "title", None)
             row.description = getattr(full_chat, "about", None)
-            row.participants_count = getattr(full_chat, "participants_count", None)
+            pc = getattr(full_chat, "participants_count", None)
+            row.participants_count = pc
             row.can_view_stats = bool(getattr(full_chat, "can_view_stats", False))
+            if pc is not None:
+                s.add(ParticipantSnapshot(channel_id=row.id, captured_at=now, count=pc))
             row.stats_dc = getattr(full_chat, "stats_dc", None)
             s.flush()
             row_id = row.id

@@ -43,6 +43,7 @@ from src.db.base import Base, TimestampMixin
 # loaded in isolation (e.g. a collector that only imports Channel), so SQLAlchemy
 # can always resolve the FK. No circular import (models_org imports only base).
 from src.db import models_org  # noqa: F401,E402
+from src.db.models_growth_snapshot import ParticipantSnapshot  # noqa: F401,E402 — register on metadata
 
 # --------------------------------------------------------------------------- #
 # System-level constant vocabularies (constraints, NOT learned categories)
