@@ -57,12 +57,12 @@ def _job_runner():
 
 
 def j_telegram_sync() -> dict:
-    from src.config.settings import get_settings
     from src.db.models import CollectionType
+    from src.services.collection.channels import owned_handles
     from src.services.collection.telegram_owned import OwnedChannelCollector
     added = 0
     r = _job_runner()
-    for ch in get_settings().owned_channels:
+    for ch in owned_handles():
         job = r.run_collector(OwnedChannelCollector(ch, CollectionType.INCREMENTAL),
                               collection_type=CollectionType.INCREMENTAL, target=ch)
         added += job.records_added or 0
@@ -98,12 +98,12 @@ def j_competitor_sync() -> dict:
 
 
 def j_stats_refresh() -> dict:
-    from src.config.settings import get_settings
     from src.db.models import CollectionType
+    from src.services.collection.channels import owned_handles
     from src.services.collection.telegram_owned import OwnedChannelCollector
     r = _job_runner()
     n = 0
-    for ch in get_settings().owned_channels:
+    for ch in owned_handles():
         job = r.run_collector(OwnedChannelCollector(ch, CollectionType.ANALYTICS),
                               collection_type=CollectionType.ANALYTICS, target=ch)
         n += job.records_updated or 0

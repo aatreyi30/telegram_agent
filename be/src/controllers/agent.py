@@ -149,13 +149,14 @@ class AgentScheduler:
         from src.config.settings import get_settings
         from src.db.models import CollectionType
         from src.services.collection.base import JobRunner
+        from src.services.collection.channels import owned_handles
         from src.services.collection.telegram_competitor import CompetitorCollector
         from src.services.collection.telegram_owned import OwnedChannelCollector
 
         s = get_settings()
         runner = JobRunner()
         added = 0
-        for ch in s.owned_channels:
+        for ch in owned_handles():
             job = runner.run_collector(OwnedChannelCollector(ch, CollectionType.INCREMENTAL),
                                        collection_type=CollectionType.INCREMENTAL, target=ch)
             added += job.records_added or 0

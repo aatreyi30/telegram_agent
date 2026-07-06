@@ -219,20 +219,115 @@ function UsersTab() {
   );
 }
 
+function ChannelsTab() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["channels"], queryFn: () => api.get<any[]>("/api/channels") });
+  const [handle, setHandle] = useState("");
+  const [note, setNote] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  async function add() {
+    setNote(null);
+    try {
+      await api.post("/api/channels", { username: handle.trim(), kind: "owned" });
+      setHandle("");
+      qc.invalidateQueries({ queryKey: ["channels"] });
+      setNote({ ok: true, msg: "Channel added. Connect Telegram (see below), then run a sync to start collecting." });
+    } catch (e) {
+      setNote({ ok: false, msg: (e as Error).message });
+    }
+  }
+  async function remove(c: any) {
+    const msg = c.posts > 0
+      ? `Delete @${c.username} and its ${c.posts} posts + all derived data? This cannot be undone.`
+      : `Remove @${c.username}?`;
+    if (!window.confirm(msg)) return;
+    try {
+      await api.del(`/api/channels/${c.id}?confirm=true`);
+      qc.invalidateQueries({ queryKey: ["channels"] });
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card className="max-w-xl">
+        <CardHeader><CardTitle className="text-base">Add your Telegram channel</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-end gap-2">
+            <div className="flex-1 space-y-1.5">
+              <Label>Channel @username or t.me link</Label>
+              <Input placeholder="@YourDealsChannel" value={handle}
+                onChange={(e) => setHandle(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handle.trim() && add()} />
+            </div>
+            <Button onClick={add} disabled={!handle.trim()}>Add channel</Button>
+          </div>
+          {note && <Note {...note} />}
+          <p className="text-xs text-muted-foreground">
+            A new channel starts as <b>pending</b>. Collecting its posts and stats requires a
+            Telegram account that administers it — set <code>TELEGRAM_API_ID / HASH / PHONE</code>
+            for that account and sign in once, then run a sync. The channel flips to <b>active</b>
+            after its first successful collection.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Your channels</CardTitle></CardHeader>
+        <CardContent className="p-0">
+          <Async q={q} rows={2}>
+            {(channels) =>
+              channels.length === 0 ? (
+                <p className="p-4 text-sm text-muted-foreground">No channels yet — add one above.</p>
+              ) : (
+                <Table>
+                  <THead><TR><TH>Channel</TH><TH>Type</TH><TH>Status</TH><TH>Posts</TH><TH></TH></TR></THead>
+                  <TBody>
+                    {channels.map((c) => (
+                      <TR key={c.id}>
+                        <TD className="font-medium">{c.username ? `@${c.username}` : c.title || `#${c.id}`}</TD>
+                        <TD className="capitalize text-muted-foreground">{c.kind}</TD>
+                        <TD>
+                          <Badge className={c.status === "active"
+                            ? "bg-success/15 text-success"
+                            : "bg-muted text-muted-foreground"}>{c.status}</Badge>
+                        </TD>
+                        <TD>{c.posts.toLocaleString()}</TD>
+                        <TD>
+                          <Button variant="ghost" size="icon" onClick={() => remove(c)}>
+                            <Trash2 size={16} className="text-destructive" />
+                          </Button>
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              )
+            }
+          </Async>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export function Settings() {
   const { user } = useAuth();
   const [tab, setTab] = useState("profile");
   const isOwner = user?.role === "owner";
   return (
     <div>
-      <PageHeader title="Settings" sub="Your profile, the organization, and users." />
+      <PageHeader title="Settings" sub="Your profile, channels, the organization, and users." />
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="profile">Profile</TabsTrigger>
+          {isOwner && <TabsTrigger value="channels">Channels</TabsTrigger>}
           {isOwner && <TabsTrigger value="org">Organization</TabsTrigger>}
           {isOwner && <TabsTrigger value="users">Users</TabsTrigger>}
         </TabsList>
         <TabsContent value="profile"><ProfileTab /></TabsContent>
+        {isOwner && <TabsContent value="channels"><ChannelsTab /></TabsContent>}
         {isOwner && <TabsContent value="org"><OrgTab /></TabsContent>}
         {isOwner && <TabsContent value="users"><UsersTab /></TabsContent>}
       </Tabs>

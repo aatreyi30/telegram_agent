@@ -10,6 +10,7 @@ from __future__ import annotations
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from src.services.collection.base import JobRunner
+from src.services.collection.channels import owned_handles
 from src.services.collection.merchant import MerchantEnrichmentCollector  # noqa: F401 (registry)
 from src.services.collection.telegram_competitor import CompetitorCollector
 from src.services.collection.telegram_owned import OwnedChannelCollector
@@ -30,7 +31,7 @@ class CollectionScheduler:
 
     # --- scheduled tick handlers ---
     def _owned_incremental(self) -> None:
-        for ch in self.settings.owned_channels:
+        for ch in owned_handles():
             self.runner.run_collector(
                 OwnedChannelCollector(ch, CollectionType.INCREMENTAL),
                 collection_type=CollectionType.INCREMENTAL,
@@ -38,7 +39,7 @@ class CollectionScheduler:
             )
 
     def _owned_analytics(self) -> None:
-        for ch in self.settings.owned_channels:
+        for ch in owned_handles():
             self.runner.run_collector(
                 OwnedChannelCollector(ch, CollectionType.ANALYTICS),
                 collection_type=CollectionType.ANALYTICS,

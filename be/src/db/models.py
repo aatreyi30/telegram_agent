@@ -170,6 +170,10 @@ class Channel(Base, TimestampMixin):
     # multi-tenancy: which org this channel belongs to (nullable; backfilled by seed-org)
     org_id: Mapped[int | None] = mapped_column(ForeignKey("organizations.id"), index=True)
     kind: Mapped[str] = mapped_column(String(16), default="owned")  # owned | competitor
+    # pending  = added via the UI, Telegram id not resolved yet (tg_channel_id is a
+    #            negative placeholder until an authed client resolves the @username);
+    # active   = resolved / collected at least once.
+    status: Mapped[str] = mapped_column(String(16), default="active")
     username: Mapped[str | None] = mapped_column(String(128), index=True)
     title: Mapped[str | None] = mapped_column(String(512))
     description: Mapped[str | None] = mapped_column(Text)

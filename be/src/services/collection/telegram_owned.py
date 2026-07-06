@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.services.collection.raw_store import store_raw
@@ -293,8 +293,19 @@ class OwnedChannelCollector(BaseCollector):
             row = s.scalar(select(Channel).where(Channel.tg_channel_id == entity.id))
             now = datetime.now(timezone.utc)
             if row is None:
-                row = Channel(tg_channel_id=entity.id)
-                s.add(row)
+                # adopt a pending row added via the UI (negative placeholder id, matched
+                # by @username) so it isn't duplicated once Telegram resolves the real id.
+                uname = getattr(entity, "username", None)
+                if uname:
+                    row = s.scalar(select(Channel).where(
+                        func.lower(Channel.username) == uname.lower(),
+                        Channel.tg_channel_id < 0))
+                if row is not None:
+                    row.tg_channel_id = entity.id
+                else:
+                    row = Channel(tg_channel_id=entity.id)
+                    s.add(row)
+            row.status = "active"
             row.username = getattr(entity, "username", None)
             row.title = getattr(entity, "title", None)
             row.description = getattr(full_chat, "about", None)

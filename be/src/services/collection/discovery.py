@@ -80,7 +80,8 @@ def discover_competitors(max_add: int = 5) -> dict:
 
     with session_scope() as sess:
         existing = {c.username.lower() for c in sess.scalars(select(Competitor)) if c.username}
-    owned = {h.lstrip("@").lower() for h in s.owned_channels}
+    from src.services.collection.channels import owned_handles
+    owned = {h.lstrip("@").lower() for h in owned_handles()}
     exclude = existing | owned
 
     candidates = asyncio.run(_search(s, exclude))

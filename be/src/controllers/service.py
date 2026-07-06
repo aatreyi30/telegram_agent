@@ -18,16 +18,54 @@ from src.db.models_generation import GeneratedPost, PostStatus
 from src.db.session import session_scope
 
 
-def list_channels() -> list[dict]:
+def list_channels(org_id: int | None = None) -> list[dict]:
     with session_scope() as s:
-        rows = s.scalars(select(Channel).order_by(Channel.id)).all()
+        q = select(Channel).order_by(Channel.id)
+        if org_id is not None:
+            # the org's channels plus any legacy rows not yet assigned to an org
+            q = q.where((Channel.org_id == org_id) | (Channel.org_id.is_(None)))
+        rows = s.scalars(q).all()
         post_counts = dict(s.execute(
             select(Post.channel_id, func.count()).group_by(Post.channel_id)).all())
         return [{"id": c.id, "username": c.username, "title": c.title, "kind": c.kind,
+                 "status": getattr(c, "status", "active"),
+                 "resolved": (c.tg_channel_id or 0) > 0,  # negative id = pending resolution
                  "org_id": c.org_id, "posts": post_counts.get(c.id, 0)} for c in rows]
 
 
-def delete_channel(channel_id: int, confirm: bool = False) -> dict:
+def add_channel(org_id: int | None, username: str, kind: str = "owned") -> dict:
+    """Add an owned channel by @username. Telegram's numeric id isn't known until an
+    authenticated client resolves it, so the row starts as `pending` with a negative
+    placeholder id (real ids are positive). The next Telegram sync adopts it by username
+    and flips it to `active`. Competitors are auto-discovered, so this is owned-only."""
+    import time
+
+    from src.services.collection.channels import normalize_handle
+
+    handle = normalize_handle(username)
+    if not handle:
+        return {"ok": False, "error": "Enter a valid @username or t.me link."}
+    if kind != "owned":
+        return {"ok": False, "error": "Only owned channels are added here; competitors are discovered automatically."}
+
+    with session_scope() as s:
+        dup = s.scalar(select(Channel).where(
+            func.lower(Channel.username) == handle.lower(),
+            (Channel.org_id == org_id) | (Channel.org_id.is_(None))))
+        if dup is not None:
+            return {"ok": False, "error": f"@{handle} is already added."}
+        row = Channel(org_id=org_id, username=handle, kind="owned", status="pending",
+                      tg_channel_id=-int(time.time_ns()))  # temp unique negative for the INSERT
+        s.add(row)
+        s.flush()
+        row.tg_channel_id = -row.id   # deterministic, unique, negative → never hits a real id
+        s.flush()
+        return {"ok": True, "channel": {"id": row.id, "username": row.username,
+                "title": None, "kind": "owned", "status": "pending", "resolved": False,
+                "org_id": row.org_id, "posts": 0}}
+
+
+def delete_channel(channel_id: int, confirm: bool = False, org_id: int | None = None) -> dict:
     """Delete a channel and all of its dependent data (posts, metrics, normalized
     rows, classifications, extracted facts). Destructive + irreversible, so a preview
     is returned unless confirm=True. Deletes in FK-dependency order via subqueries
@@ -40,6 +78,9 @@ def delete_channel(channel_id: int, confirm: bool = False) -> dict:
     with session_scope() as s:
         ch = s.get(Channel, channel_id)
         if ch is None:
+            return {"ok": False, "error": f"No channel #{channel_id}."}
+        # org guard: don't let one org delete another org's channel
+        if org_id is not None and ch.org_id is not None and ch.org_id != org_id:
             return {"ok": False, "error": f"No channel #{channel_id}."}
 
         post_ids = select(Post.id).where(Post.channel_id == channel_id)
