@@ -140,12 +140,23 @@ def competitor_signals(s: Session) -> list[dict]:
 
 
 def competitor_profiles(s: Session) -> list[dict]:
-    return [{"competitor": p.username, "posts": p.post_count,
-             "similarity_to_us": p.similarity_to_owned,
-             "top_hour_ist": p.top_posting_hour_ist}
-            for p in s.scalars(select(CompetitorProfile)
-                .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-                .order_by(CompetitorProfile.post_count.desc()))]
+    return [{
+        "competitor": p.username, "posts": p.post_count, "span_days": p.span_days,
+        "posts_per_day": p.posts_per_day,
+        "avg_text_len": p.avg_text_len, "emoji_rate": p.emoji_rate,
+        "hashtag_rate": p.hashtag_rate, "cta_rate": p.cta_rate,
+        "coupon_rate": p.coupon_rate, "multi_deal_rate": p.multi_deal_rate,
+        "avg_links": p.avg_links, "media_rate": p.media_rate,
+        "avg_views": p.avg_views, "views_sample_size": p.views_sample_size,
+        "top_hour_ist": p.top_posting_hour_ist,
+        "weekday_distribution": p.weekday_distribution,
+        "hour_distribution_ist": p.hour_distribution_ist,
+        "deal_mix": p.deal_mix, "merchant_mix": p.merchant_mix,
+        "merchant_coverage": p.merchant_coverage,
+        "similarity_to_us": p.similarity_to_owned, "confidence": p.confidence,
+    } for p in s.scalars(select(CompetitorProfile)
+        .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
+        .order_by(CompetitorProfile.post_count.desc()))]
 
 
 def full_briefing_context(s: Session) -> dict:
