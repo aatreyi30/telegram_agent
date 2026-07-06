@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+be/.venv/
+
+# secrets / local data (never commit)
+.env
+be/.env
+*.session
+**/data/
+*.db
+*.db-shm
+*.db-wal
+
+# frontend
+fe/node_modules/
+fe/dist/

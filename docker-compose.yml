@@ -1,0 +1,14 @@
+# Runs the DealWing backend (FastAPI). The frontend is not dockerized — run it
+# locally with `cd fe && npm run dev`, pointed at this backend on :8000.
+services:
+  backend:
+    build: ./be
+    ports:
+      - "8000:8000"
+    environment:
+      ENVIRONMENT: production
+      PORT: "8000"
+      CORS_ORIGIN: "http://localhost:5173"
+    # Persist the SQLite DB + raw snapshots across restarts (optional).
+    volumes:
+      - ./be/data:/app/data
