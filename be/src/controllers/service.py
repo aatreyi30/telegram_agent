@@ -134,17 +134,23 @@ def org_channel_label() -> str:
         return ""
 
 
-def overview() -> dict:
+def overview(channel_id: int | None = None) -> dict:
     """Headline counts + the publishing-gate status."""
     s_ = get_settings()
     with session_scope() as s:
-        posts = s.scalar(select(func.count()).select_from(Post)) or 0
+        pq = select(func.count()).select_from(Post)
+        dq = select(func.count()).select_from(GeneratedPost).where(GeneratedPost.status == PostStatus.DRAFT)
+        qq = select(ScheduledPost.status, func.count())
+        if channel_id is not None:
+            pq = pq.where(Post.channel_id == channel_id)
+            dq = dq.where(GeneratedPost.channel_id == channel_id)
+            qq = (qq.join(GeneratedPost, GeneratedPost.id == ScheduledPost.generated_post_id)
+                    .where(GeneratedPost.channel_id == channel_id))
+        posts = s.scalar(pq) or 0
         competitors = s.scalar(select(func.count()).select_from(Competitor)) or 0
-        drafts = s.scalar(select(func.count()).select_from(GeneratedPost)
-                          .where(GeneratedPost.status == PostStatus.DRAFT)) or 0
-        ch = ctx.channel_overview(s)
-        queue_counts = dict(s.execute(
-            select(ScheduledPost.status, func.count()).group_by(ScheduledPost.status)).all())
+        drafts = s.scalar(dq) or 0
+        ch = ctx.channel_overview(s, channel_id=channel_id)
+        queue_counts = dict(s.execute(qq.group_by(ScheduledPost.status)).all())
     return {
         "channel": ch,
         "posts": posts,
@@ -174,13 +180,13 @@ def _publishing_gates(settings, queue_counts: dict) -> list[dict]:
     ]
 
 
-def top_actions(limit: int = 5) -> list[dict]:
+def top_actions(limit: int = 5, channel_id: int | None = None) -> list[dict]:
     with session_scope() as s:
-        recs = ctx.growth_recommendations(s, limit=limit)
+        recs = ctx.growth_recommendations(s, limit=limit, channel_id=channel_id)
     return recs
 
 
-def insights() -> dict:
+def insights(channel_id: int | None = None) -> dict:
     from src.services.generation.strategy import PostingStrategy
 
     with session_scope() as s:
@@ -194,12 +200,12 @@ def insights() -> dict:
             "window": strat.window_desc,
         }
         return {
-            "recommendations": ctx.growth_recommendations(s, limit=20),
-            "reasoning": ctx.reasoning_insights(s),
-            "learnings": ctx.learnings(s),
-            "performance": ctx.post_type_performance(s),
-            "blueprint": ctx.growth_blueprint(s),
-            "style": ctx.channel_style(s),
+            "recommendations": ctx.growth_recommendations(s, limit=20, channel_id=channel_id),
+            "reasoning": ctx.reasoning_insights(s, channel_id=channel_id),
+            "learnings": ctx.learnings(s, channel_id=channel_id),
+            "performance": ctx.post_type_performance(s, channel_id=channel_id),
+            "blueprint": ctx.growth_blueprint(s, channel_id=channel_id),
+            "style": ctx.channel_style(s, channel_id=channel_id),
             "emoji_policy": emoji_policy,
         }
 
@@ -220,11 +226,12 @@ def merchants() -> dict:
         }
 
 
-def plans() -> list[dict]:
+def plans(channel_id: int | None = None) -> list[dict]:
     with session_scope() as s:
-        rows = s.scalars(select(CampaignPlan)
-                         .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION)
-                         .order_by(CampaignPlan.plan_type)).all()
+        q = select(CampaignPlan).where(CampaignPlan.campaign_version == CAMPAIGN_VERSION)
+        if channel_id is not None:
+            q = q.where(CampaignPlan.channel_id == channel_id)
+        rows = s.scalars(q.order_by(CampaignPlan.plan_type)).all()
         return [{"plan_type": p.plan_type, "title": p.title,
                  "target_date": p.target_date.isoformat() if p.target_date else None,
                  "confidence": p.confidence, "blueprint": p.blueprint,
@@ -242,12 +249,16 @@ def _clamp_page(page: int, page_size: int) -> tuple[int, int, int]:
     return page, page_size, (page - 1) * page_size
 
 
-def drafts(page: int = 1, page_size: int = 12) -> dict:
+def drafts(page: int = 1, page_size: int = 12, channel_id: int | None = None) -> dict:
     page, page_size, offset = _clamp_page(page, page_size)
     with session_scope() as s:
-        total = s.scalar(select(func.count()).select_from(GeneratedPost)) or 0
-        rows = s.scalars(select(GeneratedPost)
-                         .order_by(GeneratedPost.generated_at.desc(), GeneratedPost.id.desc())
+        cq = select(func.count()).select_from(GeneratedPost)
+        lq = select(GeneratedPost)
+        if channel_id is not None:
+            cq = cq.where(GeneratedPost.channel_id == channel_id)
+            lq = lq.where(GeneratedPost.channel_id == channel_id)
+        total = s.scalar(cq) or 0
+        rows = s.scalars(lq.order_by(GeneratedPost.generated_at.desc(), GeneratedPost.id.desc())
                          .offset(offset).limit(page_size)).all()
         items = []
         for r in rows:
@@ -264,12 +275,17 @@ def drafts(page: int = 1, page_size: int = 12) -> dict:
         return {"items": items, **_page_meta(total, page, page_size)}
 
 
-def posts(page: int = 1, page_size: int = 20) -> dict:
+def posts(page: int = 1, page_size: int = 20, channel_id: int | None = None) -> dict:
     """Paginated raw post feed (most recent first) with views + preview."""
     page, page_size, offset = _clamp_page(page, page_size)
     with session_scope() as s:
-        total = s.scalar(select(func.count()).select_from(Post)) or 0
-        rows = s.scalars(select(Post).order_by(Post.posted_at.desc().nullslast(), Post.id.desc())
+        cq = select(func.count()).select_from(Post)
+        lq = select(Post)
+        if channel_id is not None:
+            cq = cq.where(Post.channel_id == channel_id)
+            lq = lq.where(Post.channel_id == channel_id)
+        total = s.scalar(cq) or 0
+        rows = s.scalars(lq.order_by(Post.posted_at.desc().nullslast(), Post.id.desc())
                          .offset(offset).limit(page_size)).all()
         items = [{"id": p.id, "posted_at": p.posted_at.isoformat() if p.posted_at else None,
                   "views": p.views, "forwards": p.forwards,
@@ -295,31 +311,31 @@ def _ist_range_to_utc(start_date, end_date):
     return start, end
 
 
-def analytics(start=None, end=None) -> dict:
+def analytics(start=None, end=None, channel_id: int | None = None) -> dict:
     from src.services.analytics import views as vv
 
     su, eu = _ist_range_to_utc(start, end)
     with session_scope() as s:
-        return vv.compute(s, start=su, end=eu)
+        return vv.compute(s, start=su, end=eu, channel_id=channel_id)
 
 
-def data_range() -> dict:
+def data_range(channel_id: int | None = None) -> dict:
     """Min/max IST post dates so the UI can bound its date pickers."""
     from src.services.analytics.periods import IST, owned_window
 
     with session_scope() as s:
-        w = owned_window(s)
+        w = owned_window(s, channel_id=channel_id)
     return {
         "min": w["start"].astimezone(IST).date().isoformat() if w.get("start") else None,
         "max": w["end"].astimezone(IST).date().isoformat() if w.get("end") else None,
     }
 
 
-def day_summary(day=None) -> dict:
+def day_summary(day=None, channel_id: int | None = None) -> dict:
     from src.services.analytics import day as dd
 
     with session_scope() as s:
-        return dd.summarize(s, day)
+        return dd.summarize(s, day, channel_id=channel_id)
 
 
 def comparison() -> dict:
@@ -329,23 +345,24 @@ def comparison() -> dict:
         return cmp.compare(s)
 
 
-def weekly_report(include_ai: bool = True) -> dict:
+def weekly_report(include_ai: bool = True, channel_id: int | None = None) -> dict:
     """The weekly report: the weekly campaign plan + what changed this period + top
     recommendations, plus (best-effort) an AI weekly briefing in plain language."""
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
 
     with session_scope() as s:
-        plan = s.scalar(select(CampaignPlan)
-                        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
-                               CampaignPlan.plan_type == PlanType.WEEKLY)
-                        .order_by(CampaignPlan.generated_at.desc()))
+        pq = select(CampaignPlan).where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                                        CampaignPlan.plan_type == PlanType.WEEKLY)
+        if channel_id is not None:
+            pq = pq.where(CampaignPlan.channel_id == channel_id)
+        plan = s.scalar(pq.order_by(CampaignPlan.generated_at.desc()))
         weekly = None
         if plan:
             weekly = {"title": plan.title, "blueprint": plan.blueprint,
                       "expected_outcome": plan.expected_outcome, "confidence": plan.confidence,
                       "generated_at": plan.generated_at.isoformat() if plan.generated_at else None}
-        reasoning = ctx.reasoning_insights(s)
-        recs = ctx.growth_recommendations(s, limit=6)
+        reasoning = ctx.reasoning_insights(s, channel_id=channel_id)
+        recs = ctx.growth_recommendations(s, limit=6, channel_id=channel_id)
 
     ai_summary = None
     if include_ai:
@@ -363,14 +380,21 @@ def weekly_report(include_ai: bool = True) -> dict:
             "what_changed": reasoning, "recommendations": recs, "ai_summary": ai_summary}
 
 
-def queue(page: int = 1, page_size: int = 20) -> dict:
+def queue(page: int = 1, page_size: int = 20, channel_id: int | None = None) -> dict:
     page, page_size, offset = _clamp_page(page, page_size)
     with session_scope() as s:
-        counts = dict(s.execute(
-            select(ScheduledPost.status, func.count()).group_by(ScheduledPost.status)).all())
-        total = s.scalar(select(func.count()).select_from(ScheduledPost)) or 0
-        rows = s.scalars(select(ScheduledPost)
-                         .order_by(ScheduledPost.scheduled_at)
+        cnt_q = select(ScheduledPost.status, func.count())
+        tot_q = select(func.count()).select_from(ScheduledPost)
+        lst_q = select(ScheduledPost)
+        if channel_id is not None:
+            # scope to the channel via the linked draft (ScheduledPost has no channel_id)
+            j = GeneratedPost.id == ScheduledPost.generated_post_id
+            cnt_q = cnt_q.join(GeneratedPost, j).where(GeneratedPost.channel_id == channel_id)
+            tot_q = tot_q.join(GeneratedPost, j).where(GeneratedPost.channel_id == channel_id)
+            lst_q = lst_q.join(GeneratedPost, j).where(GeneratedPost.channel_id == channel_id)
+        counts = dict(s.execute(cnt_q.group_by(ScheduledPost.status)).all())
+        total = s.scalar(tot_q) or 0
+        rows = s.scalars(lst_q.order_by(ScheduledPost.scheduled_at)
                          .offset(offset).limit(page_size)).all()
         # attach each draft's category (selection_bucket) so the day-plan is legible
         cats = {}

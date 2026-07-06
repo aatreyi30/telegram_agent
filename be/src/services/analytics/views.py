@@ -26,10 +26,11 @@ from src.db.models_normalization import NormalizedPost, SourceType
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-def _owned_rows(s: Session, start=None, end=None):
+def _owned_rows(s: Session, start=None, end=None, channel_id: int | None = None):
     """(posted_at, views, cluster_descriptor, merchant_key) for owned posts w/ views.
 
-    Optional [start, end) UTC datetimes restrict the posting-date window."""
+    Optional [start, end) UTC datetimes restrict the posting-date window.
+    Optional channel_id restricts to a single owned channel (multi-tenant scoping)."""
     q = (select(Post.posted_at, Post.views, PostTypeCluster.descriptor,
                 NormalizedPost.primary_merchant_key)
          .join(NormalizedPost, NormalizedPost.source_id == Post.id)
@@ -38,6 +39,8 @@ def _owned_rows(s: Session, start=None, end=None):
          .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id, isouter=True)
          .where(NormalizedPost.source_type == SourceType.OWNED, Post.views.isnot(None),
                 Post.posted_at.isnot(None)))
+    if channel_id is not None:
+        q = q.where(Post.channel_id == channel_id)
     if start is not None:
         q = q.where(Post.posted_at >= start)
     if end is not None:
@@ -51,12 +54,13 @@ def _agg(pairs: dict[str, list[int]]) -> list[dict]:
     return out
 
 
-def compute(s: Session, start=None, end=None) -> dict:
+def compute(s: Session, start=None, end=None, channel_id: int | None = None) -> dict:
     """All view aggregations in one pass, each with its period + sample.
 
     Optional [start, end) UTC datetimes restrict the window; ``window`` in the
-    result reflects the actual data span within that filter."""
-    rows = list(_owned_rows(s, start=start, end=end))
+    result reflects the actual data span within that filter. Optional channel_id
+    restricts to a single owned channel."""
+    rows = list(_owned_rows(s, start=start, end=end, channel_id=channel_id))
 
     by_day_views: dict[str, list[int]] = defaultdict(list)
     by_hour: dict[int, list[int]] = defaultdict(list)

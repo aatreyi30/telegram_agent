@@ -1,0 +1,303 @@
+# Growth Engine — Channel Bootstrapping & Optimization
+
+Version: 1.0
+
+Status: Core Intelligence Module
+
+---
+
+# Purpose
+
+The Growth Engine is responsible for solving the **cold start problem** for new Telegram deal channels and continuously optimizing established channels.
+
+It acts as an **AI Growth Strategist**, not an analytics tool.
+
+Its goal is to help a channel go from:
+
+> 0 subscribers → traction → stable growth → optimized scaling
+
+---
+
+# Core Principle
+
+New channels have no data.
+
+So the system must not rely on internal history at start.
+
+Instead it must bootstrap intelligence from:
+
+- Competitor channels
+- Merchant patterns
+- Category benchmarks
+- Industry posting behavior
+
+Then gradually transition into:
+
+> Channel-specific learning
+
+---
+
+# System Responsibilities
+
+## The Growth Engine MUST
+
+- Define channel positioning
+- Identify competitor benchmarks
+- Design starter content strategy
+- Recommend posting frequency
+- Recommend posting time windows
+- Recommend merchant mix
+- Recommend CTA strategy
+- Optimize early engagement
+- Detect early growth signals
+- Transition to personalized learning
+
+## The Growth Engine MUST NOT
+
+- Generate final posts (handled by Post Generation Engine)
+- Replace analytics systems
+- Replace Channel Learning Engine
+- Operate without competitor/benchmark context
+
+---
+
+# Phase 1 — Channel Identity Bootstrapping (Day 0)
+
+When a new channel is created, the system must define:
+
+## Channel Identity Blueprint
+
+- Channel type (loot / coupon / hybrid / niche)
+- Target audience profile
+- Merchant focus strategy
+- Content density strategy
+- Posting frequency baseline
+- Initial CTA strategy
+- Media strategy (text/image mix)
+
+Output:
+
+```
+Channel Identity Blueprint
+```
+
+---
+
+# Phase 2 — Competitor Injection Layer
+
+The system must identify:
+
+- Top 5–10 competing Telegram channels
+- Their posting behavior
+- Their content patterns
+- Their merchant mix
+- Their CTA strategies
+- Their engagement structure
+
+Then extract:
+
+- What works in this category
+- What fails in this category
+- What should be replicated
+- What should be avoided
+
+Output:
+
+```
+Competitor Benchmark Report
+```
+
+---
+
+# Phase 3 — Starter Growth Strategy (Day 1–7)
+
+The system generates a **starter growth plan**:
+
+## Content Mix
+
+- Loot Deals (high urgency)
+- Single Deals (fast conversion)
+- Curated Collections (discovery)
+
+## Strategy Includes
+
+- First 30 posts plan
+- Merchant rotation strategy
+- Category distribution strategy
+- CTA variation strategy
+- Emoji and formatting strategy
+
+Important:
+
+All recommendations must be derived from competitor + industry patterns.
+
+No hardcoded templates.
+
+---
+
+# Phase 4 — Early Growth Optimization Loop (Day 7–30)
+
+The system begins learning from real channel data:
+
+## Loop
+
+Post → Engagement → Analysis → Adjustment
+
+## Optimizations
+
+- Best posting time refinement
+- Best merchant identification
+- Best post type distribution
+- Best CTA performance
+- Best engagement format
+- Content pruning (remove low-performing patterns)
+
+---
+
+# Phase 5 — Channel-Specific Intelligence (30+ Days)
+
+The system transitions into:
+
+> Fully personalized growth model
+
+It learns:
+
+- Channel-specific audience behavior
+- Best performing merchants for THIS channel
+- Optimal posting frequency for THIS channel
+- Seasonal behavior for THIS audience
+- Long-term engagement patterns
+
+---
+
+# Growth Dashboard (New Channel Mode)
+
+Instead of traditional analytics, the dashboard focuses on actions.
+
+## It should answer:
+
+### 1. What should I post today?
+
+### 2. Why did yesterday’s posts perform the way they did?
+
+### 3. What should I change to grow faster?
+
+### 4. Which merchants should I prioritize?
+
+### 5. What is currently blocking growth?
+
+---
+
+## Dashboard Sections
+
+- 📈 Growth Actions Today
+- 🔥 Best Performing Post Patterns
+- 🕒 Recommended Posting Times
+- 🛍️ Merchant Strategy Suggestions
+- ⚠️ Growth Bottlenecks
+- 🚀 Next Optimization Steps
+
+---
+
+# AI Growth Coach Mode
+
+The Growth Engine acts like an AI strategist:
+
+It can answer:
+
+- Why am I not growing?
+- What should I post next?
+- Am I overusing Amazon deals?
+- Why did engagement drop?
+- What should I change today?
+- What strategy should I follow this week?
+
+---
+
+# Cold Start Strategy
+
+## Problem
+
+New channels have:
+
+- No engagement history
+- No audience data
+- No performance trends
+
+## Solution
+
+Bootstrap using:
+
+- Competitor intelligence
+- Industry benchmarks
+- Merchant seasonality
+- Category behavior patterns
+
+Then gradually shift to:
+
+> Channel-specific learning
+
+---
+
+# Growth Phases
+
+## Phase 1 — Zero Data (Day 0–7)
+- Competitor-driven strategy
+- High-frequency experimentation
+- Broad category testing
+
+## Phase 2 — Pattern Discovery (Day 7–30)
+- Identify high-performing content types
+- Remove weak formats
+- Optimize posting schedule
+
+## Phase 3 — Optimization (30+ Days)
+- Personalized predictions
+- Automated planning
+- Growth forecasting
+
+---
+
+# Events Consumed
+
+- ChannelCreated
+- CompetitorDataUpdated
+- PostPublished
+- PostEngagementUpdated
+- MerchantPerformanceUpdated
+- ChannelLearningUpdated
+
+---
+
+# Events Produced
+
+- GrowthStrategyGenerated
+- PostingPlanCreated
+- OptimizationRecommendationIssued
+- ChannelBenchmarkUpdated
+- GrowthAlertTriggered
+
+---
+
+# Success Criteria
+
+The Growth Engine is successful when:
+
+- New channels achieve early traction faster than manual strategies
+- Posting strategy improves within 7 days of launch
+- Competitor intelligence directly influences growth decisions
+- Channel-specific learning replaces generic benchmarks over time
+- Users rely on AI suggestions for daily posting decisions
+
+---
+
+# Out of Scope
+
+The Growth Engine does NOT:
+
+- Generate final posts
+- Replace analytics systems
+- Handle billing or monetization
+- Directly execute Telegram posting
+
+It only provides **growth intelligence and strategy recommendations**.

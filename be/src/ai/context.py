@@ -33,64 +33,73 @@ from src.db.models_learning import (
 from src.db.models_reasoning import REASONING_VERSION, ReasonedInsight
 
 
-def channel_overview(s: Session) -> dict:
-    ch = s.scalars(select(Channel).order_by(Channel.participants_count.desc())).first()
+def channel_overview(s: Session, channel_id: int | None = None) -> dict:
+    q = select(Channel)
+    q = q.where(Channel.id == channel_id) if channel_id is not None \
+        else q.order_by(Channel.participants_count.desc())
+    ch = s.scalars(q).first()
     if not ch:
         return {"available": False}
     return {"available": True, "title": ch.title, "username": ch.username,
             "subscribers": ch.participants_count}
 
 
-def _owned_window_desc(s: Session) -> str:
+def _owned_window_desc(s: Session, channel_id: int | None = None) -> str:
     from src.services.analytics.periods import owned_window
-    w = owned_window(s)
+    w = owned_window(s, channel_id=channel_id)
     return f"owned, last {w['months']} mo"
 
 
-def reasoning_insights(s: Session) -> list[dict]:
+def reasoning_insights(s: Session, channel_id: int | None = None) -> list[dict]:
+    q = select(ReasonedInsight).where(ReasonedInsight.reasoning_version == REASONING_VERSION)
+    if channel_id is not None:
+        q = q.where(ReasonedInsight.channel_id == channel_id)
     return [{"metric": i.metric, "direction": i.direction,
              "change": i.change_value, "unit": i.change_unit,
              "observation": i.observation, "why": i.reasoning,
              "period": i.period_label, "evidence": i.evidence,
              "confidence": i.confidence}
-            for i in s.scalars(select(ReasonedInsight).where(
-                ReasonedInsight.reasoning_version == REASONING_VERSION)
-                .order_by(ReasonedInsight.confidence.desc()))]
+            for i in s.scalars(q.order_by(ReasonedInsight.confidence.desc()))]
 
 
-def growth_recommendations(s: Session, limit: int = 8) -> list[dict]:
+def growth_recommendations(s: Session, limit: int = 8, channel_id: int | None = None) -> list[dict]:
+    q = select(GrowthRecommendation).where(GrowthRecommendation.growth_version == GROWTH_VERSION)
+    if channel_id is not None:
+        q = q.where(GrowthRecommendation.channel_id == channel_id)
     return [{"priority": r.priority, "category": r.category,
              "recommendation": r.recommendation, "reasoning": r.reasoning,
              "evidence": r.evidence, "confidence": r.confidence,
              "expected_outcome": r.expected_outcome}
-            for r in s.scalars(select(GrowthRecommendation)
-                .where(GrowthRecommendation.growth_version == GROWTH_VERSION)
-                .order_by(GrowthRecommendation.priority).limit(limit))]
+            for r in s.scalars(q.order_by(GrowthRecommendation.priority).limit(limit))]
 
 
-def growth_blueprint(s: Session) -> dict:
-    strat = s.scalar(select(GrowthStrategy).where(
-        GrowthStrategy.growth_version == GROWTH_VERSION))
+def growth_blueprint(s: Session, channel_id: int | None = None) -> dict:
+    q = select(GrowthStrategy).where(GrowthStrategy.growth_version == GROWTH_VERSION)
+    if channel_id is not None:
+        q = q.where(GrowthStrategy.channel_id == channel_id)
+    strat = s.scalar(q)
     if not strat:
         return {"available": False}
     return {"available": True, "mode": strat.mode, "channel_type": strat.channel_type,
             "blueprint": strat.blueprint, "confidence": strat.confidence}
 
 
-def post_type_performance(s: Session) -> list[dict]:
+def post_type_performance(s: Session, channel_id: int | None = None) -> list[dict]:
+    q = select(PostTypePerformance).where(PostTypePerformance.learning_version == LEARNING_VERSION)
+    if channel_id is not None:
+        q = q.where(PostTypePerformance.channel_id == channel_id)
     return [{"post_type": p.post_type, "posts": p.post_count, "share": p.share,
              "avg_views_per_day": p.avg_views_per_day, "rank": p.rank_by_views_per_day}
-            for p in s.scalars(select(PostTypePerformance)
-                .where(PostTypePerformance.learning_version == LEARNING_VERSION)
-                .order_by(PostTypePerformance.rank_by_views_per_day))]
+            for p in s.scalars(q.order_by(PostTypePerformance.rank_by_views_per_day))]
 
 
-def learnings(s: Session) -> list[dict]:
-    window = _owned_window_desc(s)
+def learnings(s: Session, channel_id: int | None = None) -> list[dict]:
+    window = _owned_window_desc(s, channel_id=channel_id)
+    q = select(LearningRecord).where(LearningRecord.learning_version == LEARNING_VERSION)
+    if channel_id is not None:
+        q = q.where(LearningRecord.channel_id == channel_id)
     out = []
-    for r in s.scalars(select(LearningRecord)
-            .where(LearningRecord.learning_version == LEARNING_VERSION)
-            .order_by(LearningRecord.confidence.desc())):
+    for r in s.scalars(q.order_by(LearningRecord.confidence.desc())):
         how = None
         if r.metric_value is not None and r.comparison_value:
             lift = (r.metric_value / r.comparison_value - 1) * 100
@@ -102,9 +111,11 @@ def learnings(s: Session) -> list[dict]:
     return out
 
 
-def channel_style(s: Session) -> dict:
-    st = s.scalar(select(ChannelStyleProfile).where(
-        ChannelStyleProfile.learning_version == LEARNING_VERSION))
+def channel_style(s: Session, channel_id: int | None = None) -> dict:
+    q = select(ChannelStyleProfile).where(ChannelStyleProfile.learning_version == LEARNING_VERSION)
+    if channel_id is not None:
+        q = q.where(ChannelStyleProfile.channel_id == channel_id)
+    st = s.scalar(q)
     if not st:
         return {"available": False}
     return {"available": True, "avg_caption_len": st.avg_caption_len,
@@ -148,16 +159,19 @@ def competitor_profiles(s: Session) -> list[dict]:
                 .order_by(CompetitorProfile.post_count.desc()))]
 
 
-def full_briefing_context(s: Session) -> dict:
-    """Everything the briefing generator needs, as one grounded bundle."""
+def full_briefing_context(s: Session, channel_id: int | None = None) -> dict:
+    """Everything the briefing generator needs, as one grounded bundle.
+
+    Owned-channel context is scoped to channel_id when given; merchant and competitor
+    context is shared market data (competitor scoping is per-org, handled elsewhere)."""
     return {
-        "channel": channel_overview(s),
-        "what_changed_and_why": reasoning_insights(s),
-        "growth_recommendations": growth_recommendations(s),
-        "post_type_performance": post_type_performance(s),
+        "channel": channel_overview(s, channel_id=channel_id),
+        "what_changed_and_why": reasoning_insights(s, channel_id=channel_id),
+        "growth_recommendations": growth_recommendations(s, channel_id=channel_id),
+        "post_type_performance": post_type_performance(s, channel_id=channel_id),
         "competitor_signals": competitor_signals(s),
         "merchant_opportunities": merchant_opportunities(s),
-        "channel_style": channel_style(s),
+        "channel_style": channel_style(s, channel_id=channel_id),
     }
 
 

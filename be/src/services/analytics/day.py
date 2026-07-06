@@ -25,39 +25,42 @@ def _ist_bounds(day: date):
     return start, start + timedelta(days=1)
 
 
-def _rows_between(s: Session, start, end):
-    return s.execute(
-        select(Post.id, Post.posted_at, Post.views, Post.text,
-               PostTypeCluster.descriptor, NormalizedPost.primary_merchant_key)
-        .join(NormalizedPost, NormalizedPost.source_id == Post.id)
-        .join(PostClassification,
-              PostClassification.normalized_post_id == NormalizedPost.id, isouter=True)
-        .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id, isouter=True)
-        .where(NormalizedPost.source_type == SourceType.OWNED,
-               Post.posted_at >= start, Post.posted_at < end)
-    ).all()
+def _rows_between(s: Session, start, end, channel_id: int | None = None):
+    q = (select(Post.id, Post.posted_at, Post.views, Post.text,
+                PostTypeCluster.descriptor, NormalizedPost.primary_merchant_key)
+         .join(NormalizedPost, NormalizedPost.source_id == Post.id)
+         .join(PostClassification,
+               PostClassification.normalized_post_id == NormalizedPost.id, isouter=True)
+         .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id, isouter=True)
+         .where(NormalizedPost.source_type == SourceType.OWNED,
+                Post.posted_at >= start, Post.posted_at < end))
+    if channel_id is not None:
+        q = q.where(Post.channel_id == channel_id)
+    return s.execute(q).all()
 
 
-def latest_owned_date(s: Session) -> date | None:
+def latest_owned_date(s: Session, channel_id: int | None = None) -> date | None:
     """The most recent IST date on which the owned channel has a post."""
     from sqlalchemy import func
 
-    mx = s.scalar(
-        select(func.max(Post.posted_at))
-        .join(NormalizedPost, NormalizedPost.source_id == Post.id)
-        .where(NormalizedPost.source_type == SourceType.OWNED))
+    q = (select(func.max(Post.posted_at))
+         .join(NormalizedPost, NormalizedPost.source_id == Post.id)
+         .where(NormalizedPost.source_type == SourceType.OWNED))
+    if channel_id is not None:
+        q = q.where(Post.channel_id == channel_id)
+    mx = s.scalar(q)
     return mx.astimezone(IST).date() if mx else None
 
 
-def summarize(s: Session, day: date | None = None) -> dict:
+def summarize(s: Session, day: date | None = None, channel_id: int | None = None) -> dict:
     # default to the latest date that actually has posts (not calendar "today",
     # which may be after the last collection and would look empty)
     if day is None:
-        day = latest_owned_date(s)
+        day = latest_owned_date(s, channel_id=channel_id)
         if day is None:
             return {"date": None, "available": False, "note": "No owned posts collected yet."}
     start, end = _ist_bounds(day)
-    rows = list(_rows_between(s, start, end))
+    rows = list(_rows_between(s, start, end, channel_id=channel_id))
     if not rows:
         return {"date": day.isoformat(), "available": False,
                 "note": "No posts on this date (IST). Pick a date within your collected range."}
@@ -77,7 +80,7 @@ def summarize(s: Session, day: date | None = None) -> dict:
 
     # trailing 30-day average posts/day + avg views/post (excludes the day itself)
     prior_start = start - timedelta(days=30)
-    prior = list(_rows_between(s, prior_start, start))
+    prior = list(_rows_between(s, prior_start, start, channel_id=channel_id))
     prior_days = 30
     prior_views = [r[2] for r in prior if r[2] is not None]
     baseline = {

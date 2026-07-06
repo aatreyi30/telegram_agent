@@ -12,13 +12,9 @@ import { Insights } from "./routes/Insights";
 import { Analytics } from "./routes/Analytics";
 import { DayView } from "./routes/DayView";
 import { Competitors } from "./routes/Competitors";
-import { Merchants } from "./routes/Merchants";
 import { Plan } from "./routes/Plan";
 import { Drafts } from "./routes/Drafts";
 import { Queue } from "./routes/Queue";
-import { Agent } from "./routes/Agent";
-import { Schedulers } from "./routes/Schedulers";
-import { Comparison } from "./routes/Comparison";
 import { Settings } from "./routes/Settings";
 
 const qc = new QueryClient({
@@ -42,15 +38,11 @@ createRoot(document.getElementById("root")!).render(
               }
             >
               <Route index element={<Overview />} />
-              <Route path="agent" element={<Agent />} />
-              <Route path="schedulers" element={<Schedulers />} />
               <Route path="insights" element={<Insights />} />
               <Route path="analytics" element={<Analytics />} />
               <Route path="weekly" element={<Navigate to="/app/plan" replace />} />
               <Route path="day" element={<DayView />} />
               <Route path="competitors" element={<Competitors />} />
-              <Route path="comparison" element={<Comparison />} />
-              <Route path="merchants" element={<Merchants />} />
               <Route path="plan" element={<Plan />} />
               <Route path="drafts" element={<Drafts />} />
               <Route path="queue" element={<Queue />} />

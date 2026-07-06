@@ -2,8 +2,8 @@ import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  BarChart3, Bot, CalendarDays, Clock, GitCompare, LayoutDashboard, Lightbulb,
-  ListOrdered, LogOut, Menu, Package, Send, Settings as SettingsIcon, Store, Users2,
+  BarChart3, CalendarDays, LayoutDashboard, Lightbulb,
+  ListOrdered, LogOut, Menu, Package, Send, Settings as SettingsIcon, Users2,
 } from "lucide-react";
 import { api } from "@/services/api";
 import { useAuth } from "@/providers/auth";
@@ -13,14 +13,10 @@ import { Logo } from "./Logo";
 // Grouped so the sidebar reads clearly: what runs it, what it learned, what it produced.
 const NAV = [
   { to: "/app", label: "Overview", icon: LayoutDashboard, end: true, group: "" },
-  { to: "/app/agent", label: "Agent", icon: Bot, group: "Run" },
-  { to: "/app/schedulers", label: "Schedulers", icon: Clock, group: "Run" },
   { to: "/app/insights", label: "Insights", icon: Lightbulb, group: "Understand" },
   { to: "/app/analytics", label: "Analytics", icon: BarChart3, group: "Understand" },
   { to: "/app/day", label: "Day view", icon: CalendarDays, group: "Understand" },
   { to: "/app/competitors", label: "Competitors", icon: Users2, group: "Understand" },
-  { to: "/app/comparison", label: "You vs competitors", icon: GitCompare, group: "Understand" },
-  { to: "/app/merchants", label: "Merchants", icon: Store, group: "Understand" },
   { to: "/app/plan", label: "Plan", icon: ListOrdered, group: "Act" },
   { to: "/app/drafts", label: "Drafts", icon: Send, group: "Act" },
   { to: "/app/queue", label: "Schedule", icon: Package, group: "Act" },

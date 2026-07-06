@@ -23,11 +23,13 @@ def _months(days: float) -> float:
     return round(days / 30.44, 1)
 
 
-def owned_window(s: Session) -> dict:
+def owned_window(s: Session, channel_id: int | None = None) -> dict:
     """Date range + post count of OWNED posts that carry a view figure."""
     q = (select(func.min(Post.posted_at), func.max(Post.posted_at), func.count(Post.id))
          .join(NormalizedPost, NormalizedPost.source_id == Post.id)
          .where(NormalizedPost.source_type == SourceType.OWNED, Post.views.isnot(None)))
+    if channel_id is not None:
+        q = q.where(Post.channel_id == channel_id)
     start, end, n = s.execute(q).one()
     days = ((end - start).days if start and end else 0)
     return {"source": "owned", "start": start, "end": end, "days": days,
