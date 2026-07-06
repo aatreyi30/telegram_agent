@@ -322,11 +322,11 @@ def day_summary(day=None) -> dict:
         return dd.summarize(s, day)
 
 
-def comparison() -> dict:
+def comparison(window_days: int | None = None) -> dict:
     from src.services.analytics import comparison as cmp
 
     with session_scope() as s:
-        return cmp.compare(s)
+        return cmp.compare(s, window_days=window_days)
 
 
 def growth() -> dict:

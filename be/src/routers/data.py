@@ -81,8 +81,8 @@ def weekly():
 
 
 @router.get("/comparison")
-def comparison():
-    return ok(service.comparison())
+def comparison(window: int | None = Query(default=None, description="Window in days (7/30/90). Omit for all data.")):
+    return ok(service.comparison(window_days=window))
 
 
 @router.get("/growth")
