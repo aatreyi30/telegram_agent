@@ -2,7 +2,7 @@ import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  BarChart3, Bot, CalendarDays, CalendarRange, Clock, GitCompare, LayoutDashboard, Lightbulb,
+  BarChart3, Bot, CalendarDays, Clock, GitCompare, LayoutDashboard, Lightbulb,
   ListOrdered, LogOut, Menu, Package, Send, Settings as SettingsIcon, Store, Users2,
 } from "lucide-react";
 import { api } from "@/services/api";
@@ -17,7 +17,6 @@ const NAV = [
   { to: "/app/schedulers", label: "Schedulers", icon: Clock, group: "Run" },
   { to: "/app/insights", label: "Insights", icon: Lightbulb, group: "Understand" },
   { to: "/app/analytics", label: "Analytics", icon: BarChart3, group: "Understand" },
-  { to: "/app/weekly", label: "Weekly report", icon: CalendarRange, group: "Understand" },
   { to: "/app/day", label: "Day view", icon: CalendarDays, group: "Understand" },
   { to: "/app/competitors", label: "Competitors", icon: Users2, group: "Understand" },
   { to: "/app/comparison", label: "You vs competitors", icon: GitCompare, group: "Understand" },
