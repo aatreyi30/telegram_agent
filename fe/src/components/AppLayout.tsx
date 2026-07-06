@@ -2,25 +2,30 @@ import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  BarChart3, CalendarDays, LayoutDashboard, Lightbulb, ListOrdered, LogOut,
-  Menu, Package, Send, Settings as SettingsIcon, Store, Users2,
+  BarChart3, Bot, CalendarDays, CalendarRange, Clock, GitCompare, LayoutDashboard, Lightbulb,
+  ListOrdered, LogOut, Menu, Package, Send, Settings as SettingsIcon, Store, Users2,
 } from "lucide-react";
 import { api } from "@/services/api";
 import { useAuth } from "@/providers/auth";
 import { cn } from "@/lib/utils";
 import { Logo } from "./Logo";
 
+// Grouped so the sidebar reads clearly: what runs it, what it learned, what it produced.
 const NAV = [
-  { to: "/app", label: "Overview", icon: LayoutDashboard, end: true },
-  { to: "/app/insights", label: "Insights", icon: Lightbulb },
-  { to: "/app/analytics", label: "Analytics", icon: BarChart3 },
-  { to: "/app/day", label: "Day view", icon: CalendarDays },
-  { to: "/app/competitors", label: "Competitors", icon: Users2 },
-  { to: "/app/merchants", label: "Merchants", icon: Store },
-  { to: "/app/plan", label: "Plan", icon: ListOrdered },
-  { to: "/app/drafts", label: "Drafts", icon: Send },
-  { to: "/app/queue", label: "Schedule", icon: Package },
-  { to: "/app/settings", label: "Settings", icon: SettingsIcon },
+  { to: "/app", label: "Overview", icon: LayoutDashboard, end: true, group: "" },
+  { to: "/app/agent", label: "Agent", icon: Bot, group: "Run" },
+  { to: "/app/schedulers", label: "Schedulers", icon: Clock, group: "Run" },
+  { to: "/app/insights", label: "Insights", icon: Lightbulb, group: "Understand" },
+  { to: "/app/analytics", label: "Analytics", icon: BarChart3, group: "Understand" },
+  { to: "/app/weekly", label: "Weekly report", icon: CalendarRange, group: "Understand" },
+  { to: "/app/day", label: "Day view", icon: CalendarDays, group: "Understand" },
+  { to: "/app/competitors", label: "Competitors", icon: Users2, group: "Understand" },
+  { to: "/app/comparison", label: "You vs competitors", icon: GitCompare, group: "Understand" },
+  { to: "/app/merchants", label: "Merchants", icon: Store, group: "Understand" },
+  { to: "/app/plan", label: "Plan", icon: ListOrdered, group: "Act" },
+  { to: "/app/drafts", label: "Drafts", icon: Send, group: "Act" },
+  { to: "/app/queue", label: "Schedule", icon: Package, group: "Act" },
+  { to: "/app/settings", label: "Settings", icon: SettingsIcon, group: "" },
 ];
 
 export function AppLayout() {
@@ -41,22 +46,28 @@ export function AppLayout() {
         <div className="flex h-14 items-center border-b border-white/10 px-4">
           <Logo />
         </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto p-3">
-          {NAV.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.end}
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                  isActive ? "bg-primary text-primary-foreground" : "text-sidebar-foreground/75 hover:bg-white/10 hover:text-white"
-                )
-              }
-            >
-              <n.icon size={18} /> {n.label}
-            </NavLink>
+        <nav className="flex-1 space-y-0.5 overflow-y-auto p-3">
+          {NAV.map((n, i) => (
+            <div key={n.to}>
+              {n.group && NAV[i - 1]?.group !== n.group && (
+                <div className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+                  {n.group}
+                </div>
+              )}
+              <NavLink
+                to={n.to}
+                end={n.end}
+                onClick={() => setOpen(false)}
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                    isActive ? "bg-primary text-primary-foreground" : "text-sidebar-foreground/75 hover:bg-white/10 hover:text-white"
+                  )
+                }
+              >
+                <n.icon size={18} /> {n.label}
+              </NavLink>
+            </div>
           ))}
         </nav>
         <div className="border-t border-white/10 p-3 text-xs text-sidebar-foreground/60">

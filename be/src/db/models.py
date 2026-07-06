@@ -38,6 +38,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin
 
+# Channel has a ForeignKey to organizations; importing the org models here
+# guarantees that table is registered on Base.metadata whenever this module is
+# loaded in isolation (e.g. a collector that only imports Channel), so SQLAlchemy
+# can always resolve the FK. No circular import (models_org imports only base).
+from src.db import models_org  # noqa: F401,E402
+
 # --------------------------------------------------------------------------- #
 # System-level constant vocabularies (constraints, NOT learned categories)
 # --------------------------------------------------------------------------- #

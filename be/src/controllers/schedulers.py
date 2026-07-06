@@ -1,0 +1,442 @@
+"""Scheduler registry — the 20 background jobs from the Scheduler Architecture spec.
+
+Each job runs at its specified cadence, is idempotent + retry-safe, and writes a
+SchedulerRun log (start/end, records, success/failure, duration, retry, status,
+error). Retry policy: 5 → 15 → 30 min, then mark failed + notify.
+
+The whole registry is OFF by default (spec cadences hit live Telegram + the scrape
+source constantly). Start/stop it from the Schedulers page; run any job on demand.
+
+Access-limited jobs (reactions/reach, price history, revenue) do whatever is
+possible and record status='limited: <reason>' — they never fabricate data.
+"""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Callable
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+from src.logger import get_logger
+
+logger = get_logger(__name__)
+_RETRY_DELAYS_MIN = [5, 15, 30]
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+@dataclass
+class Job:
+    key: str
+    name: str
+    cadence: str          # human label
+    trigger: object       # APScheduler trigger
+    priority: str         # critical | high | medium | low
+    fn: Callable[[], dict]
+
+
+# --------------------------------------------------------------------------- #
+# Job implementations — each returns {processed, success, failure, detail, status?}
+# or raises (→ retry). "limited" jobs set status="limited".
+# --------------------------------------------------------------------------- #
+def _job_runner():
+    from src.services.collection.base import JobRunner
+    return JobRunner()
+
+
+def j_telegram_sync() -> dict:
+    from src.config.settings import get_settings
+    from src.db.models import CollectionType
+    from src.services.collection.telegram_owned import OwnedChannelCollector
+    added = 0
+    r = _job_runner()
+    for ch in get_settings().owned_channels:
+        job = r.run_collector(OwnedChannelCollector(ch, CollectionType.INCREMENTAL),
+                              collection_type=CollectionType.INCREMENTAL, target=ch)
+        added += job.records_added or 0
+    return {"processed": added, "detail": f"+{added} new owned posts"}
+
+
+def j_competitor_sync() -> dict:
+    from src.config.settings import get_settings
+    from src.db.models import CollectionType
+    from src.services.collection.telegram_competitor import CompetitorCollector
+    added = 0
+    r = _job_runner()
+    for u in get_settings().competitor_channels:
+        job = r.run_collector(CompetitorCollector(u, max_pages=1),
+                              collection_type=CollectionType.INCREMENTAL, target=u)
+        added += job.records_added or 0
+    # also pull tracked (discovered) competitors from the DB
+    from sqlalchemy import select
+    from src.db.models import Competitor
+    from src.db.session import session_scope
+    with session_scope() as s:
+        extra = [c.username for c in s.scalars(select(Competitor)) if c.username]
+    for u in extra:
+        if u in get_settings().competitor_channels:
+            continue
+        try:
+            job = r.run_collector(CompetitorCollector(u, max_pages=1),
+                                  collection_type=CollectionType.INCREMENTAL, target=u)
+            added += job.records_added or 0
+        except Exception:
+            pass
+    return {"processed": added, "detail": f"+{added} competitor posts"}
+
+
+def j_stats_refresh() -> dict:
+    from src.config.settings import get_settings
+    from src.db.models import CollectionType
+    from src.services.collection.telegram_owned import OwnedChannelCollector
+    r = _job_runner()
+    n = 0
+    for ch in get_settings().owned_channels:
+        job = r.run_collector(OwnedChannelCollector(ch, CollectionType.ANALYTICS),
+                              collection_type=CollectionType.ANALYTICS, target=ch)
+        n += job.records_updated or 0
+    return {"processed": n, "detail": f"views refreshed (reactions/forwards need admin/bot)"}
+
+
+def _run_engine(engine, target) -> int:
+    from src.db.models import CollectionType
+    job = _job_runner().run_collector(engine, collection_type=CollectionType.MANUAL, target=target)
+    return (job.records_added or 0) + (job.records_updated or 0)
+
+
+def j_deal_ranking() -> dict:
+    return {"processed": 0, "status": "limited",
+            "detail": "limited: ranking runs at generation time; live re-score needs stored per-deal metrics"}
+
+
+def j_price_history() -> dict:
+    return {"processed": 0, "status": "limited",
+            "detail": "limited: per-product price scraping unavailable for most merchants (blocked/no API)"}
+
+
+def j_deal_monitoring() -> dict:
+    return {"processed": 0, "status": "limited",
+            "detail": "limited: per-deal stock/price checks need per-merchant scraping; URL/expiry via url_health"}
+
+
+def j_growth_detection() -> dict:
+    from src.services.intelligence.growth import GrowthEngine
+    n = _run_engine(GrowthEngine(), "growth")
+    return {"processed": n, "detail": "growth recommendations refreshed"}
+
+
+def j_competitor_intel() -> dict:
+    # discover first, THEN generate competitor intelligence over all tracked channels
+    added = 0
+    try:
+        from src.services.collection.discovery import discover_competitors
+        added = discover_competitors(max_add=5).get("added", 0)
+    except Exception as e:
+        logger.warning("[sched] discovery skipped: %s", e)
+    from src.services.intelligence.competitor import CompetitorIntelligenceEngine
+    n = _run_engine(CompetitorIntelligenceEngine(), "competitor-intel")
+    return {"processed": n, "detail": f"+{added} discovered; competitor intel refreshed"}
+
+
+def _briefing(weekly=False) -> str:
+    from src.ai.briefing import BriefingGenerator
+    return BriefingGenerator().generate(weekly=weekly)
+
+
+def j_ai_daily_summary() -> dict:
+    try:
+        txt = _briefing(False)
+        return {"processed": 1, "detail": (txt or "").split("\n")[0][:80]}
+    except Exception as e:
+        return {"processed": 0, "status": "limited", "detail": f"limited: AI unavailable ({e})"}
+
+
+def j_weekly_report() -> dict:
+    from src.services.planning.campaign import CampaignPlanningEngine
+    _run_engine(CampaignPlanningEngine(), "plan")     # ensure weekly plan is fresh
+    try:
+        _briefing(True)
+        return {"processed": 1, "detail": "weekly plan + AI summary refreshed"}
+    except Exception:
+        return {"processed": 1, "detail": "weekly plan refreshed (AI summary skipped)"}
+
+
+def j_monthly_report() -> dict:
+    from sqlalchemy import func, select
+    from src.db.models import Post
+    from src.db.session import session_scope
+    with session_scope() as s:
+        month_ago = _now() - timedelta(days=30)
+        posts = s.scalar(select(func.count()).select_from(Post).where(Post.posted_at >= month_ago)) or 0
+    return {"processed": posts, "status": "limited",
+            "detail": f"{posts} posts/30d summarized; revenue estimates: limited (no sales data)"}
+
+
+def j_learning() -> dict:
+    from src.services.learning.channel_learning import ChannelLearningEngine
+    n = _run_engine(ChannelLearningEngine(), "learn")
+    return {"processed": n, "detail": "learning dataset (emoji/CTA/merchant/category) rebuilt"}
+
+
+def j_queue_processor() -> dict:
+    from src.services.automation.scheduler import PostingScheduler
+    stats = PostingScheduler().process_due(pacing_seconds=0)
+    return {"processed": stats.get("due", 0), "success": stats.get("published", 0),
+            "failure": stats.get("failed", 0),
+            "detail": f"{stats.get('due',0)} due · {stats.get('blocked',0)} blocked (send gated on admin)"}
+
+
+def _url_health(limit: int) -> dict:
+    import httpx
+    from sqlalchemy import select
+    from src.db.models_generation import EnrichedDeal
+    from src.db.session import session_scope
+    with session_scope() as s:
+        urls = [d.clean_url or d.url for d in s.scalars(
+            select(EnrichedDeal).order_by(EnrichedDeal.id.desc()).limit(limit)) if (d.clean_url or d.url)]
+    ok = broken = 0
+    with httpx.Client(timeout=8.0, follow_redirects=True) as c:
+        for u in urls[:limit]:
+            try:
+                r = c.head(u)
+                if r.status_code < 400 or r.status_code in (403, 405, 429):  # blocked != broken
+                    ok += 1
+                else:
+                    broken += 1
+            except Exception:
+                broken += 1
+    return {"processed": len(urls[:limit]), "success": ok, "failure": broken,
+            "detail": f"{ok} ok / {broken} broken of {len(urls[:limit])} checked"}
+
+
+def j_deal_expiry() -> dict:
+    return _url_health(limit=15)
+
+
+def j_url_health() -> dict:
+    return _url_health(limit=40)
+
+
+def j_analytics_aggregation() -> dict:
+    from src.services.analytics import views as vv
+    from src.db.session import session_scope
+    with session_scope() as s:
+        a = vv.compute(s)
+    return {"processed": a.get("total_posts", 0), "detail": f"aggregated {a.get('total_posts',0)} posts"}
+
+
+def j_merchant_feed_sync() -> dict:
+    from src.services.generation.deal_source import DealSourceClient
+    from src.services.generation.enrichment import DealEnrichmentEngine, RawDeal
+    from src.db.session import session_scope
+    client = DealSourceClient()
+    ok, reason = client.available()
+    if not ok:
+        return {"processed": 0, "status": "limited", "detail": f"limited: {reason}"}
+    raw = client.fetch_latest(limit=24)
+    with session_scope() as s:
+        deals = DealEnrichmentEngine(s).enrich_batch([RawDeal(**r.__dict__) if not isinstance(r, RawDeal) else r for r in raw])
+        n = len(deals)
+    return {"processed": n, "detail": f"+{n} deals enriched/queued"}
+
+
+def j_notification_engine() -> dict:
+    from sqlalchemy import func, select
+    from src.db.models_automation import ScheduledPost, ScheduleStatus
+    from src.db.models_scheduler import RunStatus, SchedulerRun
+    from src.db.session import session_scope
+    with session_scope() as s:
+        blocked = s.scalar(select(func.count()).select_from(ScheduledPost)
+                           .where(ScheduledPost.status == ScheduleStatus.BLOCKED)) or 0
+        failed = s.scalar(select(func.count()).select_from(SchedulerRun)
+                          .where(SchedulerRun.status == RunStatus.FAILED)) or 0
+    alerts = []
+    if blocked:
+        alerts.append(f"{blocked} posts blocked (need admin rights)")
+    if failed:
+        alerts.append(f"{failed} scheduler failures")
+    return {"processed": len(alerts), "status": "limited" if not alerts else "success",
+            "detail": ("; ".join(alerts) if alerts else "no alerts (in-app only; no push channel configured)")}
+
+
+def j_org_health() -> dict:
+    from src.config.settings import get_settings
+    from src.services.generation.deal_source import DealSourceClient
+    s = get_settings()
+    checks = {
+        "telegram_creds": bool(s.telegram_api_id and s.telegram_api_hash),
+        "affiliate_provider": s.affiliate_provider_name != "generic",
+        "deal_source": DealSourceClient().available()[0],
+        "ai": s.ai_available,
+    }
+    healthy = sum(1 for v in checks.values() if v)
+    return {"processed": len(checks), "success": healthy, "failure": len(checks) - healthy,
+            "detail": " · ".join(f"{k}:{'ok' if v else 'no'}" for k, v in checks.items())}
+
+
+def j_db_cleanup() -> dict:
+    from src.db.models import CollectionEvent
+    from src.db.models_scheduler import SchedulerRun
+    from src.db.session import session_scope
+    cutoff = _now() - timedelta(days=30)
+    removed = 0
+    with session_scope() as s:
+        removed += s.query(SchedulerRun).filter(SchedulerRun.started_at < cutoff).delete()
+        removed += s.query(CollectionEvent).filter(CollectionEvent.created_at < cutoff).delete()
+    return {"processed": removed, "detail": f"pruned {removed} old log rows (>30d)"}
+
+
+# --------------------------------------------------------------------------- #
+JOBS: list[Job] = [
+    Job("telegram_sync", "Telegram Channel Sync", "every 5 min", IntervalTrigger(minutes=5), "critical", j_telegram_sync),
+    Job("competitor_sync", "Competitor Channel Sync", "every 10 min", IntervalTrigger(minutes=10), "high", j_competitor_sync),
+    Job("stats_refresh", "Message Statistics Refresh", "every 30 min", IntervalTrigger(minutes=30), "high", j_stats_refresh),
+    Job("deal_monitoring", "Deal Monitoring", "every 2 h", IntervalTrigger(hours=2), "critical", j_deal_monitoring),
+    Job("price_history", "Price History Update", "every 6 h", IntervalTrigger(hours=6), "medium", j_price_history),
+    Job("deal_ranking", "Deal Ranking Engine", "every 30 min", IntervalTrigger(minutes=30), "high", j_deal_ranking),
+    Job("growth_detection", "Growth Opportunity Detection", "daily 06:00", CronTrigger(hour=6, minute=0), "medium", j_growth_detection),
+    Job("competitor_intel", "Competitor Intelligence", "daily 07:00", CronTrigger(hour=7, minute=0), "medium", j_competitor_intel),
+    Job("ai_daily_summary", "AI Daily Summary", "daily 08:00", CronTrigger(hour=8, minute=0), "medium", j_ai_daily_summary),
+    Job("weekly_report", "Weekly Report", "Mon 08:30", CronTrigger(day_of_week="mon", hour=8, minute=30), "medium", j_weekly_report),
+    Job("monthly_report", "Monthly Report", "1st 00:00", CronTrigger(day=1, hour=0, minute=5), "medium", j_monthly_report),
+    Job("learning", "AI Learning Dataset Builder", "daily 02:00", CronTrigger(hour=2, minute=0), "medium", j_learning),
+    Job("deal_expiry", "Deal Expiry Monitor", "every 1 h", IntervalTrigger(hours=1), "high", j_deal_expiry),
+    Job("queue_processor", "Scheduler Queue Processor", "every 1 min", IntervalTrigger(minutes=1), "critical", j_queue_processor),
+    Job("url_health", "URL Health Check", "every 12 h", IntervalTrigger(hours=12), "low", j_url_health),
+    Job("analytics_aggregation", "Analytics Aggregation", "every 1 h", IntervalTrigger(hours=1), "low", j_analytics_aggregation),
+    Job("merchant_feed_sync", "Merchant Feed Sync", "every 30 min", IntervalTrigger(minutes=30), "high", j_merchant_feed_sync),
+    Job("notification_engine", "Notification Engine", "every 5 min", IntervalTrigger(minutes=5), "medium", j_notification_engine),
+    Job("org_health", "Organization Health Check", "every 1 h", IntervalTrigger(hours=1), "low", j_org_health),
+    Job("db_cleanup", "Database Cleanup", "daily 03:00", CronTrigger(hour=3, minute=0), "low", j_db_cleanup),
+]
+
+
+class SchedulerRegistry:
+    def __init__(self) -> None:
+        self._sched = BackgroundScheduler(job_defaults={"coalesce": True, "max_instances": 1})
+        self._by_key = {j.key: j for j in JOBS}
+        self._attempts: dict[str, int] = {}
+        self.enabled = False
+        self._lock = threading.Lock()
+
+    # ---- lifecycle ---- #
+    def start(self) -> dict:
+        if not self._sched.running:
+            self._sched.start()
+        for j in JOBS:
+            self._sched.add_job(self._make(j.key), trigger=j.trigger, id=j.key,
+                                replace_existing=True)
+        self.enabled = True
+        logger.info("[schedulers] started %d jobs", len(JOBS))
+        return self.status()
+
+    def stop(self) -> dict:
+        for j in JOBS:
+            try:
+                self._sched.remove_job(j.key)
+            except Exception:
+                pass
+        self.enabled = False
+        logger.info("[schedulers] stopped")
+        return self.status()
+
+    def _make(self, key: str):
+        def _fire():
+            self.run(key)
+        return _fire
+
+    def run(self, key: str) -> None:
+        """Execute one job now (used by the scheduler and on-demand), logging + retry."""
+        job = self._by_key.get(key)
+        if job is None:
+            return
+        from src.db.models_scheduler import RunStatus, SchedulerRun
+        from src.db.session import session_scope
+        start = _now()
+        attempt = self._attempts.get(key, 0)
+        processed = success = failure = 0
+        status, detail, error = RunStatus.SUCCESS, None, None
+        try:
+            res = job.fn() or {}
+            processed = int(res.get("processed", 0))
+            success = int(res.get("success", 1))
+            failure = int(res.get("failure", 0))
+            detail = res.get("detail")
+            st = res.get("status", RunStatus.SUCCESS)
+            status = RunStatus.LIMITED if str(st).startswith("limited") or st == "limited" else st
+            self._attempts[key] = 0
+        except Exception as e:
+            failure, error = 1, f"{type(e).__name__}: {e}"
+            if attempt < len(_RETRY_DELAYS_MIN):
+                status = RunStatus.RETRYING
+                self._attempts[key] = attempt + 1
+                delay = _RETRY_DELAYS_MIN[attempt]
+                try:
+                    self._sched.add_job(self._make(key), "date",
+                                        run_date=_now() + timedelta(minutes=delay),
+                                        id=f"{key}__retry{attempt}", replace_existing=True)
+                except Exception:
+                    pass
+                logger.warning("[schedulers] %s failed (attempt %d); retry in %dm: %s",
+                               key, attempt + 1, delay, error)
+            else:
+                status = RunStatus.FAILED
+                self._attempts[key] = 0
+                logger.error("[schedulers] %s FAILED after retries; notifying: %s", key, error)
+        end = _now()
+        with session_scope() as s:
+            s.add(SchedulerRun(scheduler_key=key, started_at=start, ended_at=end,
+                               duration_ms=int((end - start).total_seconds() * 1000),
+                               records_processed=processed, success_count=success,
+                               failure_count=failure, retry_count=attempt,
+                               status=status, detail=detail, error=error))
+
+    def run_async(self, key: str) -> None:
+        threading.Thread(target=self.run, args=(key,), daemon=True).start()
+
+    # ---- status ---- #
+    def status(self) -> dict:
+        from sqlalchemy import select
+        from src.db.models_scheduler import SchedulerRun
+        from src.db.session import session_scope
+        last: dict[str, dict] = {}
+        with session_scope() as s:
+            for j in JOBS:
+                r = s.scalar(select(SchedulerRun).where(SchedulerRun.scheduler_key == j.key)
+                             .order_by(SchedulerRun.id.desc()))
+                if r:
+                    last[j.key] = {"status": r.status, "detail": r.detail,
+                                   "at": r.started_at.isoformat() if r.started_at else None,
+                                   "duration_ms": r.duration_ms}
+        jobs = []
+        for j in JOBS:
+            nxt = None
+            try:
+                aj = self._sched.get_job(j.key)
+                nxt = aj.next_run_time.isoformat() if aj and aj.next_run_time else None
+            except Exception:
+                pass
+            jobs.append({"key": j.key, "name": j.name, "cadence": j.cadence,
+                         "priority": j.priority, "next_run": nxt, "last": last.get(j.key)})
+        return {"enabled": self.enabled, "count": len(JOBS), "jobs": jobs}
+
+    def recent_logs(self, limit: int = 40) -> list[dict]:
+        from sqlalchemy import select
+        from src.db.models_scheduler import SchedulerRun
+        from src.db.session import session_scope
+        with session_scope() as s:
+            rows = s.scalars(select(SchedulerRun).order_by(SchedulerRun.id.desc()).limit(limit)).all()
+            return [{"key": r.scheduler_key, "status": r.status, "detail": r.detail,
+                     "error": r.error, "processed": r.records_processed,
+                     "duration_ms": r.duration_ms,
+                     "at": r.started_at.isoformat() if r.started_at else None} for r in rows]
+
+
+REGISTRY = SchedulerRegistry()

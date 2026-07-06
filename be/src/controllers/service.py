@@ -281,6 +281,47 @@ def day_summary(day=None) -> dict:
         return dd.summarize(s, day)
 
 
+def comparison() -> dict:
+    from src.services.analytics import comparison as cmp
+
+    with session_scope() as s:
+        return cmp.compare(s)
+
+
+def weekly_report(include_ai: bool = True) -> dict:
+    """The weekly report: the weekly campaign plan + what changed this period + top
+    recommendations, plus (best-effort) an AI weekly briefing in plain language."""
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+
+    with session_scope() as s:
+        plan = s.scalar(select(CampaignPlan)
+                        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                               CampaignPlan.plan_type == PlanType.WEEKLY)
+                        .order_by(CampaignPlan.generated_at.desc()))
+        weekly = None
+        if plan:
+            weekly = {"title": plan.title, "blueprint": plan.blueprint,
+                      "expected_outcome": plan.expected_outcome, "confidence": plan.confidence,
+                      "generated_at": plan.generated_at.isoformat() if plan.generated_at else None}
+        reasoning = ctx.reasoning_insights(s)
+        recs = ctx.growth_recommendations(s, limit=6)
+
+    ai_summary = None
+    if include_ai:
+        try:
+            from src.ai.briefing import BriefingGenerator
+            from src.ai.client import AIUnavailable
+            try:
+                ai_summary = BriefingGenerator().generate(weekly=True)
+            except AIUnavailable:
+                ai_summary = None
+        except Exception:  # briefing is best-effort; never break the report
+            ai_summary = None
+
+    return {"available": weekly is not None, "weekly_plan": weekly,
+            "what_changed": reasoning, "recommendations": recs, "ai_summary": ai_summary}
+
+
 def queue(page: int = 1, page_size: int = 20) -> dict:
     page, page_size, offset = _clamp_page(page, page_size)
     with session_scope() as s:

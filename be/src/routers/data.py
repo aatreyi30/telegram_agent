@@ -73,3 +73,13 @@ def merchants():
 @router.get("/plans")
 def plans():
     return ok(service.plans())
+
+
+@router.get("/weekly")
+def weekly():
+    return ok(service.weekly_report())
+
+
+@router.get("/comparison")
+def comparison():
+    return ok(service.comparison())

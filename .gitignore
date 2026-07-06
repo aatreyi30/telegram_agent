@@ -20,3 +20,7 @@ fe/dist/
 
 *.md
 /*.md
+# generated build artifacts
+fe/*.tsbuildinfo
+fe/vite.config.js
+fe/vite.config.d.ts

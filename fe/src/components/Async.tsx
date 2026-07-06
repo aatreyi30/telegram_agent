@@ -6,7 +6,16 @@ import { Skeleton } from "./ui/primitives";
 export function Async<T>({ q, children, rows = 3 }: {
   q: UseQueryResult<T>; children: (data: T) => ReactNode; rows?: number;
 }) {
-  if (q.isLoading)
+  if (q.isError)
+    return (
+      <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+        Couldn't load: {(q.error as Error)?.message || "error"}
+      </div>
+    );
+  // data === undefined covers both an in-flight fetch AND a query still disabled
+  // by `enabled:` — React Query v5 reports isLoading=false for disabled queries,
+  // which previously let children() run with undefined data and crash the page.
+  if (q.data === undefined)
     return (
       <div className="space-y-3">
         {Array.from({ length: rows }).map((_, i) => (
@@ -14,13 +23,7 @@ export function Async<T>({ q, children, rows = 3 }: {
         ))}
       </div>
     );
-  if (q.isError)
-    return (
-      <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-        Couldn't load: {(q.error as Error)?.message || "error"}
-      </div>
-    );
-  return <>{children(q.data as T)}</>;
+  return <>{children(q.data)}</>;
 }
 
 export function Empty({ children }: { children: ReactNode }) {

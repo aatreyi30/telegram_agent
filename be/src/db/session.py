@@ -74,6 +74,7 @@ def init_db() -> None:
     from src.db import models_generation  # noqa: F401  (Phase 9 tables)
     from src.db import models_campaign  # noqa: F401  (Phase 10 tables)
     from src.db import models_automation  # noqa: F401  (Phase 11 tables)
+    from src.db import models_scheduler  # noqa: F401  (scheduler run logs)
 
     Base.metadata.create_all(get_engine())
     # create_all does not ALTER existing tables; add columns introduced after first run.
