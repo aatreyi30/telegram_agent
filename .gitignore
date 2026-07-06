@@ -17,3 +17,6 @@ be/.env
 # frontend
 fe/node_modules/
 fe/dist/
+
+*.md
+/*.md

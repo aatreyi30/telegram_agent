@@ -35,3 +35,8 @@ groq>=1.5.0
 # --- Web API + server ---
 fastapi>=0.115.0
 uvicorn>=0.30.0
+
+# --- Deal scraping (Cloudflare-bypassing stealth browser) ---
+# After install run: python -m camoufox fetch   (downloads the browser binary)
+camoufox>=0.4.11
+playwright>=1.61.0

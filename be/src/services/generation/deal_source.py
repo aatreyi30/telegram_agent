@@ -111,19 +111,14 @@ class DealSourceClient:
                 params[self.auth.split(":", 1)[1]] = self.key
         return {"headers": headers, "params": params}
 
-    def fetch_latest(self, limit: int = 20, page_size: int = 50) -> list[RawDeal]:
-        """Fetch up to `limit` latest deals, paginating across pages so we get
-        variety across categories (the API pages are category-clustered)."""
-        ok, reason = self.available()
-        if not ok:
-            raise RuntimeError(reason)
+    def _fetch_httpx(self, want: int, page_size: int) -> list[dict]:
+        """Direct API pull (fast path). Raises on Cloudflare 403 / network error."""
         collected: list[dict] = []
         page = 1
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-            while len(collected) < limit:
+            while len(collected) < want:
                 kw = self._auth_kwargs()
-                kw["params"] = {**kw.get("params", {}),
-                                "page": page, "page_size": min(page_size, limit)}
+                kw["params"] = {**kw.get("params", {}), "page": page, "page_size": page_size}
                 resp = client.get(self.base, **kw)
                 resp.raise_for_status()
                 payload = resp.json()
@@ -135,9 +130,40 @@ class DealSourceClient:
                 if total_pages and page >= total_pages:
                     break
                 page += 1
-        if collected:
-            logger.info("[deal_source] fetched %d items across %d page(s); first item keys: %s",
-                        len(collected), page, list(collected[0].keys()))
-        else:
-            logger.warning("[deal_source] no items found; check DEAL_API_BASE / auth / schema.")
-        return [_map_item(it, self.source) for it in collected[:limit]]
+        return collected
+
+    def _collect_raw(self, want: int, page_size: int) -> list[dict]:
+        """Raw deal dicts via the direct API, falling back to the Camoufox stealth
+        browser when Cloudflare blocks the plain client (403)."""
+        try:
+            items = self._fetch_httpx(want, page_size)
+            if items:
+                logger.info("[deal_source] fetched %d items via direct API", len(items))
+                return items
+            logger.warning("[deal_source] direct API returned no items; trying browser")
+        except Exception as e:  # 403 / network / schema
+            logger.warning("[deal_source] direct API failed (%s); using Camoufox browser", e)
+        from src.services.collection.deal_scraper import CamoufoxDealSource
+        return CamoufoxDealSource().fetch_raw(want=want, page_size=page_size)
+
+    def fetch_latest(self, limit: int = 20, page_size: int = 60) -> list[RawDeal]:
+        """Fetch today's most RELEVANT, attractive deals (real saving, strong
+        discount + deal score), ranked most-attractive first, mapped to RawDeal.
+
+        Over-fetches then filters for relevance so the operator only ever posts
+        deals worth a customer's attention."""
+        ok, reason = self.available()
+        if not ok:
+            raise RuntimeError(reason)
+        from src.services.collection.deal_scraper import diversify_by_category, filter_relevant
+
+        # over-fetch a broad pool so multiple categories are represented, filter for
+        # attractiveness, then spread the pick across categories (variety like the
+        # channel actually posts) — each category led by its most attractive deals.
+        raw = self._collect_raw(want=max(limit * 8, 200), page_size=80)
+        relevant = filter_relevant(raw)
+        picked = diversify_by_category(relevant, limit=limit)
+        logger.info("[deal_source] %d relevant of %d fetched; picked %d across %d categories",
+                    len(relevant), len(raw), len(picked),
+                    len({p.get("category_key") for p in picked}))
+        return [_map_item(it, self.source) for it in picked]
