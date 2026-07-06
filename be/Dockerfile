@@ -12,5 +12,6 @@ COPY src ./src
 EXPOSE 8000
 ENV ENVIRONMENT=production PORT=8000
 
-# uvicorn src.main:app — the FastAPI app lives at src/main.py
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Railway/Render inject $PORT at runtime; shell form lets it expand (falls back to 8000).
+# One worker only — the cron scheduler must run on a single process (leader lock).
+CMD ["sh", "-c", "uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

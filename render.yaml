@@ -1,0 +1,38 @@
+# Render blueprint for the DealWing backend (FastAPI).
+# Deploy: Render Dashboard -> New -> Blueprint -> pick this repo.
+# Secrets marked `sync: false` are prompted for on first deploy (never committed).
+services:
+  - type: web
+    name: dealwing-backend
+    runtime: docker
+    dockerfilePath: ./be/Dockerfile
+    dockerContext: ./be
+    plan: starter          # free plan has no persistent disk; starter keeps the SQLite DB
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SCHEDULERS_AUTOSTART
+        value: "true"       # single container -> safe to run the cron here
+      - key: AUTH_SECRET
+        generateValue: true # Render generates a strong random secret
+      - key: CORS_ORIGIN
+        sync: false          # set to your Vercel URL, e.g. https://dealwing.vercel.app
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: TELEGRAM_PHONE
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: API_SECRET_KEY
+        sync: false
+    disk:
+      name: dealwing-data
+      mountPath: /app/data   # SQLite DB + raw snapshots persist across deploys
+      sizeGB: 1

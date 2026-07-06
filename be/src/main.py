@@ -27,7 +27,16 @@ _DIST = Path(__file__).resolve().parents[2] / "fe" / "dist"
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # runs when the ASGI server (uvicorn) actually starts — NOT at import, so tests
-    # that build the app without serving never trigger the schedulers.
+    # that build the app without serving never trigger seeding or the schedulers.
+    # 1) ensure the org + admin user exist (idempotent) so a fresh deploy can log in.
+    try:
+        from src.db.org_seed import seed_org
+        from src.db.session import session_scope
+        with session_scope() as s:
+            seed_org(s)
+    except Exception:
+        logger.exception("[startup] org/admin seed skipped")
+    # 2) auto-run the cron (leader-guarded) if enabled.
     if get_settings().schedulers_autostart:
         from src.controllers.schedulers import REGISTRY
         if REGISTRY.start_if_leader():   # cross-process lock: only one worker runs cron
@@ -49,9 +58,13 @@ def create_app() -> FastAPI:
                   lifespan=_lifespan,
                   description="DealWing — Telegram deal-channel growth OS.")
 
+    # CORS: exact origins from CORS_ORIGIN (comma-separated) PLUS any *.vercel.app
+    # domain (so preview + prod deploys of the frontend work without reconfig).
+    origins = [o.strip() for o in (settings.cors_origin or "").split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.cors_origin] if settings.cors_origin else ["*"],
+        allow_origins=origins or ["*"],
+        allow_origin_regex=r"https://.*\.vercel\.app",
         allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
     )
     register_error_handlers(app)
