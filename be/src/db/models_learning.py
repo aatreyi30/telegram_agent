@@ -15,6 +15,7 @@ from datetime import datetime
 from sqlalchemy import (
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     JSON,
@@ -36,6 +37,7 @@ class ChannelStyleProfile(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("learning_version", name="uq_style_version"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     learning_version: Mapped[int] = mapped_column(Integer, default=LEARNING_VERSION)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     post_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -72,6 +74,7 @@ class PostTypePerformance(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     learning_version: Mapped[int] = mapped_column(Integer, default=LEARNING_VERSION)
     post_type: Mapped[str] = mapped_column(String(255), nullable=False)  # cluster descriptor
     post_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -96,6 +99,7 @@ class LearningRecord(Base):
     __table_args__ = (Index("ix_learning_category", "category"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     learning_version: Mapped[int] = mapped_column(Integer, default=LEARNING_VERSION)
     category: Mapped[str] = mapped_column(String(64), nullable=False)  # timing/cta/emoji/...
     statement: Mapped[str] = mapped_column(Text, nullable=False)

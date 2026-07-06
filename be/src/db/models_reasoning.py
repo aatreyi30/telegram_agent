@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, JSON, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.base import Base, TimestampMixin
@@ -23,6 +23,7 @@ class ReasonedInsight(Base, TimestampMixin):
     __table_args__ = (Index("ix_insight_metric", "metric"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     reasoning_version: Mapped[int] = mapped_column(Integer, default=REASONING_VERSION)
     metric: Mapped[str] = mapped_column(String(64), nullable=False)     # engagement/volume/mix/...
     direction: Mapped[str] = mapped_column(String(8), nullable=False)   # up / down / flat

@@ -19,6 +19,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     JSON,
@@ -65,6 +66,7 @@ class CampaignPlan(Base, TimestampMixin):
     __table_args__ = (Index("ix_plan_type_date", "plan_type", "target_date"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     campaign_version: Mapped[int] = mapped_column(Integer, default=CAMPAIGN_VERSION)
     plan_type: Mapped[str] = mapped_column(String(16), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)

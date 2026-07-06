@@ -90,6 +90,7 @@ class GeneratedPost(Base, TimestampMixin):
     __table_args__ = (Index("ix_genpost_status", "status"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     post_type: Mapped[str] = mapped_column(String(64))                 # single | collection
     selection_bucket: Mapped[str | None] = mapped_column(String(32))  # loot/budget/high-value/...

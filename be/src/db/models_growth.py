@@ -41,6 +41,7 @@ class GrowthStrategy(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("growth_version", name="uq_growth_version"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     growth_version: Mapped[int] = mapped_column(Integer, default=GROWTH_VERSION)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -60,6 +61,7 @@ class GrowthRecommendation(Base):
     __table_args__ = (Index("ix_growthrec_priority", "priority"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     growth_version: Mapped[int] = mapped_column(Integer, default=GROWTH_VERSION)
     strategy_id: Mapped[int] = mapped_column(ForeignKey("growth_strategies.id"), nullable=False)
     category: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -57,6 +57,7 @@ class NormalizedPost(Base, TimestampMixin):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
     source_type: Mapped[str] = mapped_column(String(16), nullable=False)
     source_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
