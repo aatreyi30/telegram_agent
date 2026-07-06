@@ -154,6 +154,7 @@ export function Comparison() {
                     <CardDescription>What each channel emphasises — spot gaps your audience might be missing.
                       {ents.some((e: any) => e.deal_mix_note) && <span className="ml-1 text-yellow-500">(full-window data)</span>}
                     </CardDescription>
+                  </CardHeader>
                   <CardContent>
                     <ResponsiveContainer width="100%" height={260}>
                       <BarChart data={dealData} layout="vertical" margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
