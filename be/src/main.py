@@ -30,8 +30,8 @@ async def _lifespan(app: FastAPI):
     # that build the app without serving never trigger the schedulers.
     if get_settings().schedulers_autostart:
         from src.controllers.schedulers import REGISTRY
-        REGISTRY.start()
-        logger.info("[startup] schedulers auto-started (cron running)")
+        if REGISTRY.start_if_leader():   # cross-process lock: only one worker runs cron
+            logger.info("[startup] schedulers auto-started (this worker is the cron leader)")
     yield
     try:
         from src.controllers.schedulers import REGISTRY

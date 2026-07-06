@@ -13,6 +13,7 @@ possible and record status='limited: <reason>' — they never fabricate data.
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -335,6 +336,33 @@ JOBS: list[Job] = [
 ]
 
 
+def _acquire_singleton_lock():
+    """Cross-process exclusive lock so only ONE worker runs the cron (multi-worker
+    safe). Returns the held file handle on success, or None if another worker owns it.
+    The OS releases the lock automatically if this process dies (no stale locks)."""
+    from src.config.settings import get_settings
+    s = get_settings()
+    s.ensure_dirs()
+    path = s.raw_snapshot_dir.parent / "scheduler.lock"
+    fh = open(path, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:          # msvcrt.locking needs a byte to lock
+                fh.write("lock")
+                fh.flush()
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
+
+
 class SchedulerRegistry:
     def __init__(self) -> None:
         self._sched = BackgroundScheduler(timezone=IST_TZ,
@@ -343,8 +371,22 @@ class SchedulerRegistry:
         self._attempts: dict[str, int] = {}
         self.enabled = False
         self._lock = threading.Lock()
+        self._singleton_fh = None      # held OS lock while this worker is the leader
 
     # ---- lifecycle ---- #
+    def start_if_leader(self) -> bool:
+        """Auto-start path (server boot). Acquires the cross-process lock first, so with
+        multiple uvicorn workers only the leader runs the cron; the rest skip cleanly."""
+        if self.enabled:
+            return True
+        fh = _acquire_singleton_lock()
+        if fh is None:
+            logger.info("[schedulers] another worker holds the scheduler lock — not starting here")
+            return False
+        self._singleton_fh = fh
+        self.start()
+        return True
+
     def start(self) -> dict:
         if not self._sched.running:
             self._sched.start()
@@ -362,6 +404,12 @@ class SchedulerRegistry:
             except Exception:
                 pass
         self.enabled = False
+        if self._singleton_fh is not None:      # release the cross-process lock
+            try:
+                self._singleton_fh.close()
+            except Exception:
+                pass
+            self._singleton_fh = None
         logger.info("[schedulers] stopped")
         return self.status()
 

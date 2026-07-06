@@ -22,7 +22,10 @@ def logs(limit: int = 40):
 
 @router.post("/start", dependencies=[Depends(require_role("owner"))])
 def start():
-    return ok(REGISTRY.start())
+    # leader-guarded so it won't double-run the cron under multiple workers
+    if not REGISTRY.start_if_leader():
+        return ok({**REGISTRY.status(), "note": "cron is already running on another worker"})
+    return ok(REGISTRY.status())
 
 
 @router.post("/stop", dependencies=[Depends(require_role("owner"))])
