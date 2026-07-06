@@ -6,6 +6,7 @@ Run: ``uvicorn src.main:app`` (from be/). Serves the JSON API (envelope
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -23,12 +24,29 @@ logger = get_logger(__name__)
 _DIST = Path(__file__).resolve().parents[2] / "fe" / "dist"
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # runs when the ASGI server (uvicorn) actually starts — NOT at import, so tests
+    # that build the app without serving never trigger the schedulers.
+    if get_settings().schedulers_autostart:
+        from src.controllers.schedulers import REGISTRY
+        REGISTRY.start()
+        logger.info("[startup] schedulers auto-started (cron running)")
+    yield
+    try:
+        from src.controllers.schedulers import REGISTRY
+        REGISTRY.stop()
+    except Exception:
+        pass
+
+
 def create_app() -> FastAPI:
     from src.db.session import init_db
     init_db()
 
     settings = get_settings()
     app = FastAPI(title="DealWing API", docs_url="/api/docs", redoc_url=None,
+                  lifespan=_lifespan,
                   description="DealWing — Telegram deal-channel growth OS.")
 
     app.add_middleware(

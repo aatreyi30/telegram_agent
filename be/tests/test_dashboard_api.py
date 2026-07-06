@@ -19,6 +19,7 @@ def client():
     os.environ["ADMIN_EMAIL"] = ADMIN_EMAIL
     os.environ["ADMIN_PASSWORD"] = ADMIN_PW
     os.environ["AUTH_SECRET"] = "test-secret"
+    os.environ["SCHEDULERS_AUTOSTART"] = "false"  # never auto-run jobs during tests
     from src.config.settings import get_settings
     from src.db import session as sess
 

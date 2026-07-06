@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, Play, RefreshCw, Search, Square, XCircle } from "lucide-react";
+import { CalendarClock, CheckCircle2, Play, RefreshCw, Search, Square, XCircle } from "lucide-react";
 import { PageHeader } from "@/components/AppLayout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -86,7 +86,14 @@ export function Agent() {
               <Button variant="ghost" disabled={busy} onClick={() => call("/api/agent/discover", { max_add: 5 })}>
                 <Search size={16} /> Discover competitors
               </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => call("/api/agent/plan-day")}>
+                <CalendarClock size={16} /> Plan today's posts
+              </Button>
             </div>
+            <p className="text-xs text-muted-foreground">
+              “Plan today's posts” fills the day: each peak-views hour gets a category (your preferred first,
+              then best available deals), scrapes that category's fresh deals, and queues a draft — no repeats.
+            </p>
           </CardContent>
         </Card>
 

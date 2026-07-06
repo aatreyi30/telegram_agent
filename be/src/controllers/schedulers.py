@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from zoneinfo import ZoneInfo
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -26,6 +28,8 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 _RETRY_DELAYS_MIN = [5, 15, 30]
+# cron times in the spec (06:00, 08:00, …) are IST — the channel is Indian.
+IST_TZ = ZoneInfo("Asia/Kolkata")
 
 
 def _now():
@@ -281,6 +285,18 @@ def j_org_health() -> dict:
             "detail": " · ".join(f"{k}:{'ok' if v else 'no'}" for k, v in checks.items())}
 
 
+def j_daily_plan() -> dict:
+    from src.services.generation.daily_planner import build_and_schedule_day
+    from src.db.session import session_scope
+    with session_scope() as s:
+        r = build_and_schedule_day(s)
+    if not r.get("ok"):
+        return {"processed": 0, "status": "limited", "detail": f"limited: {r.get('reason')}"}
+    return {"processed": len(r["scheduled"]),
+            "detail": f"{len(r['scheduled'])} category posts queued across "
+                      f"{len(r['categories'])} categories at proven hours (deduped)"}
+
+
 def j_db_cleanup() -> dict:
     from src.db.models import CollectionEvent
     from src.db.models_scheduler import SchedulerRun
@@ -315,12 +331,14 @@ JOBS: list[Job] = [
     Job("notification_engine", "Notification Engine", "every 5 min", IntervalTrigger(minutes=5), "medium", j_notification_engine),
     Job("org_health", "Organization Health Check", "every 1 h", IntervalTrigger(hours=1), "low", j_org_health),
     Job("db_cleanup", "Database Cleanup", "daily 03:00", CronTrigger(hour=3, minute=0), "low", j_db_cleanup),
+    Job("daily_plan", "Daily Post Planner", "daily 05:30 IST", CronTrigger(hour=5, minute=30), "high", j_daily_plan),
 ]
 
 
 class SchedulerRegistry:
     def __init__(self) -> None:
-        self._sched = BackgroundScheduler(job_defaults={"coalesce": True, "max_instances": 1})
+        self._sched = BackgroundScheduler(timezone=IST_TZ,
+                                          job_defaults={"coalesce": True, "max_instances": 1})
         self._by_key = {j.key: j for j in JOBS}
         self._attempts: dict[str, int] = {}
         self.enabled = False

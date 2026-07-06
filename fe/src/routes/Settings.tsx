@@ -104,6 +104,16 @@ function OrgTab() {
                 <Label>Shortener URL</Label>
                 <Input value={data.settings?.grabon_shortener_url || ""} onChange={(e) => setS("grabon_shortener_url", e.target.value)} />
               </div>
+              <div className="space-y-1.5">
+                <Label>Preferred categories (comma-separated)</Label>
+                <Input
+                  placeholder="electronics-and-gadgets, fashion-and-lifestyle, …"
+                  value={(data.settings?.preferred_categories || []).join(", ")}
+                  onChange={(e) => setS("preferred_categories",
+                    e.target.value.split(",").map((x: string) => x.trim()).filter(Boolean))}
+                />
+                <p className="text-xs text-muted-foreground">The agent schedules these categories first at peak-views hours; the rest fill remaining slots by deal quality.</p>
+              </div>
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" checked={!!data.settings?.grabon_shorten_all}
                   onChange={(e) => setS("grabon_shorten_all", e.target.checked)} />

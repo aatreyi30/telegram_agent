@@ -331,7 +331,14 @@ def queue(page: int = 1, page_size: int = 20) -> dict:
         rows = s.scalars(select(ScheduledPost)
                          .order_by(ScheduledPost.scheduled_at)
                          .offset(offset).limit(page_size)).all()
+        # attach each draft's category (selection_bucket) so the day-plan is legible
+        cats = {}
+        pids = [r.generated_post_id for r in rows if r.generated_post_id]
+        if pids:
+            for gp in s.scalars(select(GeneratedPost).where(GeneratedPost.id.in_(pids))):
+                cats[gp.id] = gp.selection_bucket
         items = [{"id": r.id, "post_id": r.generated_post_id, "channel": r.channel_ref,
+                  "category": cats.get(r.generated_post_id),
                   "status": r.status,
                   "scheduled_at": r.scheduled_at.isoformat() if r.scheduled_at else None,
                   "attempts": f"{r.attempts}/{r.max_attempts}",

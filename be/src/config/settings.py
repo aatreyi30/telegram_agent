@@ -51,6 +51,8 @@ class Settings:
     environment: str = "development"     # development | production | test
     port: int = 8000
     cors_origin: str = "http://localhost:5173"   # the frontend dev origin
+    # auto-start the 20-job scheduler registry on server boot (cron runs automatically)
+    schedulers_autostart: bool = False
 
     # --- Storage ---
     db_url: str = "sqlite:///./data/tgagent.db"
@@ -129,6 +131,7 @@ class Settings:
             environment=_get("ENVIRONMENT", "development"),
             port=_get_int("PORT", 8000),
             cors_origin=_get("CORS_ORIGIN", "http://localhost:5173"),
+            schedulers_autostart=_get("SCHEDULERS_AUTOSTART", "false").lower() in ("1", "true", "yes"),
             db_url=_get("DB_URL", "sqlite:///./data/tgagent.db"),
             raw_snapshot_dir=Path(_get("RAW_SNAPSHOT_DIR", "./data/raw_snapshots")),
             telegram_api_id=int(api_id_raw) if api_id_raw and api_id_raw.isdigit() else None,

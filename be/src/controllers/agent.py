@@ -141,8 +141,8 @@ class AgentScheduler:
         self._step("collect", self._collect)
         self._step("discover", self._discover)
         self._step("analyze", self._analyze)
-        self._step("generate", self._generate)
-        self._step("schedule", self._schedule)
+        # generate + schedule together: category × best-time daily plan (deduped)
+        self._step("plan_day", self._plan_day)
 
     # ---- step implementations (all best-effort) ---- #
     def _collect(self) -> str:
@@ -191,37 +191,18 @@ class AgentScheduler:
             runner.run_collector(engine, collection_type=CollectionType.MANUAL, target=name)
         return "(plan refreshed)"
 
-    def _generate(self) -> str:
-        from src.db.models import CollectionType
-        from src.services.collection.base import JobRunner
-        from src.services.generation.deal_source import DealSourceClient
-        from src.services.generation.engine import LiveDealGenerationEngine
-
-        client = DealSourceClient()
-        ok, _ = client.available()
-        if not ok:
-            return "(deal source unavailable)"
-        raw = [rd.__dict__ for rd in client.fetch_latest(limit=24)]
-        if not raw:
-            return "(no deals)"
-        job = JobRunner().run_collector(LiveDealGenerationEngine(raw, count=6),
-                                        collection_type=CollectionType.MANUAL, target="agent_generate")
-        return f"(+{job.records_added} drafts)"
-
-    def _schedule(self) -> str:
-        from src.config.settings import get_settings
-        from src.services.automation.queue import autoschedule
+    def _plan_day(self) -> str:
+        """Category × best-time daily plan: for each peak-views slot, scrape that
+        category's fresh (deduped) deals, draft a collection, and queue it at the slot."""
+        from src.services.generation.daily_planner import build_and_schedule_day
         from src.db.session import session_scope
 
-        s = get_settings()
-        channels = s.owned_channels
-        if not channels:
-            return "(no owned channel to schedule to)"
         with session_scope() as sess:
-            report = autoschedule(sess, f"@{channels[0].lstrip('@')}", count=6)
-        if not report.get("ok"):
-            return f"({report.get('reason', 'nothing to schedule')})"
-        return f"(+{len(report.get('scheduled', []))} queued)"
+            r = build_and_schedule_day(sess)
+        if not r.get("ok"):
+            return f"({r.get('reason')})"
+        return (f"({len(r['scheduled'])} category posts across {len(r['categories'])} "
+                f"categories, queued at peak hours; deduped vs {r['deduped_against']} recent)")
 
 
 # process-wide singleton

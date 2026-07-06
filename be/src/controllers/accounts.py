@@ -123,7 +123,7 @@ def get_org(org_id: int) -> dict:
 
 
 _EDITABLE_SETTINGS = {"grabon_shortener_url", "grabon_amazon_tag", "grabon_flipkart_params",
-                      "grabon_shorten_all"}
+                      "grabon_shorten_all", "preferred_categories"}
 
 
 def update_org(org_id: int, *, name: str | None = None, affiliate_provider: str | None = None,

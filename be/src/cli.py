@@ -1260,6 +1260,23 @@ def affiliate_link(
         console.print(f"[dim]• {n}[/dim]")
 
 
+@app.command("run-scheduler")
+def run_scheduler(
+    key: str = typer.Argument(None, help="Job key (omit to list all jobs)"),
+) -> None:
+    """Run one scheduler job once (for OS cron / manual triggers). Omit key to list jobs."""
+    from src.controllers.schedulers import REGISTRY
+    if not key:
+        for j in REGISTRY.status()["jobs"]:
+            console.print(f"  {j['key']:22} {j['cadence']:16} [{j['priority']}] {j['name']}")
+        return
+    REGISTRY.run(key)
+    logs = REGISTRY.recent_logs(limit=1)
+    if logs:
+        r = logs[0]
+        console.print(f"[green]{r['key']}[/green]: {r['status']} — {r.get('detail') or r.get('error') or ''}")
+
+
 # --------------------------------------------------------------------------- #
 # Phase 11 — Automation Engine
 # --------------------------------------------------------------------------- #

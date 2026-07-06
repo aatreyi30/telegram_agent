@@ -39,3 +39,14 @@ def discover(payload: dict = Body(default={})):
         return ok(discover_competitors(max_add=int(payload.get("max_add", 5))))
     except Exception as e:
         return fail(f"Discovery unavailable: {e}", status_code=503)
+
+
+@router.post("/plan-day", dependencies=[Depends(require_role("owner"))])
+def plan_day():
+    """Build today's category × best-time plan now: scrape each category's fresh deals,
+    draft a collection, and queue it at that category's peak-views hour (deduped)."""
+    from src.services.generation.daily_planner import build_and_schedule_day
+    from src.db.session import session_scope
+    with session_scope() as s:
+        r = build_and_schedule_day(s)
+    return ok(r) if r.get("ok") else fail(r.get("reason", "could not build plan"), status_code=503)

@@ -41,13 +41,13 @@ export function Queue() {
                   <CardContent className="p-0">
                     <Table>
                       <THead>
-                        <TR><TH>ID</TH><TH>Post</TH><TH>Channel</TH><TH>Status</TH><TH>Scheduled (UTC)</TH><TH>Tries</TH><TH>Note</TH></TR>
+                        <TR><TH>ID</TH><TH>Category</TH><TH>Channel</TH><TH>Status</TH><TH>Scheduled (UTC)</TH><TH>Tries</TH><TH>Note</TH></TR>
                       </THead>
                       <TBody>
                         {d.items.map((r: any) => (
                           <TR key={r.id}>
                             <TD>#{r.id}</TD>
-                            <TD>{r.post_id}</TD>
+                            <TD>{r.category ? <Badge variant="primary">{r.category}</Badge> : <span className="text-muted-foreground">#{r.post_id}</span>}</TD>
                             <TD>{r.channel}</TD>
                             <TD><Badge variant={statusVariant(r.status)}>{r.status}</Badge></TD>
                             <TD className="text-muted-foreground">{r.scheduled_at}</TD>
