@@ -83,3 +83,8 @@ def weekly():
 @router.get("/comparison")
 def comparison():
     return ok(service.comparison())
+
+
+@router.get("/growth")
+def growth():
+    return ok(service.growth())

@@ -329,6 +329,13 @@ def comparison() -> dict:
         return cmp.compare(s)
 
 
+def growth() -> dict:
+    from src.services.analytics import growth as gw
+
+    with session_scope() as s:
+        return gw.get_growth(s)
+
+
 def weekly_report(include_ai: bool = True) -> dict:
     """The weekly report: the weekly campaign plan + what changed this period + top
     recommendations, plus (best-effort) an AI weekly briefing in plain language."""
