@@ -19,6 +19,7 @@ import { Queue } from "./routes/Queue";
 import { Agent } from "./routes/Agent";
 import { Schedulers } from "./routes/Schedulers";
 import { Comparison } from "./routes/Comparison";
+import { Growth } from "./routes/Growth";
 import { Settings } from "./routes/Settings";
 
 const qc = new QueryClient({
@@ -50,6 +51,7 @@ createRoot(document.getElementById("root")!).render(
               <Route path="day" element={<DayView />} />
               <Route path="competitors" element={<Competitors />} />
               <Route path="comparison" element={<Comparison />} />
+              <Route path="growth" element={<Growth />} />
               <Route path="merchants" element={<Merchants />} />
               <Route path="plan" element={<Plan />} />
               <Route path="drafts" element={<Drafts />} />

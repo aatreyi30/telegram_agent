@@ -3,7 +3,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   BarChart3, Bot, CalendarDays, Clock, GitCompare, LayoutDashboard, Lightbulb,
-  ListOrdered, LogOut, Menu, Package, Send, Settings as SettingsIcon, Store, Users2,
+  ListOrdered, LogOut, Menu, Package, Send, Settings as SettingsIcon, Store, TrendingUp, Users2,
 } from "lucide-react";
 import { api } from "@/services/api";
 import { useAuth } from "@/providers/auth";
@@ -20,6 +20,7 @@ const NAV = [
   { to: "/app/day", label: "Day view", icon: CalendarDays, group: "Understand" },
   { to: "/app/competitors", label: "Competitors", icon: Users2, group: "Understand" },
   { to: "/app/comparison", label: "You vs competitors", icon: GitCompare, group: "Understand" },
+  { to: "/app/growth", label: "Growth", icon: TrendingUp, group: "Understand" },
   { to: "/app/merchants", label: "Merchants", icon: Store, group: "Understand" },
   { to: "/app/plan", label: "Plan", icon: ListOrdered, group: "Act" },
   { to: "/app/drafts", label: "Drafts", icon: Send, group: "Act" },
