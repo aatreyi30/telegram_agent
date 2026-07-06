@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
@@ -35,16 +36,45 @@ const STYLE_DIMS: { key: string; label: string; fmt?: (v: any) => string }[] = [
   { key: "avg_links", label: "Links/post", fmt: (v) => Number(v).toFixed(2) },
 ];
 
+const PERIODS: { label: string; value: number | undefined }[] = [
+  { label: "7d", value: 7 },
+  { label: "30d", value: 30 },
+  { label: "90d", value: 90 },
+  { label: "All", value: undefined },
+];
+
+const btn = (active: boolean) =>
+  `cursor-pointer rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+    active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70"
+  }`;
+
 export function Comparison() {
-  const q = useQuery({ queryKey: ["comparison"], queryFn: () => api.get<any>("/api/comparison") });
+  const [window, setWindow] = useState<number | undefined>(undefined);
+  const q = useQuery({
+    queryKey: ["comparison", window],
+    queryFn: () => api.get<any>(`/api/comparison${window ? `?window=${window}` : ""}`),
+  });
   return (
     <div>
-      <PageHeader title="You vs competitors" sub="How your channel compares on every dimension the engine measures. All data is already computed by the intelligence pipeline." />
+      <PageHeader title="You vs competitors" sub="How your channel compares on every dimension the engine measures." />
+      <div className="mb-4 flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">Period:</span>
+        {PERIODS.map((p) => (
+          <button key={p.label} className={btn(window === p.value)} onClick={() => setWindow(p.value)}>
+            {p.label}
+          </button>
+        ))}
+        {window && (
+          <span className="ml-2 text-xs text-muted-foreground">
+            · basic stats filtered to last {window}d; style/deal-mix from full window
+          </span>
+        )}
+      </div>
       <Async q={q} rows={2}>
         {(d) => {
           const ents = d.entities || [];
           if (ents.length < 2)
-            return <Empty>Not enough competitor data yet. Run competitor discovery + sync, then re-check.</Empty>;
+            return <Empty>Not enough competitor data in this window. Try a wider period.</Empty>;
 
           const entities = ents.slice(0, 6);
           // unique deal types across all entities
@@ -75,6 +105,7 @@ export function Comparison() {
             <div className="space-y-6">
               <div className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
                 <b>Unavailable:</b> {(d.unavailable || []).join(", ")}. {d.note}
+                {d.applied_window && <span> Showing last {d.applied_window}d for basic stats; style/deal-mix from full observation window.</span>}
               </div>
 
               {/* Style benchmark table */}
@@ -120,7 +151,9 @@ export function Comparison() {
               {dealTypes.length > 0 && (
                 <Card>
                   <CardHeader><CardTitle className="text-base">Deal-type mix</CardTitle>
-                    <CardDescription>What each channel emphasises — spot gaps your audience might be missing.</CardDescription></CardHeader>
+                    <CardDescription>What each channel emphasises — spot gaps your audience might be missing.
+                      {ents.some((e: any) => e.deal_mix_note) && <span className="ml-1 text-yellow-500">(full-window data)</span>}
+                    </CardDescription>
                   <CardContent>
                     <ResponsiveContainer width="100%" height={260}>
                       <BarChart data={dealData} layout="vertical" margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -205,17 +238,27 @@ export function Comparison() {
               {/* Channels compared */}
               <Card>
                 <CardHeader><CardTitle className="text-base">Channels compared</CardTitle></CardHeader>
-                <CardContent className="space-y-1 text-sm">
+                <CardContent className="space-y-2 text-sm">
                   {ents.map((e: any, i: number) => (
                     <div key={i} className="flex items-center gap-2">
                       {e.is_owned ? <Badge variant="primary">you</Badge> : <Badge>competitor</Badge>}
                       <span className="font-medium">{e.name}</span>
                       <span className="text-muted-foreground">
-                        · {e.posts} posts over {e.window_days || "?"}d · {e.avg_views_per_post?.toLocaleString() || "?"} avg views · {e.posts_per_day ?? "?"}/day
+                        · {e.posts} posts · {e.avg_views_per_post?.toLocaleString() || "?"} avg views · {e.posts_per_day ?? "?"}/day
                         {e.similarity_to_us != null && !e.is_owned && ` · ${(e.similarity_to_us * 100).toFixed(0)}% similar`}
                       </span>
                     </div>
                   ))}
+                  {ents.map((e: any) => e.tenure_label).filter(Boolean).length > 0 && (
+                    <div className="mt-2 space-y-1 border-t pt-2 text-xs text-muted-foreground">
+                      {ents.map((e: any, i: number) => e.tenure_label && (
+                        <div key={i} className="flex gap-2">
+                          <span className="w-24 shrink-0 font-medium text-foreground/60">{e.is_owned ? "You" : e.name}</span>
+                          <span>{e.tenure_label}{e.style_tenure_note ? ` · ${e.style_tenure_note}` : ""}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </div>
