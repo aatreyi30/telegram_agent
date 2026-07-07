@@ -43,6 +43,7 @@ from src.db.models_learning import (
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.session import session_scope
 from src.services.events import Event, EventType, get_event_bus
+from src.ai.insight_writer import narrate
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -214,7 +215,7 @@ class GrowthEngine(BaseCollector):
                 f"Post more {label}: ~{top.avg_views_per_day:.0f} views/day vs your "
                 f"{base:.0f} channel average ({mult:.1f}x). They are only {top.share*100:.0f}% "
                 f"of your posts — grow toward ~{target*100:.0f}%.",
-                f"Highest age-normalized views of any post type, measured over {top.post_count} posts.",
+                f"Highest views/day of any post type, measured over {top.post_count} posts.",
                 {"post_type": top.post_type, "plain_label": label,
                  "avg_views_per_day": top.avg_views_per_day, "channel_avg": round(base, 1),
                  "multiple_vs_avg": round(mult, 2), "current_share": top.share,
@@ -232,7 +233,7 @@ class GrowthEngine(BaseCollector):
                 f"Cut back on {label}: only ~{bottom.avg_views_per_day:.0f} views/day "
                 f"({lift:+.0f}% vs your {base:.0f} average) yet they are {bottom.share*100:.0f}% "
                 "of everything you post.",
-                f"Consistently below-average age-normalized views over {bottom.post_count} posts; "
+                f"Consistently below-average views/day over {bottom.post_count} posts; "
                 "they consume volume that your top types would monetize better.",
                 {"post_type": bottom.post_type, "plain_label": label,
                  "avg_views_per_day": bottom.avg_views_per_day, "channel_avg": round(base, 1),
@@ -259,45 +260,68 @@ class GrowthEngine(BaseCollector):
                     ehrs = ", ".join(f"{e[0]:02d}:00" for e in exp)
                     outcome = (f"The late-night hours ({ehrs}) show higher per-post views on small "
                                "samples — worth a controlled test, but keep the bulk in proven windows.")
-                rec("timing", text, lr.statement, {**ev, "posting_plan": plan},
-                    lr.confidence, impact=0.5, outcome=outcome)
+                rec_evidence = {**ev, "posting_plan": plan}
+                fallback = (f"You already post ~{style.posts_per_day:.0f} times a day — this doesn't ask "
+                            "you to post more, just to shift when those posts land toward the windows "
+                            "that already earn more views per post.")
+                reasoning = narrate("why to follow this posting schedule", text, rec_evidence, fallback)
+                rec("timing", text, reasoning, rec_evidence, lr.confidence, impact=0.5, outcome=outcome)
             else:
-                rec("timing", lr.statement.split(".")[0] + ".", lr.statement, ev, lr.confidence, impact=0.4)
+                text = lr.statement.split(".")[0] + "."
+                fallback = ("Shifting posts toward your proven high-performing hours raises average "
+                            "reach without changing how much you post overall.")
+                reasoning = narrate("why to follow this posting-window recommendation", text, ev, fallback)
+                rec("timing", text, reasoning, ev, lr.confidence, impact=0.4)
 
         # (4) positive emojis — with concrete lift
         for lr in sorted(by_cat.get("emoji", []), key=lambda x: (x.metric_value or 0), reverse=True)[:2]:
             if lr.metric_value and lr.comparison_value and lr.metric_value > lr.comparison_value:
                 emoji = (lr.evidence or {}).get("emoji", "")
                 emoji_lift = self._lift(lr.metric_value, lr.comparison_value)
-                rec("format",
-                    f"Include {emoji} in deal posts — posts using it average {emoji_lift:+.0f}% "
-                    "views vs your channel average.",
-                    lr.statement + " (Correlational, but a cheap, safe format tweak to adopt.)",
-                    lr.evidence or {}, lr.confidence, impact=0.5)
+                text = (f"Include {emoji} in deal posts — posts using it average {emoji_lift:+.0f}% "
+                        "views vs your channel average.")
+                fallback = (f"{emoji} costs nothing to add and already shows up disproportionately in "
+                            "your stronger posts, so it's a free, low-risk format change to confirm with "
+                            "a couple of weeks of consistent use before touching anything riskier.")
+                reasoning = narrate("why to adopt this emoji", text, lr.evidence or {}, fallback)
+                rec("format", text, reasoning, lr.evidence or {}, lr.confidence, impact=0.5)
 
         # (5) media (correlational -> phrased as preference/test)
         for lr in by_cat.get("media", []):
             if lr.metric_value and lr.comparison_value and lr.metric_value < lr.comparison_value:
                 media_lift = self._lift(lr.metric_value, lr.comparison_value)
-                rec("media",
-                    f"Favor concise text+link deal drops: media-heavy posts get {media_lift:+.0f}% "
-                    "views vs text-only in your history.",
-                    lr.statement + " (Correlational — verify with an A/B test.)",
-                    lr.evidence or {}, lr.confidence * 0.8, impact=0.5)
+                text = (f"Favor concise text+link deal drops: media-heavy posts get {media_lift:+.0f}% "
+                        "views vs text-only in your history.")
+                fallback = ("Dropping images costs nothing in production time, and the gap in your own "
+                            "history is large enough to be worth testing before you invest effort in "
+                            "better photography instead.")
+                reasoning = narrate("why to favor text-only over media posts", text, lr.evidence or {}, fallback)
+                rec("media", text, reasoning, lr.evidence or {}, lr.confidence * 0.8, impact=0.5)
 
         # (6) cta (correlational -> A/B test)
         for lr in by_cat.get("cta", []):
             if lr.metric_value and lr.comparison_value and lr.metric_value < lr.comparison_value:
-                rec("cta", "A/B test leaner call-to-action wording.",
-                    lr.statement + " (Correlational — test before removing CTAs.)",
-                    lr.evidence or {}, lr.confidence * 0.7, impact=0.3)
+                text = "A/B test leaner call-to-action wording."
+                fallback = ("This changes wording, not strategy, so the downside of testing it is small — "
+                            "run it for two weeks before deciding whether to drop CTAs for good.")
+                reasoning = narrate("why to A/B test removing the CTA", text, lr.evidence or {}, fallback)
+                rec("cta", text, reasoning, lr.evidence or {}, lr.confidence * 0.7, impact=0.3)
 
         # (7) merchant focus (only emitted by Phase 6 when >=2 merchants are comparable
         # and the best one actually outperforms — so it is safe to surface in full)
         for lr in by_cat.get("merchant", []):
-            merchant = (lr.evidence or {}).get("merchant", "the top merchant")
-            rec("merchant", f"Prioritize {merchant} deals — {lr.statement}",
-                lr.statement, lr.evidence or {}, lr.confidence, impact=0.4)
+            ev = lr.evidence or {}
+            merchant = ev.get("merchant", "the top merchant")
+            vpd = lr.metric_value
+            lift = self._lift(lr.metric_value, lr.comparison_value) if lr.comparison_value else 0.0
+            text = (f"Prioritize {merchant} deals — they average {vpd:.0f} views/day "
+                    f"({lift:+.0f}% vs your channel average)." if vpd else
+                    f"Prioritize {merchant} deals.")
+            fallback = (f"Of the merchants you can reliably compare, {merchant} is the one that clears "
+                        "your channel average, so shifting volume toward it is backed by a real "
+                        "comparison rather than a guess at an untested merchant.")
+            reasoning = narrate("why to prioritize this merchant", text, ev, fallback)
+            rec("merchant", text, reasoning, ev, lr.confidence, impact=0.4)
 
         # (8) frequency vs competitors (Phase 5 threats)
         threats = s.scalars(

@@ -23,6 +23,7 @@ from src.db.models_reasoning import REASONING_VERSION, ReasonedInsight
 from src.db.session import session_scope
 from src.services.events import Event, EventType, get_event_bus
 from src.services.intelligence.growth import plain_label
+from src.ai.insight_writer import narrate
 from src.logger import get_logger
 from src.services.metrics import trend_metrics as T
 
@@ -118,17 +119,20 @@ class ReasoningEngine(BaseCollector):
         verb = "less" if direction == "down" else "more"
         obs = (f"You're posting {verb} often — about {ppd_r:.0f} posts a day in the last month, "
                f"compared with about {ppd_p:.0f} a day the month before.")
-        why = ("That's roughly half as many chances each day for followers to see your deals."
-               if direction == "down" and change <= -40 else
-               "That means fewer daily chances for followers to see your deals." if direction == "down"
-               else "That means more daily chances for followers to see your deals.")
+        evidence = {"posts_per_day_recent": ppd_r, "posts_per_day_prior": ppd_p,
+                    "n_recent": len(recent), "n_prior": len(prior), "change_pct": change}
+        fallback = (f"A {abs(change):.0f}% {'drop' if direction == 'down' else 'increase'} in daily "
+                    f"posts directly changes how many times a day your deals can appear in someone's "
+                    f"feed — {'fewer' if direction == 'down' else 'more'} posts means "
+                    f"{'fewer' if direction == 'down' else 'more'} chances to be seen, independent of "
+                    "how good any single post is.")
+        why = narrate("why a change in posting volume matters", obs, evidence, fallback)
         insights.append({
             "metric": "posting_volume", "direction": direction,
             "change_value": change, "change_unit": "pct",
             "period_label": f"last {w}d vs prior {w}d",
             "observation": obs, "reasoning": why,
-            "evidence": {"posts_per_day_recent": ppd_r, "posts_per_day_prior": ppd_p,
-                         "n_recent": len(recent), "n_prior": len(prior)},
+            "evidence": evidence,
             "confidence": round(min(1.0, min(len(recent), len(prior)) / 100), 3),
         })
 
@@ -150,31 +154,33 @@ class ReasoningEngine(BaseCollector):
             obs = (f"You posted {moved} {label} — they went from {_in10(sp.get(cluster, 0))} "
                    f"to {_in10(sr.get(cluster, 0))}.")
             vpd = perf.get(cluster)
+            evidence = {"cluster": cluster, "share_recent": round(sr.get(cluster, 0), 3),
+                        "share_prior": round(sp.get(cluster, 0), 3),
+                        "avg_views_per_day": vpd, "perf_median": perf_median}
             if vpd is not None and perf_median:
                 good = vpd >= perf_median   # this type does better than most
                 helps = (d > 0) == good     # posting more of a good type, or less of a bad type
                 if helps and d > 0:
-                    why = (f"Good move — these posts get about {vpd:.0f} views a day, more than "
-                           f"your usual {perf_median:.0f}, so posting more of them should bring more views.")
+                    fallback = (f"Good move — these posts get about {vpd:.0f} views a day, more than "
+                                f"your usual {perf_median:.0f}, so posting more of them should bring more views.")
                 elif helps and d < 0:
-                    why = (f"This should help — you cut back on posts that get fewer views than "
-                           f"usual (about {vpd:.0f} a day vs your usual {perf_median:.0f}).")
+                    fallback = (f"This should help — you cut back on posts that get fewer views than "
+                                f"usual (about {vpd:.0f} a day vs your usual {perf_median:.0f}).")
                 elif not helps and d > 0:
-                    why = (f"Worth watching — these posts get fewer views than usual (about "
-                           f"{vpd:.0f} a day vs your usual {perf_median:.0f}), so leaning on them can lower your reach.")
+                    fallback = (f"Worth watching — these posts get fewer views than usual (about "
+                                f"{vpd:.0f} a day vs your usual {perf_median:.0f}), so leaning on them can lower your reach.")
                 else:
-                    why = (f"This may cost you — you posted fewer of a type that was doing better "
-                           f"than most (about {vpd:.0f} views a day vs your usual {perf_median:.0f}).")
+                    fallback = (f"This may cost you — you posted fewer of a type that was doing better "
+                                f"than most (about {vpd:.0f} views a day vs your usual {perf_median:.0f}).")
             else:
-                why = "This is a change in the kind of deals you posted."
+                fallback = "This is a change in the kind of deals you posted, without enough performance data yet to say if it helps or hurts."
+            why = narrate("why this post-type mix shift matters", obs, evidence, fallback)
             insights.append({
                 "metric": "post_type_mix", "direction": direction,
                 "change_value": round(d * 100, 1), "change_unit": "pp",
                 "period_label": f"last {WINDOW_DAYS}d vs prior {WINDOW_DAYS}d",
                 "observation": obs, "reasoning": why,
-                "evidence": {"cluster": cluster, "share_recent": round(sr.get(cluster, 0), 3),
-                             "share_prior": round(sp.get(cluster, 0), 3),
-                             "avg_views_per_day": vpd, "perf_median": perf_median},
+                "evidence": evidence,
                 "confidence": round(min(1.0, min(len(recent), len(prior)) / 100), 3),
             })
 
@@ -182,29 +188,40 @@ class ReasoningEngine(BaseCollector):
         if len(recent) < MIN_PERIOD_POSTS or len(prior) < MIN_PERIOD_POSTS:
             return
         specs = (
-            ("a 'buy now / grab deal' style call-to-action", lambda f: f.has_cta,
-             "This is just a change in how you word your posts."),
-            ("an image or video", lambda f: f.has_media,
-             "Your plain text-and-link deal posts often get more views than image-heavy ones, "
-             "so fewer images is not necessarily a problem."),
+            ("cta", "a 'buy now / grab deal' style call-to-action", lambda f: f.has_cta),
+            ("media", "an image or video", lambda f: f.has_media),
         )
-        for label, pred, note in specs:
+        for factor, label, pred in specs:
             rr = T.rate(recent, pred) or 0.0
             rp = T.rate(prior, pred) or 0.0
             d = rr - rp
-            if abs(d) >= SIGNIF_PP:
-                direction = "up" if d > 0 else "down"
-                moved = "more" if d > 0 else "fewer"
-                obs = (f"You're using {label} in {moved} posts — {_in10(rr)} now, "
-                       f"versus {_in10(rp)} before.")
-                insights.append({
-                    "metric": "content_style", "direction": direction,
-                    "change_value": round(d * 100, 1), "change_unit": "pp",
-                    "period_label": f"last {WINDOW_DAYS}d vs prior {WINDOW_DAYS}d",
-                    "observation": obs, "reasoning": note,
-                    "evidence": {"factor": label, "rate_recent": rr, "rate_prior": rp},
-                    "confidence": round(min(1.0, min(len(recent), len(prior)) / 100), 3),
-                })
+            if abs(d) < SIGNIF_PP:
+                continue
+            direction = "up" if d > 0 else "down"
+            moved = "more" if d > 0 else "fewer"
+            obs = (f"You're using {label} in {moved} posts — {_in10(rr)} now, "
+                   f"versus {_in10(rp)} before.")
+            pct = abs(round(d * 100, 1))
+            evidence = {"factor": label, "rate_recent": round(rr, 3), "rate_prior": round(rp, 3),
+                        "change_pp": round(d * 100, 1)}
+            # data-specific fallback — varies with actual magnitude, not a fixed sentence
+            if factor == "cta":
+                fallback = (f"That's a {pct:.0f}-point shift in wording, not in what you're selling — "
+                            "on its own it rarely explains a reach change unless a content-mix or "
+                            "volume shift moved alongside it.")
+            else:
+                fallback = (f"That's a {pct:.0f}-point shift in how many posts carry an image — plain "
+                            "text-and-link posts have historically matched or beaten image-heavy ones "
+                            "in this channel's data, so this shift alone is unlikely to explain a reach change.")
+            why = narrate(f"why this {factor} shift happened and whether it matters", obs, evidence, fallback)
+            insights.append({
+                "metric": "content_style", "direction": direction,
+                "change_value": round(d * 100, 1), "change_unit": "pp",
+                "period_label": f"last {WINDOW_DAYS}d vs prior {WINDOW_DAYS}d",
+                "observation": obs, "reasoning": why,
+                "evidence": evidence,
+                "confidence": round(min(1.0, min(len(recent), len(prior)) / 100), 3),
+            })
 
     def _engagement_shift(self, facts, now, perf, perf_median, insights):
         # maturity-matched: aged 30-60d (recent) vs 60-90d (prior)
@@ -257,10 +274,11 @@ class ReasoningEngine(BaseCollector):
         obs = (f"Your posts are getting {'more' if direction == 'up' else 'fewer'} views — about "
                f"{vr:.0f} views a day now, versus about {vp:.0f} a month earlier "
                "(comparing posts that have been up for the same length of time).")
-        why = ("Likely because " + "; and ".join(reasons) + "." if reasons
-               else "We couldn't pin this on one clear cause in your data.")
-        why += (" This is an early estimate — it will get more accurate as we track how fast "
-                "each new post gains views.")
+        fallback = ("Likely because " + "; and ".join(reasons) + "." if reasons
+                    else "We couldn't pin this on one clear cause in your data.")
+        fallback += (" This is an early estimate — it will get more accurate as we track how fast "
+                     "each new post gains views.")
+        why = narrate("why engagement per post changed", obs, ev, fallback)
         insights.append({
             "metric": "engagement", "direction": direction,
             "change_value": change, "change_unit": "pct",
