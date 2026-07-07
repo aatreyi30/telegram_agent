@@ -85,6 +85,62 @@ def post_type_performance(s: Session) -> list[dict]:
                 .order_by(PostTypePerformance.rank_by_views_per_day))]
 
 
+def post_type_performance_range(s: Session, start, end) -> list[dict]:
+    """Same shape as `post_type_performance`, computed live from raw owned posts
+    within [start, end) instead of the last batch snapshot — lets the Insights
+    date-picker show performance for the selected window rather than always
+    whatever the last Channel Learning Engine run happened to cover."""
+    import statistics
+    from collections import defaultdict
+    from datetime import datetime, timezone
+
+    from src.db.models import Post
+    from src.db.models_classification import PostClassification, PostTypeCluster
+    from src.db.models_normalization import NormalizedPost, SourceType
+
+    q = (
+        select(Post.posted_at, Post.views, PostTypeCluster.descriptor)
+        .select_from(Post)
+        .join(NormalizedPost, (NormalizedPost.source_id == Post.id)
+              & (NormalizedPost.source_type == SourceType.OWNED))
+        .join(PostClassification, PostClassification.normalized_post_id == NormalizedPost.id)
+        .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id)
+    )
+    if start:
+        q = q.where(Post.posted_at >= start)
+    if end:
+        q = q.where(Post.posted_at < end)
+
+    now = datetime.now(timezone.utc)
+    groups: dict[str, list[tuple]] = defaultdict(list)
+    for posted_at, views, descriptor in s.execute(q).all():
+        if descriptor:
+            groups[descriptor].append((posted_at, views))
+
+    total = sum(len(items) for items in groups.values())
+    if not total:
+        return []
+
+    out = []
+    for descriptor, items in groups.items():
+        vpd = []
+        for posted_at, views in items:
+            if views is None or posted_at is None:
+                continue
+            pa = posted_at if posted_at.tzinfo else posted_at.replace(tzinfo=timezone.utc)
+            age = max((now - pa).total_seconds() / 86400.0, 1.0)
+            vpd.append(views / age)
+        out.append({
+            "post_type": descriptor, "posts": len(items),
+            "share": round(len(items) / total, 3),
+            "avg_views_per_day": round(statistics.fmean(vpd), 1) if vpd else None,
+        })
+    out.sort(key=lambda r: (r["avg_views_per_day"] or -1), reverse=True)
+    for i, r in enumerate(out):
+        r["rank"] = i + 1
+    return out
+
+
 def learnings(s: Session) -> list[dict]:
     window = _owned_window_desc(s)
     out = []

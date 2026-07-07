@@ -190,8 +190,9 @@ def top_actions(limit: int = 5) -> list[dict]:
     return recs
 
 
-def insights() -> dict:
+def insights(start: str | None = None, end: str | None = None) -> dict:
     from src.services.generation.strategy import PostingStrategy
+    from src.services.intelligence.growth import content_mix_from_rows
 
     with session_scope() as s:
         strat = PostingStrategy.load(s)
@@ -203,12 +204,22 @@ def insights() -> dict:
                        "sample": r.sample} for r in strat.emoji_rules],
             "window": strat.window_desc,
         }
+        blueprint = ctx.growth_blueprint(s)
+        date_filtered = bool(start or end)
+        if date_filtered:
+            su, eu = _ist_range_to_utc(start, end)
+            performance = ctx.post_type_performance_range(s, su, eu)
+            content_mix = content_mix_from_rows(performance)
+        else:
+            performance = ctx.post_type_performance(s)
+            content_mix = (blueprint.get("blueprint") or {}).get("content_mix")
         return {
             "recommendations": ctx.growth_recommendations(s, limit=20),
             "reasoning": ctx.reasoning_insights(s),
-            "learnings": ctx.learnings(s),
-            "performance": ctx.post_type_performance(s),
-            "blueprint": ctx.growth_blueprint(s),
+            "performance": performance,
+            "content_mix": content_mix,
+            "date_filtered": date_filtered,
+            "blueprint": blueprint,
             "style": ctx.channel_style(s),
             "emoji_policy": emoji_policy,
         }
@@ -305,8 +316,10 @@ def plans() -> list[dict]:
                          .order_by(CampaignPlan.plan_type)).all()
         return [{"plan_type": p.plan_type, "title": p.title,
                  "target_date": p.target_date.isoformat() if p.target_date else None,
+                 "end_date": p.end_date.isoformat() if p.end_date else None,
                  "confidence": p.confidence, "blueprint": p.blueprint,
-                 "expected_outcome": p.expected_outcome, "risks": p.risks} for p in rows]
+                 "expected_outcome": p.expected_outcome, "risks": p.risks,
+                 "evidence": p.evidence} for p in rows]
 
 
 def _page_meta(total: int, page: int, page_size: int) -> dict:

@@ -17,8 +17,11 @@ def overview():
 
 
 @router.get("/insights")
-def insights():
-    return ok(service.insights())
+def insights(start: str | None = Query(default=None), end: str | None = Query(default=None)):
+    try:
+        return ok(service.insights(start=start, end=end))
+    except ValueError:
+        return fail("start/end must be YYYY-MM-DD", 400)
 
 
 @router.get("/analytics")

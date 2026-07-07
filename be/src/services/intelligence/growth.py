@@ -74,6 +74,34 @@ def plain_label(descriptor: str | None) -> str:
     return descriptor or "posts"
 
 
+def content_mix_from_rows(rows: list[dict]) -> list[dict]:
+    """Build content-mix action + a real numeric target_share from plain
+    {post_type, avg_views_per_day, share} dicts — shared by the Growth Engine's
+    batch blueprint and the Insights page's live date-ranged view. `target_share`
+    is a bounded nudge off the current share (not a formal optimization): +50%
+    (capped at 30%) for above-median performers, -30% for below-median ones."""
+    vals = [r["avg_views_per_day"] for r in rows if r.get("avg_views_per_day")]
+    med = statistics.median(vals) if vals else None
+    out = []
+    for r in rows:
+        avg = r.get("avg_views_per_day")
+        share = r.get("share") or 0.0
+        action = "maintain"
+        target_share = share
+        if med and avg:
+            if avg >= 1.25 * med:
+                action = "increase"
+                target_share = min(0.30, round(share * 1.5, 3))
+            elif avg <= 0.75 * med:
+                action = "decrease"
+                target_share = round(share * 0.7, 3)
+        out.append({
+            "post_type": r["post_type"], "current_share": share,
+            "target_share": target_share, "avg_views_per_day": avg, "action": action,
+        })
+    return out
+
+
 class GrowthEngine(BaseCollector):
     name = "growth"
     retryable = False
@@ -544,21 +572,9 @@ class GrowthEngine(BaseCollector):
         return None
 
     def _content_mix(self, perf) -> list[dict]:
-        vals = [p.avg_views_per_day for p in perf if p.avg_views_per_day]
-        med = statistics.median(vals) if vals else None
-        out = []
-        for p in perf:
-            action = "maintain"
-            if med and p.avg_views_per_day:
-                if p.avg_views_per_day >= 1.25 * med:
-                    action = "increase"
-                elif p.avg_views_per_day <= 0.75 * med:
-                    action = "decrease"
-            out.append({
-                "post_type": p.post_type, "current_share": p.share,
-                "avg_views_per_day": p.avg_views_per_day, "action": action,
-            })
-        return out
+        rows = [{"post_type": p.post_type, "avg_views_per_day": p.avg_views_per_day,
+                 "share": p.share} for p in perf]
+        return content_mix_from_rows(rows)
 
     def _derive_channel_type(self, perf):
         # dominant post type by volume -> channel-type label (derived, not hardcoded)
