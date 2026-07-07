@@ -12,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from src.services.collection.base import JobRunner
 from src.services.collection.channels import owned_handles
 from src.services.collection.merchant import MerchantEnrichmentCollector  # noqa: F401 (registry)
+from src.services.collection.link_resolution import LinkResolutionEngine
 from src.services.collection.telegram_competitor import CompetitorCollector
 from src.services.collection.telegram_owned import OwnedChannelCollector
 from src.config.settings import get_settings
@@ -54,6 +55,13 @@ class CollectionScheduler:
                 target=username,
             )
 
+    def _resolve_links(self) -> None:
+        self.runner.run_collector(
+            LinkResolutionEngine(),
+            collection_type=CollectionType.INCREMENTAL,
+            target="link_resolution",
+        )
+
     def start(self) -> None:
         s = self.settings
         if s.owned_channels:
@@ -83,6 +91,14 @@ class CollectionScheduler:
             logger.info("scheduled competitor monitoring for %d channel(s)", len(s.competitor_channels))
         else:
             logger.warning("no COMPETITOR_CHANNELS configured — competitor monitoring disabled")
+
+        self.scheduler.add_job(
+            self._resolve_links,
+            "interval",
+            minutes=s.link_resolve_interval_min,
+            id="link_resolution",
+        )
+        logger.info("scheduled link resolution every %d min", s.link_resolve_interval_min)
 
         self.scheduler.start()
         logger.info("scheduler started")

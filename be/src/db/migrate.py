@@ -41,6 +41,7 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
     "growth_recommendations": [("channel_id", "INTEGER")],
     "reasoned_insights": [("channel_id", "INTEGER")],
     "normalized_posts": [("channel_id", "INTEGER")],
+    "competitors": [("category", "VARCHAR(16)")],
 }
 
 

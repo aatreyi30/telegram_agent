@@ -35,7 +35,7 @@ class LinkResolutionEngine(BaseCollector):
     name = "link_resolution"
     retryable = False
 
-    def __init__(self, limit: int = 300, delay: float = 0.3):
+    def __init__(self, limit: int = 300, delay: float = 0.1):
         self.limit = limit
         self.delay = delay
         self.ua = get_settings().tme_user_agent
@@ -58,7 +58,7 @@ class LinkResolutionEngine(BaseCollector):
 
         affected_posts: set[int] = set()
         with httpx.Client(
-            timeout=15.0, follow_redirects=True,
+            timeout=5.0, follow_redirects=True,
             headers={"User-Agent": self.ua},
         ) as client:
             for link_id, url in pending:
@@ -104,15 +104,16 @@ class LinkResolutionEngine(BaseCollector):
 
     @staticmethod
     def _backfill_primary_merchant(post_ids: set[int]) -> int:
-        """Set primary_merchant_key on posts that had it UNKNOWN, from the newly
-        resolved links (most common known merchant among the post's links)."""
+        """Re-derive primary_merchant_key from ALL known merchants (direct +
+        resolved) across a post's links. Updates whenever the best merchant
+        changes, so previously set merchants get corrected as new links resolve."""
         if not post_ids:
             return 0
         updated = 0
         with session_scope() as s:
             for pid in post_ids:
                 np = s.get(NormalizedPost, pid)
-                if np is None or np.primary_merchant_key is not None:
+                if np is None:
                     continue
                 keys = [mk for (mk,) in s.execute(
                     select(ExtractedLink.merchant_key).where(
@@ -123,7 +124,8 @@ class LinkResolutionEngine(BaseCollector):
                     continue
                 counts = Counter(keys)
                 top, n = counts.most_common(1)[0]
-                np.primary_merchant_key = top
-                np.primary_merchant_confidence = round(n / len(keys), 3)
-                updated += 1
+                if np.primary_merchant_key != top:
+                    np.primary_merchant_key = top
+                    np.primary_merchant_confidence = round(n / len(keys), 3)
+                    updated += 1
         return updated

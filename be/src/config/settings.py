@@ -112,6 +112,7 @@ class Settings:
     owned_analytics_interval_min: int = 60
     competitor_interval_min: int = 60
     merchant_refresh_interval_min: int = 360
+    link_resolve_interval_min: int = 60
     metric_snapshot_offsets_raw: str = "1,4,24"
 
     # --- AI layer (Groq — OpenAI-compatible) ---
@@ -172,6 +173,7 @@ class Settings:
             owned_analytics_interval_min=_get_int("OWNED_ANALYTICS_INTERVAL_MIN", 60),
             competitor_interval_min=_get_int("COMPETITOR_INTERVAL_MIN", 60),
             merchant_refresh_interval_min=_get_int("MERCHANT_REFRESH_INTERVAL_MIN", 360),
+            link_resolve_interval_min=_get_int("LINK_RESOLVE_INTERVAL_MIN", 60),
             metric_snapshot_offsets_raw=_get("METRIC_SNAPSHOT_OFFSETS_HOURS", "1,4,24"),
             log_level=_get("LOG_LEVEL", "INFO"),
         )
