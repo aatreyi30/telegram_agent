@@ -280,7 +280,7 @@ export function CompetitorDashboard() {
                 {entities.length >= 2 && (
                   <Card>
                     <CardHeader><CardTitle className="text-base">Style & behaviour benchmark</CardTitle>
-                      <p className="text-xs text-muted-foreground">Side-by-side. <span className="text-green-500">Green</span> = best in row.</p></CardHeader>
+                      </CardHeader>
                     <CardContent className="overflow-x-auto p-0">
                       <Table>
                         <THead>
