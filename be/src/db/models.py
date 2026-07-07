@@ -311,6 +311,8 @@ class Competitor(Base, TimestampMixin):
     discovered_via: Mapped[str | None] = mapped_column(String(64))
     category: Mapped[str | None] = mapped_column(String(16))  # "platform" | "channel"
     last_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_confidence: Mapped[float | None] = mapped_column(Float)
+    verified_by: Mapped[str | None] = mapped_column(String(16))  # heuristic|ai|manual
 
     posts: Mapped[list["CompetitorPost"]] = relationship(back_populates="competitor")
 
