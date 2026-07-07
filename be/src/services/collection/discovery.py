@@ -291,12 +291,100 @@ def discover_competitors(max_add: int = 5) -> dict:
             "top": [c["username"] for c in candidates[:max_add]]}
 
 
+def verify_candidate(brand: str, candidates: list[dict]) -> tuple[str | None, float, str]:
+    """Resolve the official channel for ``brand`` from candidate dicts.
+
+    Candidates are the raw dicts produced by ``_search_name_variations``/``_search``
+    (``username``, ``title``, ``participants``, optionally ``score``). Similarity and
+    relevance are computed here from ``title`` via the existing heuristics
+    (``_name_similarity_score`` / ``_relevance``) unless a caller already supplied
+    ``similarity``/``relevance``/``description`` on the dict.
+
+    Returns ``(username_or_none, confidence 0..1, method)`` where
+    ``method`` is ``"heuristic"`` or ``"ai"``. Deterministic gate first; the AI
+    verifier is only consulted for ambiguous cases, and a weak sole/lead candidate
+    is rejected outright rather than blindly trusted (the accuracy bug this fixes:
+    discovery used to store the top-ranked candidate even when it barely matched).
+    """
+    if not candidates:
+        return None, 0.0, "heuristic"
+
+    scored = []
+    for c in candidates:
+        title = c.get("title") or c.get("username") or ""
+        sim = c.get("similarity")
+        if sim is None:
+            sim = _name_similarity_score(brand, title)
+        rel = c.get("relevance")
+        if rel is None:
+            rel = _relevance(title, c.get("description") or "")
+        scored.append((float(sim), rel, c))
+
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    sim, rel, top = scored[0]
+    runner_sim = scored[1][0] if len(scored) > 1 else None
+
+    # Strong deterministic accept.
+    if sim >= 0.8 and rel >= 2:
+        return top["username"], round(min(0.99, sim), 2), "heuristic"
+    # Clearly weak sole/lead candidate -> reject rather than blindly trust.
+    if sim < 0.3 and rel < 2:
+        return None, round(sim, 2), "heuristic"
+
+    # Ambiguous -> ask the LLM for a structured verdict (best-effort).
+    from src.ai.client import AIClient, AIUnavailable
+
+    ai = AIClient()
+    ok, _ = ai.available()
+    if ok:
+        try:
+            lines = "\n".join(
+                f"- @{c.get('username')}: title={c.get('title', '')!r}"
+                for _, _, c in scored[:6]
+            )
+            prompt = (
+                f"Which candidate Telegram channel, if any, is the OFFICIAL channel for the brand "
+                f"\"{brand}\"? Consider only the given candidates.\n{lines}\n\n"
+                "Reply with ONLY a compact JSON object: "
+                '{"username": "<exact username or null>", "confidence": <0..1>}'
+            )
+            raw = ai.complete(prompt, max_tokens=120)
+            import json
+            import re
+
+            m = re.search(r"\{.*\}", raw, re.S)
+            if m:
+                data = json.loads(m.group(0))
+                uname = data.get("username")
+                conf = float(data.get("confidence", 0.0))
+                if uname:
+                    match = next(
+                        (c for _, _, c in scored
+                         if c.get("username", "").lstrip("@").lower() == str(uname).lstrip("@").lower()),
+                        None,
+                    )
+                    if match is not None:
+                        return match["username"], round(conf, 2), "ai"
+                return None, round(conf, 2), "ai"
+        except (AIUnavailable, Exception) as e:
+            logger.debug("[discovery:verify] AI verification failed for %r: %s", brand, e)
+
+    # AI unavailable/failed: accept the lead only if it clearly beats the runner-up.
+    if sim >= 0.6 and (runner_sim is None or sim - runner_sim >= 0.2):
+        return top["username"], round(sim, 2), "heuristic"
+    return None, round(sim, 2), "heuristic"
+
+
 def resolve_username(name: str) -> dict | None:
     """Given a raw competitor name, search Telegram for the best-matching channel.
 
-    Handles name variations (abbreviations, suffixes, prefixes, etc.).
-    Returns dict with ``username``, ``title``, ``participants``, ``score``
-    or ``None`` if nothing reasonable found.
+    Handles name variations (abbreviations, suffixes, prefixes, etc.), then runs
+    the result through ``verify_candidate`` (stricter deterministic gate + AI
+    verifier for ambiguous cases) instead of blindly trusting the top-ranked hit.
+    Returns dict with ``username``, ``title``, ``participants``, ``score``,
+    ``resolution_confidence``, ``verified_by``, or ``None`` if nothing confident
+    enough was found. When a ``Competitor`` row already exists for ``name``, its
+    ``resolution_confidence``/``verified_by`` columns are updated with the verdict.
     """
     s = get_settings()
     if not (s.telegram_api_id and s.telegram_api_hash):
@@ -314,26 +402,38 @@ def resolve_username(name: str) -> dict | None:
         logger.info("[discovery:resolve] no Telegram channels found for %r", name)
         return None
 
-    # score each: name similarity + relevance + log(participants)
+    # score each for logging/back-compat: name similarity + relevance + log(participants)
     for c in candidates:
         sim = _name_similarity_score(name, c["title"])
         rel = _relevance(c["title"], "")
         c["score"] = sim * 10 + rel + math.log10(max(c["participants"], 1))
-
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    best = candidates[0]
 
-    # only return if we have a reasonable match
-    sim = _name_similarity_score(name, best["title"])
-    if sim < 0.3 and _relevance(best["title"], "") < 2:
+    username, confidence, method = verify_candidate(name, candidates)
+    if username is None:
         logger.info(
-            "[discovery:resolve] best match for %r is %r (title=%r, sim=%.2f) — too weak, skipping",
-            name, best["username"], best["title"], sim,
+            "[discovery:resolve] no confident match for %r among %d candidates "
+            "(best confidence=%.2f) — skipping",
+            name, len(candidates), confidence,
         )
         return None
 
+    best = next(c for c in candidates if c["username"] == username)
     logger.info(
-        "[discovery:resolve] %r -> %r (title=%r, sim=%.2f)",
-        name, best["username"], best["title"], sim,
+        "[discovery:resolve] %r -> %r (title=%r, confidence=%.2f via %s)",
+        name, best["username"], best["title"], confidence, method,
     )
+
+    # Persist resolution provenance on the existing Competitor row for this name, if any.
+    with session_scope() as sess:
+        comp = next(
+            (c for c in sess.scalars(select(Competitor)) if c.username and c.username.lower() == name.lower()),
+            None,
+        )
+        if comp is not None:
+            comp.resolution_confidence = confidence
+            comp.verified_by = method
+
+    best["resolution_confidence"] = confidence
+    best["verified_by"] = method
     return best
