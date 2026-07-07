@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { Async, Empty } from "@/components/Async";
 import { PageHeader } from "@/components/AppLayout";
 import { Badge } from "@/components/ui/primitives";
 import { Card, CardContent } from "@/components/ui/card";
 import { Pagination } from "@/components/ui/pagination";
-import { api } from "@/services/api";
+import { useDrafts } from "@/queries/queries";
+import type { EmojiPolicy, StrategyRationale } from "@/types/api";
 
 const URL_RE = /(https?:\/\/[^\s]+)/g;
 
@@ -28,7 +28,7 @@ function Linkified({ text }: { text: string }) {
 
 export function Drafts() {
   const [page, setPage] = useState(1);
-  const q = useQuery({ queryKey: ["drafts", page], queryFn: () => api.get<any>(`/api/drafts?page=${page}&page_size=8`) });
+  const q = useDrafts(page);
 
   return (
     <div>
@@ -41,10 +41,10 @@ export function Drafts() {
           d.items.length ? (
             <div className="space-y-4">
               <div className="grid gap-4 lg:grid-cols-2">
-                {d.items.map((r: any) => {
+                {d.items.map((r) => {
                   const aff = r.affiliate_status || "";
-                  const rat = r.rationale || {};
-                  const ep = rat.emoji_policy || r.emoji_policy || {};
+                  const rat: Partial<StrategyRationale> = r.rationale ?? {};
+                  const ep: Partial<EmojiPolicy> = rat.emoji_policy || r.emoji_policy || {};
                   return (
                     <Card key={r.id}>
                       <CardContent className="p-4">
@@ -59,13 +59,14 @@ export function Drafts() {
                           ) : null}
                         </div>
                         <Linkified text={r.text} />
-                        {(rat.why_type || rat.target_window_ist?.why || ep.avoid?.length) && (
+                        {(rat.why_type || rat.target_window_ist?.why || ep.avoid?.length || rat.why_this_deal?.why) && (
                           <div className="mt-3 space-y-1 text-xs text-muted-foreground">
                             {rat.why_type && <div><span className="font-medium text-foreground">Why this post:</span> {rat.why_type}</div>}
                             {rat.target_window_ist?.why && <div><span className="font-medium text-foreground">Best time:</span> {rat.target_window_ist.why}</div>}
                             {ep.avoid?.length ? (
                               <div><span className="font-medium text-foreground">Emoji policy:</span> lead {(ep.lead || []).join(" ")}; stripped {(ep.avoid || []).join(" ")}</div>
                             ) : null}
+                            {rat.why_this_deal?.why && <div><span className="font-medium text-foreground">Why this deal:</span> {rat.why_this_deal.why}</div>}
                           </div>
                         )}
                       </CardContent>
