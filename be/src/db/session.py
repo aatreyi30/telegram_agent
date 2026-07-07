@@ -73,6 +73,7 @@ def init_db() -> None:
     from src.db import models_reasoning  # noqa: F401  (Phase 8 tables)
     from src.db import models_generation  # noqa: F401  (Phase 9 tables)
     from src.db import models_campaign  # noqa: F401  (Phase 10 tables)
+    from src.db import models_report  # noqa: F401  (daily aggregate report rows)
     from src.db import models_automation  # noqa: F401  (Phase 11 tables)
     from src.db import models_scheduler  # noqa: F401  (scheduler run logs)
 
