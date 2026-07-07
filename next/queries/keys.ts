@@ -16,4 +16,5 @@ export const queryKeys = {
   org: () => ["org"] as const,
   channels: () => ["channels"] as const,
   users: () => ["users"] as const,
+  digest: () => ["digest"] as const,
 };

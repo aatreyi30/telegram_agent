@@ -5,7 +5,7 @@ import { api } from "@/services/api";
 import { queryKeys } from "./keys";
 import type {
   AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorsResponse,
-  DataRangeResponse, DayResponse, DraftsResponse, GrowthResponse, InsightsResponse,
+  DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
   MerchantsResponse, OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
   QueueResponse, UsersResponse, WeeklyResponse,
 } from "@/types/api";
@@ -86,4 +86,7 @@ export function useChannels() {
 }
 export function useUsers() {
   return useQuery({ queryKey: queryKeys.users(), queryFn: () => api.get<UsersResponse>("/users") });
+}
+export function useDigest() {
+  return useQuery({ queryKey: queryKeys.digest(), queryFn: () => api.get<DigestResponse>("/digest") });
 }

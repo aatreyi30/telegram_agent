@@ -221,3 +221,23 @@ export type UsersResponse = UserAccount[];
 export type ChannelsResponse = ChannelDTO[];
 
 export interface LoginResponse { token: string; user: AuthUser; }
+
+export interface DigestPlanSlot { type: string; window_ist: string; theme: string; why?: string; }
+
+export interface DigestPlan { post_slots?: DigestPlanSlot[]; emphasis?: string; watch?: string; }
+
+export interface ReconciliationAdherence {
+  planned: number; published: number; matched: number; missed_windows: string[];
+  by_type: { planned: Record<string, number>; published: Record<string, number>; };
+}
+
+export interface ReconciliationAttributionItem { metric: string; expected: number; actual: number | null; gap: number | null; }
+
+export interface ReconciliationAttribution { items: ReconciliationAttributionItem[]; correlational: boolean; caveat: string; }
+
+export interface Reconciliation { adherence: ReconciliationAdherence; attribution: ReconciliationAttribution; caveat: string; }
+
+export type DigestResponse =
+  | { available: false; digest: ""; plan: null; factcheck_status: null; reconciliation: null; generated_at: null; }
+  | { available: true; digest: string; plan: DigestPlan | null; factcheck_status: string | null;
+      reconciliation: Reconciliation | null; generated_at: string | null; };
