@@ -1,6 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  BarChart3, CalendarDays, LayoutDashboard, Lightbulb,
+  BarChart3, CalendarDays, CreditCard, LayoutDashboard, Lightbulb,
   ListOrdered, Package, Send, Settings as SettingsIcon, TrendingUp, Users2,
 } from "lucide-react";
 
@@ -20,6 +20,7 @@ export const NAV: NavItem[] = [
   { to: "/competitors", label: "Competitors", icon: Users2, group: "Understand" },
   { to: "/growth", label: "Growth", icon: TrendingUp, group: "Understand" },
   { to: "/plan", label: "Plan", icon: ListOrdered, group: "Act" },
+  { to: "/billing", label: "Billing", icon: CreditCard, group: "" },
   { to: "/drafts", label: "Drafts", icon: Send, group: "Act" },
   { to: "/queue", label: "Schedule", icon: Package, group: "Act" },
   { to: "/settings", label: "Settings", icon: SettingsIcon, group: "" },
