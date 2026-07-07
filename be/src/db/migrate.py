@@ -33,7 +33,16 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("last_login_at", "DATETIME"),
     ],
     # multi-tenancy: attribute each derived row to a channel (backfilled by backfill_channel_id)
-    "campaign_plans": [("channel_id", "INTEGER")],
+    "campaign_plans": [
+        ("channel_id", "INTEGER"),
+        ("is_ai_generated", "BOOLEAN DEFAULT 0"),
+        ("ai_digest", "TEXT"),
+        ("cited_numbers", "JSON"),
+        ("factcheck_status", "VARCHAR(16)"),
+        ("report_ids", "JSON"),
+        ("adherence", "JSON"),
+        ("reconciliation", "JSON"),
+    ],
     "channel_style_profiles": [("channel_id", "INTEGER")],
     "post_type_performance": [("channel_id", "INTEGER")],
     "learning_records": [("channel_id", "INTEGER")],

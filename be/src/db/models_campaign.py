@@ -80,3 +80,13 @@ class CampaignPlan(Base, TimestampMixin):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(16), default="draft")  # draft/approved
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # --- AI analyst/planner provenance (rescue plan §2.5) ---
+    is_ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)
+    ai_digest: Mapped[str | None] = mapped_column(Text)
+    cited_numbers: Mapped[list | None] = mapped_column(JSON)
+    factcheck_status: Mapped[str | None] = mapped_column(String(16))  # passed|failed|skipped
+    report_ids: Mapped[list | None] = mapped_column(JSON)             # DailyChannelReport ids fed to the model
+    # --- closed-loop feedback (§3.5) ---
+    adherence: Mapped[dict | None] = mapped_column(JSON)              # planned vs published (deterministic)
+    reconciliation: Mapped[dict | None] = mapped_column(JSON)         # expected-vs-actual + AI summary
