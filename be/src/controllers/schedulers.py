@@ -143,17 +143,21 @@ def j_growth_detection() -> dict:
     return {"processed": n, "detail": "growth recommendations refreshed"}
 
 
+def j_competitor_discover() -> dict:
+    """Discover new competitor channels. Runs on its own cadence, ahead of sync,
+    so newly added competitors get their posts collected by j_competitor_sync
+    before j_competitor_intel profiles them (fixes the same-tick ordering bug)."""
+    from src.services.collection.discovery import discover_competitors
+    added = discover_competitors(max_add=5).get("added", 0)
+    return {"processed": added, "detail": f"+{added} competitors discovered"}
+
+
 def j_competitor_intel() -> dict:
-    # discover first, THEN generate competitor intelligence over all tracked channels
-    added = 0
-    try:
-        from src.services.collection.discovery import discover_competitors
-        added = discover_competitors(max_add=5).get("added", 0)
-    except Exception as e:
-        logger.warning("[sched] discovery skipped: %s", e)
+    # profile ONLY over competitors that already have collected posts;
+    # discovery runs separately in j_competitor_discover (see above)
     from src.services.intelligence.competitor import CompetitorIntelligenceEngine
     n = _run_engine(CompetitorIntelligenceEngine(), "competitor-intel")
-    return {"processed": n, "detail": f"+{added} discovered; competitor intel refreshed"}
+    return {"processed": n, "detail": "competitor intel refreshed"}
 
 
 def _briefing(weekly=False) -> str:
@@ -339,6 +343,7 @@ JOBS: list[Job] = [
     Job("link_resolution", "Shortlink Resolution", "every 15 min",
         IntervalTrigger(minutes=15), "high", j_link_resolution),
     Job("growth_detection", "Growth Opportunity Detection", "daily 06:00", CronTrigger(hour=6, minute=0), "medium", j_growth_detection),
+    Job("competitor_discover", "Competitor Discovery", "daily 06:30", CronTrigger(hour=6, minute=30), "medium", j_competitor_discover),
     Job("competitor_intel", "Competitor Intelligence", "daily 07:00", CronTrigger(hour=7, minute=0), "medium", j_competitor_intel),
     Job("ai_daily_summary", "AI Daily Summary", "daily 08:00", CronTrigger(hour=8, minute=0), "medium", j_ai_daily_summary),
     Job("weekly_report", "Weekly Report", "Mon 08:30", CronTrigger(day_of_week="mon", hour=8, minute=30), "medium", j_weekly_report),
