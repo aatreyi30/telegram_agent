@@ -654,7 +654,7 @@ def learn_status() -> None:
             .where(PostTypePerformance.learning_version == LEARNING_VERSION)
             .order_by(PostTypePerformance.rank_by_views_per_day)
         ).all()
-        pt = Table(title="Post-type performance (age-normalized)")
+        pt = Table(title="Post-type performance (views/day)")
         for col in ("rank", "post type", "posts", "share", "avg views/day", "avg fwd", "conf"):
             pt.add_column(col)
         for p in perf:

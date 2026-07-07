@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from src.config.settings import get_settings
 from src.logger import get_logger
 from src.middleware.errors import register_error_handlers
-from src.routers import agent, auth, channels, control, data, health, org, schedulers, users
+from src.routers import auth, channels, control, data, health, org, users
 
 logger = get_logger(__name__)
 
@@ -69,7 +69,7 @@ def create_app() -> FastAPI:
     )
     register_error_handlers(app)
 
-    for r in (health, auth, control, data, channels, users, org, agent, schedulers):
+    for r in (health, auth, control, data, channels, users, org):
         app.include_router(r.router)
 
     _mount_spa(app)

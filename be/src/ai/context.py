@@ -95,7 +95,7 @@ def learnings(s: Session) -> list[dict]:
         if r.metric_value is not None and r.comparison_value:
             lift = (r.metric_value / r.comparison_value - 1) * 100
             how = (f"{r.metric_value:.1f} vs {r.comparison_value:.1f} {r.metric_name or 'views/day'} "
-                   f"= {lift:+.0f}% · n={r.sample_size:,} · {window} · age-normalized")
+                   f"= {lift:+.0f}% · n={r.sample_size:,} · {window}")
         out.append({"category": r.category, "statement": r.statement,
                     "confidence": r.confidence, "sample_size": r.sample_size,
                     "how_calculated": how, "period": window})
