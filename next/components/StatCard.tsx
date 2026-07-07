@@ -1,7 +1,8 @@
 "use client";
 
 import { ReactNode } from "react";
-import { TrendingDown, TrendingUp } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { AnalyticsDownIcon, AnalyticsUpIcon } from "@hugeicons/core-free-icons";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
@@ -19,7 +20,7 @@ export function StatCard({ label, value, sub, icon, trend, className }: {
             {sub && <p className="mt-0.5 text-xs text-muted-foreground">{sub}</p>}
             {trend && (
               <div className={cn("mt-1 flex items-center gap-1 text-xs font-medium", isGood ? "text-green-600" : "text-red-600")}>
-                {isGood ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                {isGood ? <HugeiconsIcon icon={AnalyticsUpIcon} className="h-3 w-3" /> : <HugeiconsIcon icon={AnalyticsDownIcon} className="h-3 w-3" />}
                 <span>{trend.value >= 0 ? "+" : ""}{trend.value}%</span>
                 {trend.label && <span className="text-muted-foreground font-normal">{trend.label}</span>}
               </div>

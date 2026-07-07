@@ -1,7 +1,8 @@
 "use client";
 
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { ArrowUp, Users } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ArrowUp01Icon, UserGroupIcon } from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatCard } from "@/components/StatCard";
@@ -24,7 +25,7 @@ export default function GrowthPage() {
             return (
               <Card>
                 <CardContent className="p-6 text-center text-sm text-muted-foreground">
-                  <Users size={32} className="mx-auto mb-2 opacity-30" />
+                  <HugeiconsIcon icon={UserGroupIcon} size={32} className="mx-auto mb-2 opacity-30" />
                   <p>{d.reason || "Growth data not yet available."}</p>
                   <p className="mt-1 text-xs">Snapshots are taken automatically as new posts are collected. Check back after the next collection cycle.</p>
                 </CardContent>
@@ -39,13 +40,13 @@ export default function GrowthPage() {
               {/* Stat cards */}
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <StatCard
-                  icon={<Users size={20} />}
+                  icon={<HugeiconsIcon icon={UserGroupIcon} size={20} />}
                   label="Current subscribers"
                   value={d.current?.toLocaleString() || "?"}
                   trend={d.growth_rate_pct != null ? { value: d.growth_rate_pct, label: "vs first snapshot" } : undefined}
                 />
                 <StatCard
-                  icon={<ArrowUp size={20} />}
+                  icon={<HugeiconsIcon icon={ArrowUp01Icon} size={20} />}
                   label="Net change"
                   value={d.net_change > 0 ? `+${d.net_change.toLocaleString()}` : d.net_change.toLocaleString()}
                   trend={d.growth_rate_pct != null ? { value: d.growth_rate_pct } : undefined}

@@ -13,8 +13,13 @@ import type {
 export function useOverview() {
   return useQuery({ queryKey: queryKeys.overview(), queryFn: () => api.get<OverviewResponse>("/overview") });
 }
-export function useInsights() {
-  return useQuery({ queryKey: queryKeys.insights(), queryFn: () => api.get<InsightsResponse>("/insights") });
+export function useInsights(start?: string | null, end?: string | null, opts?: { enabled?: boolean }) {
+  const qs = start && end ? `?start=${start}&end=${end}` : "";
+  return useQuery({
+    queryKey: queryKeys.insights(start, end),
+    queryFn: () => api.get<InsightsResponse>(`/insights${qs}`),
+    enabled: opts?.enabled,
+  });
 }
 export function useDataRange() {
   return useQuery({ queryKey: queryKeys.dataRange(), queryFn: () => api.get<DataRangeResponse>("/data-range") });

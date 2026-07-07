@@ -1,7 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { CheckCircle2, XCircle, ExternalLink, FileText, Send, Users, BarChart3, Target, Sparkles, ChevronRight } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  CheckmarkCircle01Icon, Cancel01Icon, ExternalLinkIcon, Note01Icon, Sent02Icon,
+  UserGroupIcon, BarChartIcon, Target02Icon, SparklesIcon, ChevronRightIcon,
+} from "@hugeicons/core-free-icons";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { StatCard } from "@/components/StatCard";
@@ -25,7 +29,7 @@ function PriorityCard({ rec }: { rec: GrowthRecommendation }) {
   return (
     <div className="flex items-start gap-3 rounded-lg bg-muted/50 p-3">
       <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-primary/10">
-        <Target className="h-4 w-4 text-primary" />
+        <HugeiconsIcon icon={Target02Icon} className="h-4 w-4 text-primary" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -50,7 +54,7 @@ export default function OverviewPage() {
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Overview</h1>
         <p className="flex items-center gap-1.5 text-sm text-muted-foreground mt-1.5">
-          <Sparkles className="h-3.5 w-3.5 shrink-0" />
+          <HugeiconsIcon icon={SparklesIcon} className="h-3.5 w-3.5 shrink-0" />
           Dashboard overview of your channel performance and activities.
         </p>
       </div>
@@ -59,10 +63,10 @@ export default function OverviewPage() {
         {(data: OverviewResponse) => (
           <>
             <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-              <StatCard label="Posts collected" value={data.posts.toLocaleString()} icon={<FileText className="h-4 w-4" />} />
-              <StatCard label="Competitors tracked" value={data.competitors.toLocaleString()} icon={<Users className="h-4 w-4" />} />
-              <StatCard label="Drafts ready" value={data.drafts.toLocaleString()} icon={<Send className="h-4 w-4" />} />
-              <StatCard label="Queued" value={Object.values(data.queue_counts).reduce((a, b) => a + b, 0).toLocaleString()} sub={<QueueStats queue_counts={data.queue_counts} />} icon={<BarChart3 className="h-4 w-4" />} />
+              <StatCard label="Posts collected" value={data.posts.toLocaleString()} icon={<HugeiconsIcon icon={Note01Icon} className="h-4 w-4" />} />
+              <StatCard label="Competitors tracked" value={data.competitors.toLocaleString()} icon={<HugeiconsIcon icon={UserGroupIcon} className="h-4 w-4" />} />
+              <StatCard label="Drafts ready" value={data.drafts.toLocaleString()} icon={<HugeiconsIcon icon={Sent02Icon} className="h-4 w-4" />} />
+              <StatCard label="Queued" value={Object.values(data.queue_counts).reduce((a, b) => a + b, 0).toLocaleString()} sub={<QueueStats queue_counts={data.queue_counts} />} icon={<HugeiconsIcon icon={BarChartIcon} className="h-4 w-4" />} />
             </div>
 
             <div className="grid gap-6 lg:grid-cols-3">
@@ -75,7 +79,7 @@ export default function OverviewPage() {
                       <CardDescription>Subscriber growth over time</CardDescription>
                     </div>
                     <Link href="/growth" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
-                      View details <ExternalLink className="h-3 w-3" />
+                      View details <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
                     </Link>
                   </div>
                 </CardHeader>
@@ -103,7 +107,7 @@ export default function OverviewPage() {
                       <CardDescription>Recent threats &amp; opportunities</CardDescription>
                     </div>
                     <Link href="/competitors" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
-                      View <ExternalLink className="h-3 w-3" />
+                      View <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
                     </Link>
                   </div>
                 </CardHeader>
@@ -145,7 +149,7 @@ export default function OverviewPage() {
                     }}
                   </Async>
                   <Link href="/insights" className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
-                    See all recommendations <ChevronRight className="h-3 w-3" />
+                    See all recommendations <HugeiconsIcon icon={ChevronRightIcon} className="h-3 w-3" />
                   </Link>
                 </CardContent>
               </Card>
@@ -225,9 +229,9 @@ function PublishingGatesCard({ gates }: { gates: OverviewResponse["publishing_ga
             title={gate.detail || gate.name}
           >
             {gate.ok ? (
-              <CheckCircle2 className="h-3 w-3 shrink-0" />
+              <HugeiconsIcon icon={CheckmarkCircle01Icon} className="h-3 w-3 shrink-0" />
             ) : (
-              <XCircle className="h-3 w-3 shrink-0" />
+              <HugeiconsIcon icon={Cancel01Icon} className="h-3 w-3 shrink-0" />
             )}
             {gate.name}
           </div>

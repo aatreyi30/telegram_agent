@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/providers/auth";
 import { api } from "@/services/api";
-import { Send } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Sent02Icon } from "@hugeicons/core-free-icons";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -74,7 +75,7 @@ export default function LoginPage() {
         <CardHeader className="space-y-1 pb-4 text-center">
           <div className="mb-2 flex justify-center">
             <div className="flex size-10 items-center justify-center rounded-lg bg-emerald-500">
-              <Send size={20} className="-rotate-45 text-white" />
+              <HugeiconsIcon icon={Sent02Icon} size={20} className="-rotate-45 text-white" />
             </div>
           </div>
           <CardTitle className="text-xl">Welcome to DealWing</CardTitle>

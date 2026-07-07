@@ -1,27 +1,32 @@
-import type { LucideIcon } from "lucide-react";
+import type { IconSvgElement } from "@hugeicons/react";
 import {
-  BarChart3, CalendarDays, CreditCard, LayoutDashboard, Lightbulb,
-  ListOrdered, Package, Send, Settings as SettingsIcon, TrendingUp, Users2,
-} from "lucide-react";
+  Analytics01Icon,
+  Calendar03Icon,
+  ChartUpIcon,
+  CheckListIcon,
+  Home01Icon,
+  Idea01Icon,
+  Sent02Icon,
+  Package02Icon,
+  UserGroupIcon,
+} from "@hugeicons/core-free-icons";
 
 export interface NavItem {
   to: string;
   label: string;
-  icon: LucideIcon;
+  icon: IconSvgElement;
   end?: boolean;
   group: string;
 }
 
 export const NAV: NavItem[] = [
-  { to: "/", label: "Overview", icon: LayoutDashboard, end: true, group: "" },
-  { to: "/insights", label: "Insights", icon: Lightbulb, group: "Understand" },
-  { to: "/analytics", label: "Analytics", icon: BarChart3, group: "Understand" },
-  { to: "/day", label: "Day view", icon: CalendarDays, group: "Understand" },
-  { to: "/competitors", label: "Competitors", icon: Users2, group: "Understand" },
-  { to: "/growth", label: "Growth", icon: TrendingUp, group: "Understand" },
-  { to: "/plan", label: "Plan", icon: ListOrdered, group: "Act" },
-  { to: "/billing", label: "Billing", icon: CreditCard, group: "" },
-  { to: "/drafts", label: "Drafts", icon: Send, group: "Act" },
-  { to: "/queue", label: "Schedule", icon: Package, group: "Act" },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, group: "" },
+  { to: "/", label: "Overview", icon: Home01Icon, end: true, group: "" },
+  { to: "/insights", label: "Insights", icon: Idea01Icon, group: "Understand" },
+  { to: "/analytics", label: "Analytics", icon: Analytics01Icon, group: "Understand" },
+  { to: "/day", label: "Day view", icon: Calendar03Icon, group: "Understand" },
+  { to: "/competitors", label: "Competitors", icon: UserGroupIcon, group: "Understand" },
+  { to: "/growth", label: "Growth", icon: ChartUpIcon, group: "Understand" },
+  { to: "/plan", label: "Plan", icon: CheckListIcon, group: "Act" },
+  { to: "/drafts", label: "Drafts", icon: Sent02Icon, group: "Act" },
+  { to: "/queue", label: "Schedule", icon: Package02Icon, group: "Act" },
 ];

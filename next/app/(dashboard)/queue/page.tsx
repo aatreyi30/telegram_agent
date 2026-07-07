@@ -5,61 +5,13 @@ import { Async, Empty } from "@/components/Async";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { PagedNav } from "@/components/PagedNav";
 import { useQueue } from "@/queries/queries";
-import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationLink,
-  PaginationPrevious,
-  PaginationNext,
-  PaginationEllipsis,
-} from "@/components/ui/pagination";
 
 function statusVariant(s: string) {
   if (s === "published") return "success" as const;
   if (s === "blocked" || s === "failed") return "destructive" as const;
   return "default" as const;
-}
-
-function PageButton({ page, current, onClick }: { page: number; current: number; onClick: (p: number) => void }) {
-  return (
-    <PaginationItem>
-      <div onClick={() => onClick(page)}>
-        <PaginationLink isActive={page === current}>{page}</PaginationLink>
-      </div>
-    </PaginationItem>
-  );
-}
-
-function renderPageNumbers(current: number, total: number, setPage: (p: number) => void) {
-  if (total <= 7) {
-    return Array.from({ length: total }, (_, i) => (
-      <PageButton key={i + 1} page={i + 1} current={current} onClick={setPage} />
-    ));
-  }
-
-  const pages: React.ReactNode[] = [
-    <PageButton key={1} page={1} current={current} onClick={setPage} />,
-  ];
-
-  if (current > 3) {
-    pages.push(<PaginationItem key="es"><PaginationEllipsis /></PaginationItem>);
-  }
-
-  const start = Math.max(2, current - 1);
-  const end = Math.min(total - 1, current + 1);
-  for (let i = start; i <= end; i++) {
-    pages.push(<PageButton key={i} page={i} current={current} onClick={setPage} />);
-  }
-
-  if (current < total - 2) {
-    pages.push(<PaginationItem key="ee"><PaginationEllipsis /></PaginationItem>);
-  }
-
-  pages.push(<PageButton key={total} page={total} current={current} onClick={setPage} />);
-
-  return pages;
 }
 
 export default function QueuePage() {
@@ -78,13 +30,14 @@ export default function QueuePage() {
       <Async q={q} rows={2}>
         {(d) => (
           <div className="space-y-4">
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {Object.entries(d.counts || {}).map(([k, v]) => (
                 <Badge key={k} variant={statusVariant(k)}>{k}: {v}</Badge>
               ))}
               {Object.keys(d.counts || {}).length === 0 && (
                 <span className="text-sm text-muted-foreground">Queue is empty.</span>
               )}
+              <span className="ml-auto text-xs text-muted-foreground">{d.total} total</span>
             </div>
             {d.items.length ? (
               <>
@@ -121,8 +74,8 @@ export default function QueuePage() {
                             <TableCell><Badge variant={statusVariant(r.status)}>{r.status}</Badge></TableCell>
                             <TableCell className="text-muted-foreground">{r.scheduled_at}</TableCell>
                             <TableCell className="text-right">{r.attempts}</TableCell>
-                            <TableCell className="max-w-xs truncate text-muted-foreground" title={r.note}>
-                              {r.note}
+                            <TableCell className="max-w-sm whitespace-pre-wrap break-words align-top text-xs text-muted-foreground">
+                              {r.note || "—"}
                             </TableCell>
                           </TableRow>
                         ))}
@@ -130,28 +83,7 @@ export default function QueuePage() {
                     </Table>
                   </CardContent>
                 </Card>
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-muted-foreground">
-                    Page {d.page} of {d.pages} &middot; {d.total} total
-                  </p>
-                  <Pagination>
-                    <PaginationContent>
-                      <PaginationItem>
-                        <PaginationPrevious
-                          onClick={() => setPage((p) => Math.max(1, p - 1))}
-                          className={d.page <= 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
-                        />
-                      </PaginationItem>
-                      {renderPageNumbers(d.page, d.pages, setPage)}
-                      <PaginationItem>
-                        <PaginationNext
-                          onClick={() => setPage((p) => Math.min(d.pages, p + 1))}
-                          className={d.page >= d.pages ? "pointer-events-none opacity-50" : "cursor-pointer"}
-                        />
-                      </PaginationItem>
-                    </PaginationContent>
-                  </Pagination>
-                </div>
+                <PagedNav page={d.page} pages={d.pages} onPageChange={setPage} />
               </>
             ) : (
               <Empty>Queue is empty. Schedule drafts with the CLI (autoschedule) or from the agent.</Empty>

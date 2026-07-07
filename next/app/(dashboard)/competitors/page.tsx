@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, TrendingUp, TrendingDown, AlertTriangle, Lightbulb } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ChevronDownIcon, AnalyticsUpIcon, AnalyticsDownIcon, Alert01Icon, Idea01Icon } from "@hugeicons/core-free-icons";
 import { Async, Empty } from "@/components/Async";
 import { CalloutCard } from "@/components/CalloutCard";
 import { MultiLineChart, StackedBarsChart } from "@/components/charts";
@@ -152,7 +153,7 @@ function CompCard({ e, isBest }: { e: CompetitorEntity; isBest: Record<string, b
           onClick={() => setOpen((o) => !o)}
           className="mt-2 flex w-full items-center justify-center gap-1 rounded-md py-1 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
         >
-          <ChevronDown className={cn("h-3 w-3 transition-transform", open && "rotate-180")} />
+          <HugeiconsIcon icon={ChevronDownIcon} className={cn("h-3 w-3 transition-transform", open && "rotate-180")} />
           {open ? "Less" : `${restDims.filter((d) => e[d.key] != null).length} more metrics`}
         </button>
       </div>
@@ -227,7 +228,7 @@ function SignalsSection({ signals }: { signals: any[] }) {
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-orange-500" />
+              <HugeiconsIcon icon={Alert01Icon} className="h-4 w-4 text-orange-500" />
               <CardTitle className="text-sm font-semibold">Threats</CardTitle>
             </div>
           </CardHeader>
@@ -237,7 +238,7 @@ function SignalsSection({ signals }: { signals: any[] }) {
             ) : (
               threats.map((s, i) => (
                 <div key={i} className="flex items-start gap-3 rounded-lg border border-orange-200 bg-orange-50/50 p-3">
-                  <TrendingDown className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
+                  <HugeiconsIcon icon={AnalyticsDownIcon} className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <Badge variant="outline" className="text-xs">{s.competitor}</Badge>
@@ -253,7 +254,7 @@ function SignalsSection({ signals }: { signals: any[] }) {
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
-              <Lightbulb className="h-4 w-4 text-emerald-500" />
+              <HugeiconsIcon icon={Idea01Icon} className="h-4 w-4 text-emerald-500" />
               <CardTitle className="text-sm font-semibold">Opportunities</CardTitle>
             </div>
           </CardHeader>
@@ -263,7 +264,7 @@ function SignalsSection({ signals }: { signals: any[] }) {
             ) : (
               opportunities.map((s, i) => (
                 <div key={i} className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
-                  <TrendingUp className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+                  <HugeiconsIcon icon={AnalyticsUpIcon} className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <Badge variant="outline" className="text-xs">{s.competitor}</Badge>

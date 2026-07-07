@@ -13,11 +13,12 @@ export function usePathname() {
  * neither. Supports the same `className={(props: {isActive}) => string}`
  * render-prop pattern react-router's NavLink does, for drop-in compatibility
  * with code ported from the Vite app. */
-export function NavLink({ to, end, onClick, className, children }: {
+export function NavLink({ to, end, onClick, className, title, children }: {
   to: string;
   end?: boolean;
   onClick?: () => void;
   className?: string | ((props: { isActive: boolean }) => string);
+  title?: string;
   children: ReactNode;
 }) {
   const pathname = usePathname();
@@ -25,7 +26,7 @@ export function NavLink({ to, end, onClick, className, children }: {
   const resolvedClassName = typeof className === "function" ? className({ isActive }) : className;
 
   return (
-    <NextLink href={to} onClick={onClick} className={resolvedClassName}>
+    <NextLink href={to} onClick={onClick} className={resolvedClassName} title={title}>
       {children}
     </NextLink>
   );

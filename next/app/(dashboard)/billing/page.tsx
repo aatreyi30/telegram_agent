@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle2, CreditCard } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CheckmarkCircle01Icon, CreditCardIcon } from "@hugeicons/core-free-icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,7 +65,7 @@ export default function BillingPage() {
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Billing &amp; plan</h1>
         <p className="flex items-center gap-1.5 text-sm text-muted-foreground mt-1.5">
-          <CreditCard className="h-3.5 w-3.5 shrink-0" />
+          <HugeiconsIcon icon={CreditCardIcon} className="h-3.5 w-3.5 shrink-0" />
           Manage your subscription and choose the plan that fits your needs.
         </p>
       </div>
@@ -138,7 +139,7 @@ export default function BillingPage() {
                 <ul className="space-y-3">
                   {plan.features.map((feature) => (
                     <li key={feature} className="flex items-start gap-2 text-sm">
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                      <HugeiconsIcon icon={CheckmarkCircle01Icon} className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
                       <span>{feature}</span>
                     </li>
                   ))}
@@ -165,7 +166,7 @@ export default function BillingPage() {
           <div className="flex flex-wrap gap-6">
             {sharedFeatures.map((feature) => (
               <div key={feature} className="flex items-center gap-2 text-sm text-muted-foreground">
-                <CheckCircle2 className="h-4 w-4 text-primary" />
+                <HugeiconsIcon icon={CheckmarkCircle01Icon} className="h-4 w-4 text-primary" />
                 {feature}
               </div>
             ))}

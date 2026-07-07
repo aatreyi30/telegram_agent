@@ -1,7 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Trash2, UserPlus } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Building01Icon, Delete02Icon, Satellite01Icon, UserAdd01Icon, UserGroupIcon, UserIcon,
+} from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/auth";
 import { useChannels, useOrg, useUsers } from "@/queries/queries";
 import {
@@ -46,8 +49,7 @@ function ProfileTab() {
 
   return (
     <Card className="max-w-md">
-      <CardHeader><CardTitle className="text-base">Your profile</CardTitle></CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 pt-4">
         <div className="text-sm text-muted-foreground">
           {user?.name} · {user?.email} · <span className="capitalize">{user?.role}</span>
         </div>
@@ -95,8 +97,7 @@ function OrgTab() {
       {() =>
         data && (
           <Card className="max-w-xl">
-            <CardHeader><CardTitle className="text-base">Organization</CardTitle></CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="space-y-4 pt-4">
               <div className="space-y-1.5">
                 <Label>Name</Label>
                 <Input value={data.name || ""} onChange={(e) => set("name", e.target.value)} />
@@ -172,9 +173,8 @@ function UsersTab() {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between">
-        <CardTitle className="text-base">Users</CardTitle>
-        <Button size="sm" onClick={() => setOpen(true)}><UserPlus size={16} /> Add user</Button>
+      <CardHeader className="flex-row items-center justify-end">
+        <Button size="sm" onClick={() => setOpen(true)}><HugeiconsIcon icon={UserAdd01Icon} size={16} /> Add user</Button>
       </CardHeader>
       <CardContent className="p-0">
         <Async q={q} rows={2}>
@@ -206,7 +206,7 @@ function UsersTab() {
                         className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                         onClick={() => remove(u.id)}
                       >
-                        <Trash2 size={16} />
+                        <HugeiconsIcon icon={Delete02Icon} size={16} />
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -321,7 +321,7 @@ function ChannelsTab() {
                         <TableCell>{c.posts.toLocaleString()}</TableCell>
                         <TableCell>
                           <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(c)}>
-                            <Trash2 size={16} className="text-destructive" />
+                            <HugeiconsIcon icon={Delete02Icon} size={16} className="text-destructive" />
                           </Button>
                         </TableCell>
                       </TableRow>
@@ -351,28 +351,56 @@ function ChannelsTab() {
   );
 }
 
+const SETTINGS_NAV = [
+  { key: "profile", label: "Profile", icon: UserIcon, description: "Your account and password.", ownerOnly: false },
+  { key: "channels", label: "Channels", icon: Satellite01Icon, description: "The Telegram channels you own and track.", ownerOnly: true },
+  { key: "org", label: "Organization", icon: Building01Icon, description: "Company details and affiliate link settings.", ownerOnly: true },
+  { key: "users", label: "Users", icon: UserGroupIcon, description: "Teammates and their access level.", ownerOnly: true },
+] as const;
+
 export default function SettingsPage() {
   const { user } = useAuth();
-  const [tab, setTab] = useState("profile");
   const isOwner = user?.role === "owner";
+  const items = SETTINGS_NAV.filter((i) => !i.ownerOnly || isOwner);
+  const [tab, setTab] = useState<string>("profile");
+  const active = items.find((i) => i.key === tab) ?? items[0];
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground">Your profile, channels, the organization, and users.</p>
       </div>
-      <Tabs value={tab} onValueChange={(v) => setTab(v as string)}>
-        <TabsList>
-          <TabsTrigger value="profile">Profile</TabsTrigger>
-          {isOwner && <TabsTrigger value="channels">Channels</TabsTrigger>}
-          {isOwner && <TabsTrigger value="org">Organization</TabsTrigger>}
-          {isOwner && <TabsTrigger value="users">Users</TabsTrigger>}
-        </TabsList>
-        <TabsContent value="profile"><ProfileTab /></TabsContent>
-        {isOwner && <TabsContent value="channels"><ChannelsTab /></TabsContent>}
-        {isOwner && <TabsContent value="org"><OrgTab /></TabsContent>}
-        {isOwner && <TabsContent value="users"><UsersTab /></TabsContent>}
-      </Tabs>
+      <div className="flex flex-col gap-8 md:flex-row">
+        <nav className="flex shrink-0 gap-1 overflow-x-auto pb-1 md:w-52 md:flex-col md:overflow-visible md:pb-0">
+          {items.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setTab(item.key)}
+              className={cn(
+                "flex items-center gap-2.5 whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                active.key === item.key
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+              )}
+            >
+              <HugeiconsIcon icon={item.icon} size={17} className="shrink-0" />
+              {item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="min-w-0 flex-1 space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold">{active.label}</h2>
+            <p className="text-sm text-muted-foreground">{active.description}</p>
+          </div>
+          {active.key === "profile" && <ProfileTab />}
+          {active.key === "channels" && isOwner && <ChannelsTab />}
+          {active.key === "org" && isOwner && <OrgTab />}
+          {active.key === "users" && isOwner && <UsersTab />}
+        </div>
+      </div>
     </div>
   );
 }

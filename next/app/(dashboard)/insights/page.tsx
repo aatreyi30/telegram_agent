@@ -1,30 +1,44 @@
 "use client";
 
-import { Lightbulb, ListChecks, Smile, Target, TrendingUp } from "lucide-react";
+import { useMemo } from "react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Analytics01Icon,
+  ArrowDown01Icon,
+  ArrowUp01Icon,
+  BarChartIcon,
+  Idea01Icon,
+  Target02Icon,
+} from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
+import { cn } from "@/lib/utils";
 import { CalloutCard } from "@/components/CalloutCard";
 import { BarsChart } from "@/components/charts";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useInsights } from "@/queries/queries";
-import type { InsightsResponse } from "@/types/api";
-
-// The blueprint's `blueprint` field is a loosely-typed Record<string, unknown> on
-// the wire (its shape varies by mode/channel-type); `content_mix` is the one part
-// of it this page renders, so it's typed narrowly here rather than in api.ts.
-interface ContentMixRow {
-  post_type: string;
-  current_share: number | null;
-  avg_views_per_day: number | null;
-  action: "increase" | "maintain" | "decrease" | string;
-}
+import { DateFilter } from "@/components/ui/date-range-picker";
+import { useInsights, useDataRange } from "@/queries/queries";
+import { useQueryParams } from "@/lib/use-search-params";
+import type { ContentMixRow, InsightsResponse } from "@/types/api";
 
 const ACTION_BADGE: Record<string, "success" | "warning" | "default"> = {
   increase: "success",
   decrease: "warning",
   maintain: "default",
 };
+
+const ACTION_COPY: Record<string, string> = {
+  increase: "Lean in — above-median performer, share is being nudged up.",
+  decrease: "Pull back — below-median performer, share is being nudged down.",
+  maintain: "On target — roughly in line with the channel median.",
+};
+
+function minusDays(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
 
 function EvidenceList({ evidence }: { evidence: Record<string, unknown> | null | undefined }) {
   const entries = Object.entries(evidence || {});
@@ -41,43 +55,94 @@ function EvidenceList({ evidence }: { evidence: Record<string, unknown> | null |
   );
 }
 
+function RecommendationRow({ rank, r }: { rank: number; r: InsightsResponse["recommendations"][number] }) {
+  return (
+    <details className="group border-b border-border last:border-0">
+      <summary className="flex cursor-pointer list-none items-start gap-3 px-4 py-3 hover:bg-muted/40">
+        <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
+          {rank}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            {r.category && <Badge variant="outline" className="shrink-0 text-[10px] uppercase tracking-wide">{r.category}</Badge>}
+            <span className="text-sm font-medium leading-snug text-foreground">{r.recommendation}</span>
+          </div>
+          {r.expected_outcome && (
+            <div className="mt-1 truncate text-xs text-muted-foreground">Expected: {r.expected_outcome}</div>
+          )}
+        </div>
+        <span className="mt-0.5 shrink-0 text-xs text-muted-foreground">{Math.round(r.confidence * 100)}%</span>
+      </summary>
+      <div className="space-y-2 px-4 pb-3 pl-11 text-xs text-muted-foreground">
+        <p>{r.reasoning}</p>
+        <EvidenceList evidence={r.evidence} />
+      </div>
+    </details>
+  );
+}
+
 export default function InsightsPage() {
-  const q = useInsights();
+  const range = useDataRange();
+  const min = range.data?.min ?? undefined;
+  const max = range.data?.max ?? undefined;
+
+  const { get, set } = useQueryParams();
+  const preset = get("preset", "30d");
+  const startParam = get("start", "");
+  const endParam = get("end", "");
+
+  const { start, end } = useMemo(() => {
+    if (preset === "custom") return { start: startParam || undefined, end: endParam || undefined };
+    if (!max || !min) return { start: undefined, end: undefined };
+    if (preset === "all") return { start: min, end: max };
+    const days: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+    const d = days[preset] ?? 30;
+    return { start: minusDays(max, d), end: max };
+  }, [preset, min, max, startParam, endParam]);
+
+  const q = useInsights(start, end, { enabled: !!range.data });
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Insights</h1>
-        <p className="text-sm text-muted-foreground">
-          What the data says and why — with the calculation, time window, and sample behind each number.
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Insights</h1>
+          <p className="text-sm text-muted-foreground">
+            What the data says and why — with the calculation, time window, and sample behind each number.
+          </p>
+        </div>
+        <DateFilter
+          mode="range"
+          preset={preset}
+          onPresetChange={(p) => set({ preset: p, start: null, end: null })}
+          from={start}
+          to={end}
+          onRangeChange={(f, t) => set({ preset: "custom", start: f, end: t })}
+          min={min}
+          max={max}
+        />
       </div>
       <Async q={q}>
         {(d: InsightsResponse) => {
-          const contentMix = (d.blueprint?.blueprint?.content_mix ?? null) as ContentMixRow[] | null;
+          const contentMix = d.content_mix as ContentMixRow[] | null;
           return (
             <div className="space-y-8">
               {/* Recommendations */}
               <section>
-                <h2 className="mb-3 text-lg font-semibold">Recommendations</h2>
-                <div className="space-y-3">
-                  {(d.recommendations || []).map((r, i) => (
-                    <CalloutCard
-                      key={i}
-                      severity="info"
-                      label={r.category || (r.priority != null ? `P${r.priority}` : undefined)}
-                      title={r.recommendation}
-                      evidence={<EvidenceList evidence={r.evidence} />}
-                    >
-                      {r.reasoning}
-                      {r.expected_outcome && (
-                        <div className="mt-1">Expected: {r.expected_outcome}</div>
-                      )}
-                    </CalloutCard>
-                  ))}
-                  {!(d.recommendations || []).length && (
-                    <p className="text-sm text-muted-foreground">No recommendations yet.</p>
-                  )}
-                </div>
+                <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold">
+                  <HugeiconsIcon icon={Idea01Icon} size={18} className="text-primary" /> Recommendations
+                </h2>
+                {(d.recommendations || []).length ? (
+                  <Card className="overflow-hidden py-0">
+                    <CardContent className="p-0">
+                      {d.recommendations.map((r, i) => (
+                        <RecommendationRow key={i} rank={i + 1} r={r} />
+                      ))}
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No recommendations yet.</p>
+                )}
               </section>
 
               {/* Emoji policy */}
@@ -106,38 +171,53 @@ export default function InsightsPage() {
 
               {/* What changed & why */}
               <section>
-                <h2 className="mb-3 text-lg font-semibold">What changed &amp; why</h2>
+                <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold">
+                  <HugeiconsIcon icon={Analytics01Icon} size={18} className="text-primary" /> What changed &amp; why
+                </h2>
                 {(d.reasoning || []).length ? (
-                  <Card>
-                    <CardContent className="p-0">
-                      <Table>
-                        <TableHeader>
-                          <TableRow><TableHead>Metric</TableHead><TableHead>Change</TableHead><TableHead>What it means</TableHead></TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {d.reasoning.map((i, k) => (
-                            <TableRow key={k}>
-                              <TableCell className="font-medium">{i.metric}</TableCell>
-                              <TableCell>{i.direction} {i.change}{i.unit}</TableCell>
-                              <TableCell>
-                                {i.observation}
-                                <div className="text-xs text-muted-foreground">{i.why}</div>
-                                <div className="mt-0.5 text-xs text-muted-foreground">Period compared: {i.period}</div>
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </CardContent>
-                  </Card>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {d.reasoning.map((i, k) => {
+                      const up = i.direction === "up";
+                      return (
+                        <Card key={k}>
+                          <CardContent className="p-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="text-sm font-medium text-foreground">{i.metric}</div>
+                              <span
+                                className={cn(
+                                  "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold",
+                                  up ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100"
+                                     : "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-100",
+                                )}
+                              >
+                                <HugeiconsIcon icon={up ? ArrowUp01Icon : ArrowDown01Icon} size={12} />
+                                {i.change != null ? `${Math.abs(i.change)}${i.unit ?? ""}` : "—"}
+                              </span>
+                            </div>
+                            <p className="mt-2 text-sm text-muted-foreground">{i.observation}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">{i.why}</p>
+                            <p className="mt-2 text-xs text-muted-foreground/70">
+                              Period compared: {i.period} · confidence {Math.round(i.confidence * 100)}%
+                            </p>
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
+                  </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground">No period-over-period shifts detected.</p>
+                  <p className="text-sm text-muted-foreground">No period-over-period shifts detected in this range.</p>
                 )}
               </section>
 
               {/* Performance */}
               <section>
-                <h2 className="mb-3 text-lg font-semibold">Post-type performance</h2>
+                <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold">
+                  <HugeiconsIcon icon={BarChartIcon} size={18} className="text-primary" /> Post-type performance
+                </h2>
+                <p className="mb-3 text-sm text-muted-foreground">
+                  Raw stats per post type for the selected range — how many posts, what share of volume, and
+                  age-normalized views per day.
+                </p>
                 <Card>
                   <CardContent className="p-0">
                     <Table>
@@ -154,6 +234,9 @@ export default function InsightsPage() {
                             <TableCell>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</TableCell>
                           </TableRow>
                         ))}
+                        {!(d.performance || []).length && (
+                          <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">No posts in this range.</TableCell></TableRow>
+                        )}
                       </TableBody>
                     </Table>
                   </CardContent>
@@ -163,67 +246,45 @@ export default function InsightsPage() {
               {/* Content mix vs target */}
               {contentMix && contentMix.length > 0 && (
                 <section>
-                  <h2 className="mb-3 text-lg font-semibold">Your content mix vs. target</h2>
+                  <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold">
+                    <HugeiconsIcon icon={Target02Icon} size={18} className="text-primary" /> Content mix — current vs. target
+                  </h2>
+                  <p className="mb-3 text-sm text-muted-foreground">
+                    <strong>Target</strong> is a bounded nudge off your current share: post types earning
+                    meaningfully more views/day than the channel median get a higher target (capped at 30%);
+                    below-median types get a lower one. It is a direction to lean toward, not a hard quota.
+                  </p>
                   <Card>
-                    <CardContent className="p-4">
-                      <p className="mb-3 text-sm text-muted-foreground">
-                        Current share of posts by type, and whether the growth blueprint says to lean in or pull back.
-                      </p>
-                      <div className="space-y-2">
-                        {contentMix.map((m) => (
-                          <div key={m.post_type} className="flex items-center gap-3">
-                            <div className="w-32 shrink-0 truncate text-sm font-medium">{m.post_type}</div>
-                            <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
+                    <CardContent className="divide-y divide-border p-0">
+                      {contentMix.map((m) => {
+                        const current = Math.round((m.current_share || 0) * 100);
+                        const target = m.target_share != null ? Math.round(m.target_share * 100) : current;
+                        return (
+                          <div key={m.post_type} className="space-y-1.5 p-4">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="truncate text-sm font-medium">{m.post_type}</div>
+                              <Badge variant={ACTION_BADGE[m.action] ?? "default"}>{m.action}</Badge>
+                            </div>
+                            <div className="relative h-2.5 overflow-hidden rounded-full bg-secondary">
+                              <div className="h-full rounded-full bg-primary/40" style={{ width: `${Math.min(100, current)}%` }} />
                               <div
-                                className="h-full rounded-full bg-primary"
-                                style={{ width: `${Math.min(100, Math.round((m.current_share || 0) * 100))}%` }}
+                                className="absolute top-0 h-full w-0.5 bg-foreground"
+                                style={{ left: `${Math.min(100, target)}%` }}
+                                title={`Target: ${target}%`}
                               />
                             </div>
-                            <div className="w-12 shrink-0 text-right text-sm text-muted-foreground">
-                              {m.current_share != null ? Math.round(m.current_share * 100) + "%" : "—"}
+                            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
+                              <span>Current {current}% · Target {target}%</span>
+                              <span>{m.avg_views_per_day != null ? `${Math.round(m.avg_views_per_day)} views/day` : "—"}</span>
                             </div>
-                            <div className="w-20 shrink-0 text-right text-xs text-muted-foreground">
-                              {m.avg_views_per_day != null ? Math.round(m.avg_views_per_day) + " views/day" : "—"}
-                            </div>
-                            <Badge variant={ACTION_BADGE[m.action] ?? "default"} className="w-20 shrink-0 justify-center">
-                              {m.action}
-                            </Badge>
+                            <p className="text-xs text-muted-foreground/80">{ACTION_COPY[m.action] ?? ""}</p>
                           </div>
-                        ))}
-                      </div>
+                        );
+                      })}
                     </CardContent>
                   </Card>
                 </section>
               )}
-
-              {/* Learnings */}
-              <section>
-                <h2 className="mb-3 text-lg font-semibold">What the channel has learned</h2>
-                <div className="space-y-3">
-                  {(d.learnings || []).map((l, i) => (
-                    <CalloutCard
-                      key={i}
-                      severity="success"
-                      label={l.category}
-                      title={l.statement}
-                      evidence={
-                        <EvidenceList
-                          evidence={{
-                            sample_size: l.sample_size,
-                            confidence: l.confidence,
-                            period: l.period,
-                          }}
-                        />
-                      }
-                    >
-                      {l.how_calculated && <>How this is calculated: {l.how_calculated}</>}
-                    </CalloutCard>
-                  ))}
-                  {!(d.learnings || []).length && (
-                    <p className="text-sm text-muted-foreground">Nothing learned yet — check back after more data accrues.</p>
-                  )}
-                </div>
-              </section>
             </div>
           );
         }}
