@@ -101,12 +101,17 @@ class CompetitorCollector(BaseCollector):
                 result.added += added
                 result.updated += updated
 
-            # Mark competitor as available and update metadata
-            async with asyncio.get_event_loop().run_in_executor(None, self._update_from_entity, comp_id, entity):
-                pass
+            # Mark competitor as available and update metadata.
+            # _update_from_entity manages its own session_scope; call it directly —
+            # run_in_executor returns a Future, which is not an async context manager.
+            self._update_from_entity(comp_id, entity)
 
             return result
 
+        except FloodWaitError as exc:
+            logger.warning("[competitor:telethon] flood-wait %ss for %r; not a Telethon failure",
+                           getattr(exc, "seconds", "?"), self.username)
+            raise  # let the caller back off; do NOT fall through to the degraded t.me/s scrape
         except Exception as exc:
             logger.debug("[competitor:telethon] error for %r: %s", self.username, exc)
             return None
