@@ -1,6 +1,6 @@
 export const queryKeys = {
   overview: () => ["overview"] as const,
-  insights: () => ["insights"] as const,
+  insights: (start?: string | null, end?: string | null) => ["insights", start, end] as const,
   dataRange: () => ["data-range"] as const,
   analytics: (start?: string | null, end?: string | null) => ["analytics", start, end] as const,
   day: (date?: string | null) => ["day", date] as const,

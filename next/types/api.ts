@@ -27,11 +27,6 @@ export interface ReasonedInsightDTO {
   observation: string; why: string; period: string; evidence: Record<string, unknown>; confidence: number;
 }
 
-export interface LearningDTO {
-  category: string; statement: string; confidence: number; sample_size: number;
-  how_calculated: string | null; period: string;
-}
-
 export interface PostTypePerformanceDTO {
   post_type: string; posts: number; share: number; avg_views_per_day: number | null; rank: number;
 }
@@ -51,9 +46,14 @@ export interface EmojiRuleDTO { emoji: string; lift_pct: number; avg_with: numbe
 
 export interface EmojiPolicy { lead: string[]; avoid: string[]; rules: EmojiRuleDTO[]; window: string; }
 
+export interface ContentMixRow {
+  post_type: string; current_share: number | null; target_share: number | null;
+  avg_views_per_day: number | null; action: "increase" | "maintain" | "decrease" | string;
+}
+
 export interface InsightsResponse {
   recommendations: GrowthRecommendation[]; reasoning: ReasonedInsightDTO[];
-  learnings: LearningDTO[]; performance: PostTypePerformanceDTO[];
+  performance: PostTypePerformanceDTO[]; content_mix: ContentMixRow[] | null; date_filtered: boolean;
   blueprint: GrowthBlueprint; style: ChannelStyleProfile; emoji_policy: EmojiPolicy;
 }
 
@@ -154,18 +154,53 @@ export interface MerchantOpportunityDTO { merchant: string; kind: string; descri
 
 export interface MerchantsResponse { profiles: MerchantProfileDTO[]; opportunities: MerchantOpportunityDTO[]; }
 
-export interface CampaignPlanDTO {
-  plan_type: "daily" | "weekly" | "event" | string; title: string; target_date: string | null;
-  confidence: number; blueprint: Record<string, unknown>;
-  expected_outcome: Record<string, unknown> | null;
-  risks: { detail: string; [key: string]: unknown }[] | null;
+export interface DealTypeAllocation { deal_type: string; post_type: string; target_posts: number; avg_views_per_day: number | null; }
+export interface MerchantAllocation { merchant: string; recent_share: number; }
+export interface PostingWindowRow { part: string; hours: string; posts: number; }
+export interface DailyThemeRow { day: string; date: string; theme_focus: string; posts_planned: number; }
+export interface UpcomingEventRow { name: string; date: string; days_away: number; date_confidence: string; }
+export interface PlanRisk { kind?: string; detail: string; [key: string]: unknown; }
+
+export interface DailyPlanBlueprint {
+  posts_planned: number; posting_windows: PostingWindowRow[];
+  deal_type_allocation: DealTypeAllocation[]; merchant_allocation: MerchantAllocation[];
+  emoji_strategy: string[] | null; event_note: string | null;
 }
+
+export interface WeeklyPlanBlueprint {
+  posts_per_day: number; posts_per_week: number; daily_themes: DailyThemeRow[];
+  rotation_for_diversity: string[]; upcoming_events: UpcomingEventRow[];
+}
+
+export interface EventPlanBlueprint {
+  event: string; event_date: string; days_away: number; window_days: number;
+  date_confidence: "exact" | "approximate" | string;
+  recommended_posts_per_day_during_event: number; baseline_posts_per_day: number;
+  ramp_multiplier: number; merchant_focus: string; prep_checklist: string[]; notes: string | null;
+}
+
+export type CampaignPlanDTO =
+  | { plan_type: "daily"; title: string; target_date: string | null; end_date: string | null;
+      confidence: number; blueprint: DailyPlanBlueprint;
+      expected_outcome: { estimated_daily_views: number; basis: string; caveat: string } | null;
+      risks: PlanRisk[] | null; evidence: Record<string, unknown> | null; }
+  | { plan_type: "weekly"; title: string; target_date: string | null; end_date: string | null;
+      confidence: number; blueprint: WeeklyPlanBlueprint;
+      expected_outcome: { note: string } | null; risks: null; evidence: Record<string, unknown> | null; }
+  | { plan_type: "event"; title: string; target_date: string | null; end_date: string | null;
+      confidence: number; blueprint: EventPlanBlueprint;
+      expected_outcome: { note: string } | null;
+      risks: PlanRisk[] | null; evidence: Record<string, unknown> | null; }
+  | { plan_type: string; title: string; target_date: string | null; end_date: string | null;
+      confidence: number; blueprint: Record<string, unknown>;
+      expected_outcome: Record<string, unknown> | null;
+      risks: PlanRisk[] | null; evidence: Record<string, unknown> | null; };
 
 export type PlansResponse = CampaignPlanDTO[];
 
 export interface WeeklyResponse {
   available: boolean;
-  weekly_plan: { title: string; blueprint: Record<string, unknown>; expected_outcome: string | null; confidence: number; generated_at: string | null; } | null;
+  weekly_plan: { title: string; blueprint: WeeklyPlanBlueprint; expected_outcome: { note: string } | null; confidence: number; generated_at: string | null; } | null;
   what_changed: ReasonedInsightDTO[]; recommendations: GrowthRecommendation[]; ai_summary: string | null;
 }
 
