@@ -32,6 +32,9 @@ groq>=1.5.0
 # --- Postgres driver (optional; only needed if DB_URL points at Postgres) ---
 # psycopg[binary]==3.2.3
 
+# --- Web search (free, no API key) for competitor platform detection ---
+duckduckgo_search>=7.5.1
+
 # --- Web API + server ---
 fastapi>=0.115.0
 uvicorn>=0.30.0

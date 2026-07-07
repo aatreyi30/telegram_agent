@@ -110,6 +110,12 @@ def j_stats_refresh() -> dict:
     return {"processed": n, "detail": f"views refreshed (reactions/forwards need admin/bot)"}
 
 
+def j_link_resolution() -> dict:
+    from src.services.collection.link_resolution import LinkResolutionEngine
+    n = _run_engine(LinkResolutionEngine(), "link_resolution")
+    return {"processed": n, "detail": f"resolved up to {n} shortlinks"}
+
+
 def _run_engine(engine, target) -> int:
     from src.db.models import CollectionType
     job = _job_runner().run_collector(engine, collection_type=CollectionType.MANUAL, target=target)
@@ -229,6 +235,14 @@ def j_url_health() -> dict:
     return _url_health(limit=40)
 
 
+def j_normalize_posts() -> dict:
+    from src.db.models import CollectionType
+    from src.services.processing.normalizer import PostNormalizer
+    r = _job_runner()
+    job = r.run_collector(PostNormalizer(), collection_type=CollectionType.INCREMENTAL, target="normalize")
+    return {"processed": job.records_added or 0, "detail": f"{job.records_added} owned + {job.records_updated} competitor normalized"}
+
+
 def j_analytics_aggregation() -> dict:
     from src.services.analytics import views as vv
     from src.db.session import session_scope
@@ -314,10 +328,16 @@ def j_db_cleanup() -> dict:
 JOBS: list[Job] = [
     Job("telegram_sync", "Telegram Channel Sync", "every 5 min", IntervalTrigger(minutes=5), "critical", j_telegram_sync),
     Job("competitor_sync", "Competitor Channel Sync", "every 10 min", IntervalTrigger(minutes=10), "high", j_competitor_sync),
+    Job("normalize_posts", "Post Normalizer", "every 5 min", IntervalTrigger(minutes=5), "high", j_normalize_posts),
     Job("stats_refresh", "Message Statistics Refresh", "every 30 min", IntervalTrigger(minutes=30), "high", j_stats_refresh),
     Job("deal_monitoring", "Deal Monitoring", "every 2 h", IntervalTrigger(hours=2), "critical", j_deal_monitoring),
     Job("price_history", "Price History Update", "every 6 h", IntervalTrigger(hours=6), "medium", j_price_history),
     Job("deal_ranking", "Deal Ranking Engine", "every 30 min", IntervalTrigger(minutes=30), "high", j_deal_ranking),
+    # Defer reading runtime settings until SchedulerRegistry.start() to avoid
+    # calling get_settings() at module import time (startup/circular import issues).
+    # Use a safe default here; the real cadence/trigger will be applied at start().
+    Job("link_resolution", "Shortlink Resolution", "every 15 min",
+        IntervalTrigger(minutes=15), "high", j_link_resolution),
     Job("growth_detection", "Growth Opportunity Detection", "daily 06:00", CronTrigger(hour=6, minute=0), "medium", j_growth_detection),
     Job("competitor_intel", "Competitor Intelligence", "daily 07:00", CronTrigger(hour=7, minute=0), "medium", j_competitor_intel),
     Job("ai_daily_summary", "AI Daily Summary", "daily 08:00", CronTrigger(hour=8, minute=0), "medium", j_ai_daily_summary),
@@ -390,6 +410,19 @@ class SchedulerRegistry:
     def start(self) -> dict:
         if not self._sched.running:
             self._sched.start()
+        # Apply runtime settings for jobs that depend on configuration. This
+        # avoids calling get_settings() at module import time which can cause
+        # startup-time NameError / circular import problems.
+        try:
+            from src.config.settings import get_settings
+            s = get_settings()
+            for j in JOBS:
+                if j.key == "link_resolution":
+                    j.cadence = f"every {s.link_resolve_interval_min} min"
+                    j.trigger = IntervalTrigger(minutes=s.link_resolve_interval_min)
+        except Exception:
+            # If settings aren't available, keep the safe default trigger.
+            pass
         for j in JOBS:
             self._sched.add_job(self._make(j.key), trigger=j.trigger, id=j.key,
                                 replace_existing=True)

@@ -127,6 +127,11 @@ export function Analytics() {
               <div className="grid gap-4 lg:grid-cols-2">
                 <ChartCard title="Avg views by hour (IST)" sub="All 24 hours — empty slots show 0">
                   <BarsChart data={a.by_hour || []} unit=" views" dataKey="avg_views" />
+                  {a.by_hour?.length ? (
+                    <div className="mt-3 text-xs text-muted-foreground">
+                      Latest hours: {a.by_hour.slice(-2).map((row) => `${row.label} — ${fmtNum(row.avg_views)} views`).join(" · ")}
+                    </div>
+                  ) : null}
                 </ChartCard>
                 <ChartCard title="Avg views by weekday (IST)" sub="Within the selected range">
                   <BarsChart data={a.by_weekday || []} unit=" views" dataKey="avg_views" />
