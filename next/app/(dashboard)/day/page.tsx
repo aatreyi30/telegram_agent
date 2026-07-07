@@ -1,14 +1,15 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo } from "react";
 import { Async, Empty } from "@/components/Async";
 import { StatCard } from "@/components/StatCard";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { BarsChart } from "@/components/charts";
 import { useDataRange, useDay } from "@/queries/queries";
+import { DateFilter } from "@/components/ui/date-range-picker";
+import { useQueryParams } from "@/lib/use-search-params";
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -26,42 +27,49 @@ export default function DayViewPage() {
   const min = range.data?.min ?? undefined;
   const max = range.data?.max ?? undefined;
 
-  const [date, setDate] = useState<string>("");
-  const [applied, setApplied] = useState<string>("");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const { get, set } = useQueryParams();
+  const date = get("date", "");
 
-  const q = useDay(applied, { enabled: !!range.data });
+  const q = useDay(date || null, { enabled: !!range.data });
 
-  // after data loads, reflect the resolved date back into the picker
-  const resolvedDate = date || q.data?.date || max || "";
-  const pickDate = (val: string) => {
-    setDate(val);
-    setApplied(val);
+  const resolvedDate = (() => {
+    if (date) return date;
+    if (q.data && "date" in q.data && q.data.date) return q.data.date;
+    return max || "";
+  })();
+
+  const handleDateChange = (val: string) => {
+    set({ date: val || null });
   };
+
+  const typeMixChart = useMemo(() => {
+    if (!q.data || !("type_mix" in q.data)) return null;
+    return (q.data.type_mix || []).map(([label, count]: [string, number]) => ({ label, count }));
+  }, [q.data]);
+
+  const merchantMixChart = useMemo(() => {
+    if (!q.data || !("merchant_mix" in q.data)) return null;
+    return (q.data.merchant_mix || []).map(([label, count]: [string, number]) => ({ label, count }));
+  }, [q.data]);
 
   return (
     <div>
       <div className="mb-4">
         <h1 className="text-2xl font-bold tracking-tight">Day view</h1>
-        <p className="text-sm text-muted-foreground">Per-merchant breakdown for a specific date (IST). Defaults to your latest collected day.</p>
+        <p className="text-sm text-muted-foreground">Per-merchant breakdown for a specific date (IST).</p>
       </div>
+
       <div className="mb-2 flex flex-wrap items-end gap-2">
-        <Input
-          type="date"
-          ref={inputRef}
+        <DateFilter
+          mode="single"
           value={resolvedDate}
+          onChange={handleDateChange}
           min={min}
           max={max}
-          onClick={() => inputRef.current?.showPicker?.()}
-          onChange={(e) => pickDate(e.target.value)}
-          className="w-48"
+          showArrows
         />
-        {max && (
-          <Button variant="outline" size="sm" onClick={() => { setDate(""); setApplied(""); }}>
-            Latest
-          </Button>
-        )}
       </div>
+
       {max && <p className="mb-4 text-xs text-muted-foreground">Collected data runs {min} → {max} (IST).</p>}
 
       <Async q={q} rows={2}>
@@ -70,7 +78,7 @@ export default function DayViewPage() {
             <Empty>{d.note || "No posts on this date."}</Empty>
           ) : (
             <div className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-4">
+              <div className="grid gap-6 sm:grid-cols-4">
                 <StatCard label="posts" value={fmtNum(d.posts)} />
                 <StatCard label="total views" value={fmtNum(d.total_views)} />
                 <StatCard
@@ -83,6 +91,7 @@ export default function DayViewPage() {
 
               <Card>
                 <CardHeader>
+                  <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-base">Merchants — {d.date}</CardTitle>
                     {d.baseline && (
@@ -109,7 +118,7 @@ export default function DayViewPage() {
                     </TableHeader>
                     <TableBody>
                       {d.merchants.map((m) => (
-                        <TableRow key={m.key}>
+                        <TableRow key={m.key} className="hover:bg-muted/50">
                           <TableCell className="font-medium">{m.display_name ?? m.key}</TableCell>
                           <TableCell className="text-right">{fmtNum(m.post_count)}</TableCell>
                           <TableCell className="text-right font-semibold">{fmtNum(m.total_views)}</TableCell>
@@ -137,32 +146,60 @@ export default function DayViewPage() {
                 </CardContent>
               </Card>
 
-              <div className="grid gap-4 sm:grid-cols-4">
+              <div className="grid gap-4 md:grid-cols-2">
                 <Card>
-                  <CardHeader><CardTitle className="text-base">Post-type mix</CardTitle></CardHeader>
-                  <CardContent className="space-y-1 text-sm">
-                    {d.type_mix.map((t) => (
-                      <div key={t[0]} className="flex items-center justify-between">
-                        <span>{t[0]}</span>
-                        <Badge>{t[1]}</Badge>
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle className="text-base">Post-type mix</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {typeMixChart ? (
+                      <BarsChart data={typeMixChart} dataKey="count" unit=" posts" height={200} />
+                    ) : (
+                      <div className="space-y-1 text-sm">
+                        {d.type_mix.map((t) => (
+                          <div key={t[0]} className="flex items-center justify-between">
+                            <span>{t[0]}</span>
+                            <Badge>{t[1]}</Badge>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </CardContent>
                 </Card>
 
                 <Card>
-                  <CardHeader><CardTitle className="text-base">Engagement</CardTitle></CardHeader>
-                  <CardContent className="space-y-1 text-sm">
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle className="text-base">Merchant concentration</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {merchantMixChart ? (
+                      <BarsChart data={merchantMixChart} dataKey="count" unit=" posts" height={200} />
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No merchant data.</p>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-4 items-stretch">
+                <Card>
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle className="text-base">Engagement</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Reactions</span>
+                      <span className="text-sm text-muted-foreground">Reactions</span>
                       <span className="font-semibold">{fmtNum(d.merchants.reduce((a, m) => a + (m.total_reactions || 0), 0))}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Forwards</span>
+                      <span className="text-sm text-muted-foreground">Forwards</span>
                       <span className="font-semibold">{fmtNum(d.merchants.reduce((a, m) => a + (m.total_forwards || 0), 0))}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Avg rate</span>
+                      <span className="text-sm text-muted-foreground">Avg rate</span>
                       <span className="font-semibold">
                         {(() => {
                           const rates = d.merchants.map((m) => m.engagement_rate).filter((r): r is number => r != null);
@@ -170,44 +207,80 @@ export default function DayViewPage() {
                         })()}
                       </span>
                     </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Total eng.</span>
+                      <span className="font-semibold">{fmtNum(d.merchants.reduce((a, m) => a + (m.total_engagement || 0), 0))}</span>
+                    </div>
                   </CardContent>
                 </Card>
 
                 <Card>
-                  <CardHeader><CardTitle className="text-base">Deals</CardTitle></CardHeader>
-                  <CardContent className="space-y-1 text-sm">
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle className="text-base">Deals</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Deal posts</span>
+                      <span className="text-sm text-muted-foreground">Deal posts</span>
                       <span className="font-semibold">{fmtNum(d.merchants.reduce((a, m) => a + (m.deal_count || 0), 0))}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">% of posts</span>
+                      <span className="text-sm text-muted-foreground">% of posts</span>
                       <span className="font-semibold">{d.posts ? `${Math.round(d.merchants.reduce((a, m) => a + (m.deal_count || 0), 0) / d.posts * 100)}%` : "—"}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Top merchant</span>
+                      <span className="text-sm text-muted-foreground">Top merchant</span>
                       <span className="font-semibold truncate max-w-32" title={d.merchants[0]?.display_name}>
                         {d.merchants[0]?.display_name ?? d.merchants[0]?.key ?? "—"}
                       </span>
                     </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Active merchants</span>
+                      <span className="font-semibold">{d.merchants.filter((m) => m.deal_count > 0).length}</span>
+                    </div>
                   </CardContent>
                 </Card>
 
                 <Card>
-                  <CardHeader><CardTitle className="text-base">vs 30-day avg</CardTitle></CardHeader>
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle className="text-base">Post types</CardTitle>
+                  </CardHeader>
                   <CardContent className="space-y-1 text-sm">
+                    {d.type_mix.map((t) => (
+                      <div key={t[0]} className="flex items-center justify-between">
+                        <span className="text-muted-foreground">{t[0]}</span>
+                        <span className="font-semibold">{t[1]}</span>
+                      </div>
+                    ))}
+                    {d.type_mix.length === 0 && <p className="text-sm text-muted-foreground">—</p>}
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle className="text-base">vs 30-day avg</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Posts/day</span>
-                      <span className="font-semibold">{d.baseline.avg_posts_per_day} vs {d.posts}</span>
+                      <span className="text-muted-foreground text-sm">Posts/day</span>
+                      <span className="font-semibold">{d.baseline.avg_posts_per_day.toFixed(1)} vs {d.posts}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Avg views</span>
+                      <span className="text-muted-foreground text-sm">Avg views</span>
                       <span className="font-semibold">{fmtNum(d.baseline.avg_views_per_post)} vs {fmtNum(d.avg_views_per_post)}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Views Δ</span>
+                      <span className="text-muted-foreground text-sm">Views Δ</span>
                       <span className={d.vs_baseline?.views_delta_pct != null && d.vs_baseline.views_delta_pct >= 0 ? "font-semibold text-green-600" : "font-semibold text-red-600"}>
                         {d.vs_baseline?.views_delta_pct != null ? fmtPct(d.vs_baseline.views_delta_pct, true) : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground text-sm">Posts Δ</span>
+                      <span className="font-semibold">
+                        {d.vs_baseline?.posts_delta != null ? (d.vs_baseline.posts_delta >= 0 ? "+" : "") + d.vs_baseline.posts_delta : "—"}
                       </span>
                     </div>
                   </CardContent>
