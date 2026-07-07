@@ -3,15 +3,63 @@
 import { useState } from "react";
 import { Async, Empty } from "@/components/Async";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useQueue } from "@/queries/queries";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationPrevious,
+  PaginationNext,
+  PaginationEllipsis,
+} from "@/components/ui/pagination";
 
 function statusVariant(s: string) {
   if (s === "published") return "success" as const;
   if (s === "blocked" || s === "failed") return "destructive" as const;
   return "default" as const;
+}
+
+function PageButton({ page, current, onClick }: { page: number; current: number; onClick: (p: number) => void }) {
+  return (
+    <PaginationItem>
+      <div onClick={() => onClick(page)}>
+        <PaginationLink isActive={page === current}>{page}</PaginationLink>
+      </div>
+    </PaginationItem>
+  );
+}
+
+function renderPageNumbers(current: number, total: number, setPage: (p: number) => void) {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => (
+      <PageButton key={i + 1} page={i + 1} current={current} onClick={setPage} />
+    ));
+  }
+
+  const pages: React.ReactNode[] = [
+    <PageButton key={1} page={1} current={current} onClick={setPage} />,
+  ];
+
+  if (current > 3) {
+    pages.push(<PaginationItem key="es"><PaginationEllipsis /></PaginationItem>);
+  }
+
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  for (let i = start; i <= end; i++) {
+    pages.push(<PageButton key={i} page={i} current={current} onClick={setPage} />);
+  }
+
+  if (current < total - 2) {
+    pages.push(<PaginationItem key="ee"><PaginationEllipsis /></PaginationItem>);
+  }
+
+  pages.push(<PageButton key={total} page={total} current={current} onClick={setPage} />);
+
+  return pages;
 }
 
 export default function QueuePage() {
@@ -41,23 +89,27 @@ export default function QueuePage() {
             {d.items.length ? (
               <>
                 <Card>
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle>Queue Items</CardTitle>
+                  </CardHeader>
                   <CardContent className="p-0">
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead>ID</TableHead>
+                          <TableHead className="text-right">ID</TableHead>
                           <TableHead>Category</TableHead>
                           <TableHead>Channel</TableHead>
                           <TableHead>Status</TableHead>
                           <TableHead>Scheduled (UTC)</TableHead>
-                          <TableHead>Tries</TableHead>
+                          <TableHead className="text-right">Tries</TableHead>
                           <TableHead>Note</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {d.items.map((r) => (
-                          <TableRow key={r.id}>
-                            <TableCell>#{r.id}</TableCell>
+                          <TableRow key={r.id} className="hover:bg-muted/50">
+                            <TableCell className="text-right font-mono text-xs">#{r.id}</TableCell>
                             <TableCell>
                               {r.category ? (
                                 <Badge variant="primary">{r.category}</Badge>
@@ -68,7 +120,7 @@ export default function QueuePage() {
                             <TableCell>{r.channel}</TableCell>
                             <TableCell><Badge variant={statusVariant(r.status)}>{r.status}</Badge></TableCell>
                             <TableCell className="text-muted-foreground">{r.scheduled_at}</TableCell>
-                            <TableCell>{r.attempts}</TableCell>
+                            <TableCell className="text-right">{r.attempts}</TableCell>
                             <TableCell className="max-w-xs truncate text-muted-foreground" title={r.note}>
                               {r.note}
                             </TableCell>
@@ -82,24 +134,23 @@ export default function QueuePage() {
                   <p className="text-sm text-muted-foreground">
                     Page {d.page} of {d.pages} &middot; {d.total} total
                   </p>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={d.page <= 1}
-                    >
-                      Previous
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage((p) => Math.min(d.pages, p + 1))}
-                      disabled={d.page >= d.pages}
-                    >
-                      Next
-                    </Button>
-                  </div>
+                  <Pagination>
+                    <PaginationContent>
+                      <PaginationItem>
+                        <PaginationPrevious
+                          onClick={() => setPage((p) => Math.max(1, p - 1))}
+                          className={d.page <= 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                        />
+                      </PaginationItem>
+                      {renderPageNumbers(d.page, d.pages, setPage)}
+                      <PaginationItem>
+                        <PaginationNext
+                          onClick={() => setPage((p) => Math.min(d.pages, p + 1))}
+                          className={d.page >= d.pages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                        />
+                      </PaginationItem>
+                    </PaginationContent>
+                  </Pagination>
                 </div>
               </>
             ) : (
