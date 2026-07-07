@@ -10,7 +10,7 @@ sys.path.insert(0, "src")
 
 from src.db.models import Competitor
 from src.db.session import session_scope
-from src.services.collection.platform_detector import detect_category
+from src.services.collection.platform_detector import detect
 from sqlalchemy import select
 
 
@@ -22,7 +22,7 @@ def main():
             if c.category is not None:
                 skipped += 1
                 continue
-            cat = detect_category(c.username)
+            cat = detect(title=c.title, username=c.username)
             c.category = cat
             updated += 1
             status = "DIRECT (platform)" if cat == "platform" else "indirect"

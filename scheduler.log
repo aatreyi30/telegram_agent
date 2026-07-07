@@ -1,0 +1,65 @@
+[10:34:48] INFO     Adding job tentatively -- it will be properly scheduled    
+                    when the scheduler starts                                  
+           INFO     Adding job tentatively -- it will be properly scheduled    
+                    when the scheduler starts                                  
+           INFO     scheduled owned-channel collection for 1 channel(s)        
+           INFO     Adding job tentatively -- it will be properly scheduled    
+                    when the scheduler starts                                  
+           INFO     scheduled competitor monitoring for 5 channel(s)           
+           INFO     Added job "CollectionScheduler._owned_incremental" to job  
+                    store "default"                                            
+           INFO     Added job "CollectionScheduler._owned_analytics" to job    
+                    store "default"                                            
+           INFO     Added job "CollectionScheduler._competitors" to job store  
+                    "default"                                                  
+           INFO     Scheduler started                                          
+           INFO     scheduler started                                          
+Collection scheduler running. Press Ctrl-C to stop.
+[10:49:48] INFO     Running job "CollectionScheduler._owned_incremental        
+                    (trigger: interval[0:15:00], next run at: 2026-07-07       
+                    10:49:48 IST)" (scheduled at 2026-07-07                    
+                    10:49:48.042753+05:30)                                     
+[10:49:49] INFO     [telegram_owned] done target=GrabOnIndiaOfficial           
+                    processed=0 added=0 updated=0 skipped=0                    
+           INFO     Job "CollectionScheduler._owned_incremental (trigger:      
+                    interval[0:15:00], next run at: 2026-07-07 11:04:48 IST)"  
+                    executed successfully                                      
+[11:04:48] INFO     Running job "CollectionScheduler._owned_incremental        
+                    (trigger: interval[0:15:00], next run at: 2026-07-07       
+                    11:19:48 IST)" (scheduled at 2026-07-07                    
+                    11:04:48.042753+05:30)                                     
+           INFO     [telegram_owned] done target=GrabOnIndiaOfficial           
+                    processed=0 added=0 updated=0 skipped=0                    
+           INFO     Job "CollectionScheduler._owned_incremental (trigger:      
+                    interval[0:15:00], next run at: 2026-07-07 11:19:48 IST)"  
+                    executed successfully                                      
+[11:19:48] INFO     Running job "CollectionScheduler._owned_incremental        
+                    (trigger: interval[0:15:00], next run at: 2026-07-07       
+                    11:34:48 IST)" (scheduled at 2026-07-07                    
+                    11:19:48.042753+05:30)                                     
+[11:19:49] INFO     [telegram_owned] done target=GrabOnIndiaOfficial           
+                    processed=0 added=0 updated=0 skipped=0                    
+           INFO     Job "CollectionScheduler._owned_incremental (trigger:      
+                    interval[0:15:00], next run at: 2026-07-07 11:34:48 IST)"  
+                    executed successfully                                      
+[11:35:00] WARNING  Run time of job "CollectionScheduler._owned_incremental    
+                    (trigger: interval[0:15:00], next run at: 2026-07-07       
+                    11:49:48 IST)" was missed by 0:00:12.801305                
+           WARNING  Run time of job "CollectionScheduler._owned_analytics      
+                    (trigger: interval[1:00:00], next run at: 2026-07-07       
+                    12:34:48 IST)" was missed by 0:00:12.798251                
+           WARNING  Run time of job "CollectionScheduler._competitors (trigger:
+                    interval[1:00:00], next run at: 2026-07-07 12:34:48 IST)"  
+                    was missed by 0:00:12.795743                               
+[11:52:03] WARNING  Run time of job "CollectionScheduler._owned_incremental    
+                    (trigger: interval[0:15:00], next run at: 2026-07-07       
+                    12:04:48 IST)" was missed by 0:02:15.792884                
+[12:04:48] INFO     Running job "CollectionScheduler._owned_incremental        
+                    (trigger: interval[0:15:00], next run at: 2026-07-07       
+                    12:19:48 IST)" (scheduled at 2026-07-07                    
+                    12:04:48.042753+05:30)                                     
+[12:04:50] INFO     [telegram_owned] done target=GrabOnIndiaOfficial           
+                    processed=0 added=0 updated=0 skipped=0                    
+           INFO     Job "CollectionScheduler._owned_incremental (trigger:      
+                    interval[0:15:00], next run at: 2026-07-07 12:19:48 IST)"  
+                    executed successfully                                      

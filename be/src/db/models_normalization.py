@@ -29,6 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin
+from src.db.models_classification import PostClassification
 
 # Bump whenever the parsers/normalizer logic changes — triggers reprocessing of
 # posts normalized under an older version (README/09 versioning requirement).
@@ -94,6 +95,9 @@ class NormalizedPost(Base, TimestampMixin):
     )
     links: Mapped[list["ExtractedLink"]] = relationship(
         back_populates="post", cascade="all, delete-orphan"
+    )
+    classifications: Mapped[list["PostClassification"]] = relationship(
+        back_populates="normalized_post", cascade="all, delete-orphan"
     )
 
 

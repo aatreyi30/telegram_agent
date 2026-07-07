@@ -316,7 +316,10 @@ class Competitor(Base, TimestampMixin):
 
 
 class CompetitorPost(Base, TimestampMixin):
-    """An observed competitor post. Only what t.me/s exposes is stored."""
+    """An observed competitor post. Rich fields (views, forwards, reactions)
+    are populated when collected via Telethon (Telegram API) — the t.me/s
+    web-preview fallback only exposes views approximately.
+    """
 
     __tablename__ = "competitor_posts"
     __table_args__ = (
@@ -333,10 +336,12 @@ class CompetitorPost(Base, TimestampMixin):
     links: Mapped[list | None] = mapped_column(JSON)
     has_media: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # t.me/s exposes views (approx) and forwards; NOT reactions reliably.
-    views_text: Mapped[str | None] = mapped_column(String(32))   # e.g. "12.3K" as shown
-    views: Mapped[int | None] = mapped_column(Integer)           # parsed best-effort
+    # Populated natively when collected via Telethon (Telegram API).
+    # The t.me/s fallback populates views_text and views (best-effort parse).
+    views_text: Mapped[str | None] = mapped_column(String(32))
+    views: Mapped[int | None] = mapped_column(Integer)
     forwards: Mapped[int | None] = mapped_column(Integer)
+    reactions_total: Mapped[int | None] = mapped_column(Integer)
 
     raw_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("raw_snapshots.id"))
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

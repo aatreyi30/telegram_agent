@@ -1,6 +1,6 @@
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
+  LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
   CHART_AXIS_COLOR as AXIS, CHART_GRID_COLOR as GRID, CHART_PRIMARY_COLOR as C1,
@@ -19,6 +19,12 @@ function Tip({ active, payload, label, unit }: any) {
       ))}
     </div>
   );
+}
+
+function formatCategoryTick(value: string | number) {
+  const text = String(value);
+  if (/^\d{2}:\d{2}$/.test(text)) return text.slice(0, 2);
+  return text;
 }
 
 // Area/line over time (timeline: [{label, avg_views, posts}])
@@ -65,14 +71,15 @@ export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260
 }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+      <BarChart data={data} margin={{ top: 8, right: 24, left: 0, bottom: 46 }} barCategoryGap="10%">
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
-        <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false}
-          interval={0} angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? "end" : "middle"}
-          height={data.length > 8 ? 60 : 30} />
+        <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: data.length > 12 ? 10 : 11 }} tickLine={false} axisLine={false}
+          interval={0} angle={data.length > 12 ? -30 : 0} textAnchor={data.length > 12 ? "end" : "middle"}
+          height={data.length > 12 ? 70 : 30} tickMargin={10} tickFormatter={formatCategoryTick}
+          padding={{ left: 12, right: 12 }} />
         <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
         <Tooltip content={<Tip unit={unit} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
-        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} />
+        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} minPointSize={2} />
       </BarChart>
     </ResponsiveContainer>
   );
