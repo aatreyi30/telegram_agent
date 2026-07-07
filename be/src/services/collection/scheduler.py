@@ -8,6 +8,7 @@ through the JobRunner, so all runs share the same lifecycle/observability.
 from __future__ import annotations
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import select
 
 from src.services.collection.base import JobRunner
 from src.services.collection.channels import owned_handles
@@ -16,7 +17,8 @@ from src.services.collection.link_resolution import LinkResolutionEngine
 from src.services.collection.telegram_competitor import CompetitorCollector
 from src.services.collection.telegram_owned import OwnedChannelCollector
 from src.config.settings import get_settings
-from src.db.models import CollectionType
+from src.db.models import CollectionType, Competitor
+from src.db.session import session_scope
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,7 +50,14 @@ class CollectionScheduler:
             )
 
     def _competitors(self) -> None:
-        for username in self.settings.competitor_channels:
+        usernames = list(self.settings.competitor_channels)
+        seen = {u.lstrip("@").lower() for u in usernames}
+        with session_scope() as s:
+            for c in s.scalars(select(Competitor)):
+                if c.username and c.username.lstrip("@").lower() not in seen:
+                    usernames.append(c.username)
+                    seen.add(c.username.lstrip("@").lower())
+        for username in usernames:
             self.runner.run_collector(
                 CompetitorCollector(username, max_pages=1),
                 collection_type=CollectionType.INCREMENTAL,
