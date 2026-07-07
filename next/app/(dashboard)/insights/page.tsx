@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Analytics01Icon,
@@ -8,12 +9,12 @@ import {
   ArrowUp01Icon,
   BarChartIcon,
   Idea01Icon,
+  SparklesIcon,
   Target02Icon,
 } from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
 import { cn } from "@/lib/utils";
 import { CalloutCard } from "@/components/CalloutCard";
-import { BarsChart } from "@/components/charts";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -127,11 +128,23 @@ export default function InsightsPage() {
           const contentMix = d.content_mix as ContentMixRow[] | null;
           return (
             <div className="space-y-8">
-              {/* Recommendations */}
+              {/* Supporting evidence (demoted from "Recommendations" headline — the AI Digest is
+                  now the headline strategy surface; these are the deterministic signals that feed
+                  its planner, kept here as the evidence trail behind the digest's reasoning). */}
               <section>
-                <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold">
-                  <HugeiconsIcon icon={Idea01Icon} size={18} className="text-primary" /> Recommendations
-                </h2>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="flex items-center gap-2 text-lg font-semibold">
+                    <HugeiconsIcon icon={Idea01Icon} size={18} className="text-primary" /> Supporting evidence
+                  </h2>
+                  <Link href="/digest" className="inline-flex items-center gap-1 text-sm text-primary hover:underline">
+                    <HugeiconsIcon icon={SparklesIcon} size={14} /> See today's AI strategy
+                  </Link>
+                </div>
+                <p className="mb-3 text-sm text-muted-foreground">
+                  Deterministic signals computed from your data — no longer the headline feature. The AI planner
+                  reads these (plus the daily report rows) to write the grounded, fact-checked strategy on the{" "}
+                  <Link href="/digest" className="underline">Daily Digest</Link> page.
+                </p>
                 {(d.recommendations || []).length ? (
                   <Card className="overflow-hidden py-0">
                     <CardContent className="p-0">
@@ -144,30 +157,6 @@ export default function InsightsPage() {
                   <p className="text-sm text-muted-foreground">No recommendations yet.</p>
                 )}
               </section>
-
-              {/* Emoji policy */}
-              {d.emoji_policy?.rules?.length > 0 && (
-                <section>
-                  <h2 className="mb-3 text-lg font-semibold">Emoji policy</h2>
-                  <Card>
-                    <CardContent className="p-4">
-                      <p className="mb-3 text-sm text-muted-foreground">
-                        Drafts strip the avoid-emojis automatically. Based on {d.emoji_policy.window}. Lift is
-                        correlational, not causal — these emojis co-occur with your best/worst post types, not
-                        proven to cause the difference.
-                      </p>
-                      <BarsChart
-                        data={[...d.emoji_policy.rules]
-                          .sort((a, b) => b.lift_pct - a.lift_pct)
-                          .map((r) => ({ label: r.emoji, lift_pct: r.lift_pct }))}
-                        dataKey="lift_pct"
-                        unit="%"
-                        height={Math.max(180, d.emoji_policy.rules.length * 28)}
-                      />
-                    </CardContent>
-                  </Card>
-                </section>
-              )}
 
               {/* What changed & why */}
               <section>
