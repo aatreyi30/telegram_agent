@@ -230,3 +230,62 @@ def full_briefing_context(s: Session) -> dict:
 
 def to_json(data: dict | list) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+_REPORT_NUMERIC = (
+    "posts_count", "deals_posted", "merchants_featured", "views_total",
+    "views_avg", "views_median", "views_max", "views_min",
+    "reactions_total", "forwards_total", "engagement_rate", "subs_net",
+)
+
+
+def _report_to_dict(r) -> dict:
+    return {
+        "report_date": r.report_date.isoformat() if r.report_date else None,
+        "source_type": r.source_type,
+        "posts_count": r.posts_count, "deals_posted": r.deals_posted,
+        "merchants_featured": r.merchants_featured,
+        "views_total": r.views_total, "views_avg": r.views_avg,
+        "views_median": r.views_median, "views_max": r.views_max, "views_min": r.views_min,
+        "reactions_total": r.reactions_total, "forwards_total": r.forwards_total,
+        "engagement_rate": r.engagement_rate,
+        "subs_start": r.subs_start, "subs_end": r.subs_end, "subs_net": r.subs_net,
+        "type_mix": r.type_mix, "category_mix": r.category_mix, "posting_hours": r.posting_hours,
+        "best_category": r.best_category, "worst_category": r.worst_category,
+        "data_completeness": r.data_completeness, "id": r.id,
+    }
+
+
+def daily_reports(s: Session, days: int = 8, source_type: str | None = None) -> list[dict]:
+    from src.db.models_report import DailyChannelReport, ReportSourceType
+    src_t = source_type or ReportSourceType.OWNED
+    rows = list(s.scalars(
+        select(DailyChannelReport)
+        .where(DailyChannelReport.source_type == src_t)
+        .order_by(DailyChannelReport.report_date.desc())
+        .limit(days)
+    ))
+    return [_report_to_dict(r) for r in rows]
+
+
+def report_baseline(s: Session, days: int = 30) -> dict:
+    rows = daily_reports(s, days=days)
+    if not rows:
+        return {}
+    out = {}
+    for k in _REPORT_NUMERIC:
+        vals = [r[k] for r in rows if r.get(k) is not None]
+        out[k] = round(sum(vals) / len(vals), 2) if vals else 0
+    return out
+
+
+def planning_context(s: Session) -> dict:
+    from src.db.models_report import ReportSourceType
+    return {
+        "channel": channel_overview(s),
+        "reports": daily_reports(s, days=8, source_type=ReportSourceType.OWNED),
+        "baseline": report_baseline(s, days=30),
+        "competitor_reports": daily_reports(s, days=8, source_type=ReportSourceType.COMPETITOR),
+        "channel_style": channel_style(s),
+        "post_type_performance": post_type_performance(s),
+    }
