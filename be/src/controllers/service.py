@@ -322,6 +322,27 @@ def plans() -> list[dict]:
                  "evidence": p.evidence} for p in rows]
 
 
+def digest() -> dict:
+    from src.db.models_campaign import CampaignPlan, PlanType
+    with session_scope() as s:
+        p = s.scalars(
+            select(CampaignPlan)
+            .where(CampaignPlan.plan_type == PlanType.DAILY, CampaignPlan.is_ai_generated == True)  # noqa: E712
+            .order_by(CampaignPlan.generated_at.desc())
+        ).first()
+        if p is None:
+            return {"available": False, "digest": "", "plan": None,
+                    "factcheck_status": None, "reconciliation": None, "generated_at": None}
+        return {
+            "available": True,
+            "digest": p.ai_digest or "",
+            "plan": p.blueprint,
+            "factcheck_status": p.factcheck_status,
+            "reconciliation": p.reconciliation,
+            "generated_at": p.generated_at.isoformat() if p.generated_at else None,
+        }
+
+
 def _page_meta(total: int, page: int, page_size: int) -> dict:
     pages = max(1, -(-total // page_size)) if page_size else 1
     return {"total": total, "page": page, "page_size": page_size, "pages": pages}

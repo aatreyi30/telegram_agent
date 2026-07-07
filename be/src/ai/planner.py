@@ -60,8 +60,22 @@ def generate_day_plan(s: Session) -> dict:
         return {"available": False, "reason": "no report rows yet", "plan": None, "digest": ""}
     report_ids = [r["id"] for r in ctx["reports"] if r.get("id") is not None]
     ai = AIClient()
+    recon_note = ""
     try:
-        user = f"{_PLAN_INSTRUCTIONS}\n\nDATA:\n{to_json(ctx)}"
+        from sqlalchemy import select
+        from src.db.models_campaign import CampaignPlan, PlanType
+        prev = s.scalars(
+            select(CampaignPlan)
+            .where(CampaignPlan.plan_type == PlanType.DAILY, CampaignPlan.is_ai_generated == True)  # noqa: E712
+            .order_by(CampaignPlan.generated_at.desc())
+        ).first()
+        if prev is not None and prev.reconciliation:
+            recon_note = ("\n\nYESTERDAY'S RECONCILIATION (adherence is fact; attribution is "
+                          "correlational, not causal):\n" + to_json(prev.reconciliation))
+    except Exception:
+        recon_note = ""
+    try:
+        user = f"{_PLAN_INSTRUCTIONS}\n\nDATA:\n{to_json(ctx)}{recon_note}"
         raw = ai.complete(user, max_tokens=1500)
     except AIUnavailable as e:
         return {"available": False, "reason": str(e), "plan": None, "digest": ""}

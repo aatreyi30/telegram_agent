@@ -91,3 +91,8 @@ def weekly():
 @router.get("/growth")
 def growth():
     return ok(service.growth())
+
+
+@router.get("/digest")
+def digest():
+    return ok(service.digest())
