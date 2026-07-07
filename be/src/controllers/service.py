@@ -97,6 +97,7 @@ def delete_channel(channel_id: int, confirm: bool = False, org_id: int | None = 
             "normalized_posts": _count(NormalizedPost, NormalizedPost.source_type == SourceType.OWNED,
                                        NormalizedPost.source_id.in_(post_ids)),
             "metric_snapshots": _count(PostMetricSnapshot, PostMetricSnapshot.post_id.in_(post_ids)),
+            "channel_stat_snapshots": _count(ChannelStatSnapshot, ChannelStatSnapshot.channel_id == channel_id),
         }
         if not confirm:
             return {"ok": False, "requires_confirm": True, "would_delete": counts,
@@ -143,6 +144,9 @@ def overview() -> dict:
         drafts = s.scalar(select(func.count()).select_from(GeneratedPost)
                           .where(GeneratedPost.status == PostStatus.DRAFT)) or 0
         ch = ctx.channel_overview(s)
+        owned = s.scalars(select(Channel).where(Channel.kind == "owned")
+                          .order_by(Channel.participants_count.desc())).first()
+        can_view_stats = bool(owned.can_view_stats) if owned else False
         queue_counts = dict(s.execute(
             select(ScheduledPost.status, func.count()).group_by(ScheduledPost.status)).all())
     return {
@@ -152,12 +156,17 @@ def overview() -> dict:
         "drafts": drafts,
         "queue_counts": queue_counts,
         "affiliate_provider": s_.affiliate_provider_name,
-        "publishing_gates": _publishing_gates(s_, queue_counts),
+        "publishing_gates": _publishing_gates(s_, queue_counts, can_view_stats),
     }
 
 
-def _publishing_gates(settings, queue_counts: dict) -> list[dict]:
-    """Plain-language status of what still stands between drafts and a live post."""
+def _publishing_gates(settings, queue_counts: dict, can_view_stats: bool) -> list[dict]:
+    """Plain-language status of what still stands between drafts and a live post.
+
+    ``can_view_stats`` reflects the real Channel.can_view_stats flag (set when a
+    collection cycle successfully calls the admin-only stats API) rather than a
+    fixed assumption, since it also determines whether follower-graph / notification
+    stats are ever populated."""
     affiliate_closed = settings.affiliate_provider_name != "generic"
     blocked = queue_counts.get(ScheduleStatus.BLOCKED, 0)
     return [
@@ -167,9 +176,10 @@ def _publishing_gates(settings, queue_counts: dict) -> list[dict]:
                     "short links." if affiliate_closed
                     else "No provider configured — links are untracked.")},
         {"name": "Channel admin rights",
-         "ok": False,
-         "detail": ("The account must be an admin with post rights on the channel. It is currently "
-                    "a member, so sends return BLOCKED"
+         "ok": can_view_stats,
+         "detail": ("Admin stats access confirmed on the last collection cycle." if can_view_stats
+                    else "The account must be an admin with post/stats rights on the channel. It is "
+                    "currently a member, so sends return BLOCKED"
                     + (f" ({blocked} in queue)." if blocked else "."))},
     ]
 
@@ -209,6 +219,74 @@ def competitors() -> dict:
         return {
             "profiles": ctx.competitor_profiles(s),
             "signals": ctx.competitor_signals(s),
+        }
+
+
+def competitor_dashboard(window_days: int | None = None) -> dict:
+    """Unified competitor dashboard — profiles, benchmarks, signals, grouped by category.
+
+    ``window_days`` when set filters basic stats to the last N days (like comparison).
+    """
+    from src.services.analytics import comparison as cmp
+    from src.db.models_competitor_intel import (
+        CompetitorProfile, CompetitorBenchmark, CompetitorSignal,
+        COMPETITOR_INTEL_VERSION,
+    )
+
+    with session_scope() as s:
+        # comparison data (owned + competitors with profiles)
+        comp = cmp.compare(s, window_days=window_days)
+        entities = comp.get("entities", [])
+
+        # raw DB rows for category + benchmark access
+        competitors_raw = {
+            c.id: c for c in s.scalars(select(Competitor)).all()
+        }
+        profiles_raw = {
+            p.competitor_id: p for p in s.scalars(
+                select(CompetitorProfile).where(
+                    CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
+            ).all()
+        }
+
+        # group entities by category
+        platform_ents = []
+        channel_ents = []
+        for e in entities:
+            if e.get("is_owned"):
+                continue
+            # find category from DB
+            cid = None
+            for _cid, c in competitors_raw.items():
+                if c.username == e.get("name"):
+                    cid = _cid
+                    break
+            cat = competitors_raw[cid].category if cid and cid in competitors_raw else None
+            e["category"] = cat or "unclassified"
+            if cat == "platform":
+                platform_ents.append(e)
+            else:
+                channel_ents.append(e)
+
+        signals = comp.get("signals", [])
+        unavailable = comp.get("unavailable", [])
+        note = comp.get("note", "")
+        metrics = comp.get("metrics", [])
+
+        return {
+            "summary": {
+                "total": len(entities) - 1,  # exclude owned
+                "platform": len(platform_ents),
+                "channel": len(channel_ents),
+                "signals": len(signals),
+            },
+            "platform": platform_ents,
+            "channel": channel_ents,
+            "signals": signals,
+            "unavailable": unavailable,
+            "note": note,
+            "metrics": metrics,
+            "applied_window": window_days,
         }
 
 
@@ -320,13 +398,6 @@ def day_summary(day=None) -> dict:
 
     with session_scope() as s:
         return dd.summarize(s, day)
-
-
-def comparison(window_days: int | None = None) -> dict:
-    from src.services.analytics import comparison as cmp
-
-    with session_scope() as s:
-        return cmp.compare(s, window_days=window_days)
 
 
 def growth() -> dict:

@@ -65,6 +65,11 @@ def competitors():
     return ok(service.competitors())
 
 
+@router.get("/competitor-dashboard")
+def competitor_dashboard(window: int | None = Query(default=None, description="Window in days (7/30/90). Omit for all data.")):
+    return ok(service.competitor_dashboard(window_days=window))
+
+
 @router.get("/merchants")
 def merchants():
     return ok(service.merchants())
@@ -78,11 +83,6 @@ def plans():
 @router.get("/weekly")
 def weekly():
     return ok(service.weekly_report())
-
-
-@router.get("/comparison")
-def comparison(window: int | None = Query(default=None, description="Window in days (7/30/90). Omit for all data.")):
-    return ok(service.comparison(window_days=window))
 
 
 @router.get("/growth")
