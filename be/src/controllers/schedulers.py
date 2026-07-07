@@ -316,6 +316,14 @@ def j_daily_plan() -> dict:
                       f"{len(r['categories'])} categories at proven hours (deduped)"}
 
 
+def j_daily_report() -> dict:
+    """Persist yesterday's DailyChannelReport rows (owned + competitor)."""
+    from src.db.session import session_scope
+    from src.services.analytics.daily_report import run_daily_reports
+    with session_scope() as s:
+        return run_daily_reports(s)  # defaults to latest owned date
+
+
 def j_db_cleanup() -> dict:
     from src.db.models import CollectionEvent
     from src.db.models_scheduler import SchedulerRun
@@ -357,6 +365,7 @@ JOBS: list[Job] = [
     Job("notification_engine", "Notification Engine", "every 5 min", IntervalTrigger(minutes=5), "medium", j_notification_engine),
     Job("org_health", "Organization Health Check", "every 1 h", IntervalTrigger(hours=1), "low", j_org_health),
     Job("db_cleanup", "Database Cleanup", "daily 03:00", CronTrigger(hour=3, minute=0), "low", j_db_cleanup),
+    Job("daily_report", "Daily Channel Report", "daily 05:15 IST", CronTrigger(hour=5, minute=15), "high", j_daily_report),
     Job("daily_plan", "Daily Post Planner", "daily 05:30 IST", CronTrigger(hour=5, minute=30), "high", j_daily_plan),
 ]
 
