@@ -252,7 +252,7 @@ class ChannelLearningEngine(BaseCollector):
         if eligible:
             best = eligible[0]
             add("post_type", f"Post type '{best['post_type']}' is your top performer "
-                f"({lift_pct(best['avg_views_per_day'])}% vs channel avg age-normalized views).",
+                f"({lift_pct(best['avg_views_per_day'])}% vs channel avg views/day).",
                 "avg_views_per_day", best["avg_views_per_day"], best["post_count"],
                 {"post_type": best["post_type"], "baseline_views_per_day": baseline})
             worst = eligible[-1]
@@ -268,7 +268,7 @@ class ChannelLearningEngine(BaseCollector):
         if with_cta and without_cta and n_cta >= MIN_GROUP_SAMPLE and n_no >= MIN_GROUP_SAMPLE:
             diff = round((with_cta / without_cta - 1) * 100, 1)
             add("cta", f"Posts with a call-to-action get {diff}% "
-                f"{'more' if diff >= 0 else 'less'} age-normalized views than those without.",
+                f"{'more' if diff >= 0 else 'less'} views/day than those without.",
                 "avg_views_per_day", with_cta, n_cta,
                 {"with_cta": with_cta, "without_cta": without_cta, "n_with": n_cta, "n_without": n_no})
 
@@ -278,7 +278,7 @@ class ChannelLearningEngine(BaseCollector):
         if with_m and without_m and n_m >= MIN_GROUP_SAMPLE and n_nm >= MIN_GROUP_SAMPLE:
             diff = round((with_m / without_m - 1) * 100, 1)
             add("media", f"Posts with media get {diff}% "
-                f"{'more' if diff >= 0 else 'less'} age-normalized views than text-only.",
+                f"{'more' if diff >= 0 else 'less'} views/day than text-only.",
                 "avg_views_per_day", with_m, n_m,
                 {"with_media": with_m, "without_media": without_m, "n_with": n_m, "n_without": n_nm})
 
@@ -291,8 +291,8 @@ class ChannelLearningEngine(BaseCollector):
                 continue
             v, n = subgroup_vpd(lambda f, e=emoji: e in f.emojis)
             if v:
-                add("emoji", f"Posts using {emoji} get {lift_pct(v)}% vs channel avg age-normalized "
-                    "views (correlation, not proven cause — {} tends to appear in your best-performing "
+                add("emoji", f"Posts using {emoji} get {lift_pct(v)}% vs channel avg "
+                    "views/day (correlation, not proven cause — {} tends to appear in your best-performing "
                     "post types).".format(emoji),
                     "avg_views_per_day", v, n, {"emoji": emoji, "baseline_views_per_day": baseline,
                                                 "note": "correlational, not causal"})

@@ -291,7 +291,12 @@ class ChannelStatSnapshot(Base):
 
 
 class Competitor(Base, TimestampMixin):
-    """A public competitor channel monitored via t.me/s (no auth, scrape)."""
+    """A public competitor channel monitored via t.me/s (no auth, scrape).
+
+    ``category`` is ``"platform"`` (has own coupon website + Telegram, e.g. Grabon)
+    or ``"channel"`` (Telegram-only deal channel). Set during discovery via web
+    search; ``None`` means not yet classified.
+    """
 
     __tablename__ = "competitors"
 
@@ -304,6 +309,7 @@ class Competitor(Base, TimestampMixin):
         String(16), default=SourceAccessStatus.AVAILABLE
     )
     discovered_via: Mapped[str | None] = mapped_column(String(64))
+    category: Mapped[str | None] = mapped_column(String(16))  # "platform" | "channel"
     last_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     posts: Mapped[list["CompetitorPost"]] = relationship(back_populates="competitor")

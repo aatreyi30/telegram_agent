@@ -253,7 +253,7 @@ class MerchantIntelligenceEngine(BaseCollector):
                     "merchant_key": key,
                     "kind": "engagement_trending_up",
                     "description": (
-                        f"{key} age-normalized views up {int(lift*100)}% over the last "
+                        f"{key} views/day up {int(lift*100)}% over the last "
                         "7 days vs the 30-day baseline."
                     ),
                     "evidence": {
