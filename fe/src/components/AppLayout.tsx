@@ -1,37 +1,16 @@
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import {
-  BarChart3, Bot, CalendarDays, Clock, GitCompare, LayoutDashboard, Lightbulb,
-  ListOrdered, LogOut, Menu, Package, Send, Settings as SettingsIcon, Store, TrendingUp, Users2,
-} from "lucide-react";
-import { api } from "@/services/api";
+import { LogOut, Menu } from "lucide-react";
 import { useAuth } from "@/providers/auth";
 import { cn } from "@/lib/utils";
+import { NAV } from "@/constants/nav";
+import { useOverview } from "@/queries/queries";
 import { Logo } from "./Logo";
-
-// Grouped so the sidebar reads clearly: what runs it, what it learned, what it produced.
-const NAV = [
-  { to: "/app", label: "Overview", icon: LayoutDashboard, end: true, group: "" },
-  { to: "/app/agent", label: "Agent", icon: Bot, group: "Run" },
-  { to: "/app/schedulers", label: "Schedulers", icon: Clock, group: "Run" },
-  { to: "/app/insights", label: "Insights", icon: Lightbulb, group: "Understand" },
-  { to: "/app/analytics", label: "Analytics", icon: BarChart3, group: "Understand" },
-  { to: "/app/day", label: "Day view", icon: CalendarDays, group: "Understand" },
-  { to: "/app/competitors", label: "Competitors", icon: Users2, group: "Understand" },
-  { to: "/app/comparison", label: "You vs competitors", icon: GitCompare, group: "Understand" },
-  { to: "/app/growth", label: "Growth", icon: TrendingUp, group: "Understand" },
-  { to: "/app/merchants", label: "Merchants", icon: Store, group: "Understand" },
-  { to: "/app/plan", label: "Plan", icon: ListOrdered, group: "Act" },
-  { to: "/app/drafts", label: "Drafts", icon: Send, group: "Act" },
-  { to: "/app/queue", label: "Schedule", icon: Package, group: "Act" },
-  { to: "/app/settings", label: "Settings", icon: SettingsIcon, group: "" },
-];
 
 export function AppLayout() {
   const { user, logout } = useAuth();
   const [open, setOpen] = useState(false);
-  const { data: ov } = useQuery({ queryKey: ["overview"], queryFn: () => api.get<any>("/api/overview") });
+  const { data: ov } = useOverview();
   const channel = ov?.channel?.username ? `@${ov.channel.username}` : "";
 
   return (

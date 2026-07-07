@@ -1,17 +1,12 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { api, getToken, setToken } from "@/services/api";
+import type { AuthUser, LoginResponse } from "@/types/api";
 
-export interface User {
-  id: number;
-  org_id: number;
-  name: string;
-  email: string | null;
-  role: "owner" | "editor" | "viewer";
-}
+export type { AuthUser as User };
 
 interface AuthState {
-  user: User | null;
+  user: AuthUser | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
@@ -20,7 +15,7 @@ interface AuthState {
 const AuthCtx = createContext<AuthState>(null as unknown as AuthState);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -29,14 +24,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     api
-      .get<User>("/api/auth/me")
+      .get<AuthUser>("/api/auth/me")
       .then(setUser)
       .catch(() => setToken(null))
       .finally(() => setLoading(false));
   }, []);
 
   async function login(email: string, password: string) {
-    const res = await api.post<{ token: string; user: User }>("/api/auth/login", { email, password });
+    const res = await api.post<LoginResponse>("/api/auth/login", { email, password });
     setToken(res.token);
     setUser(res.user);
   }
