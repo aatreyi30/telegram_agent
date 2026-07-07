@@ -1,13 +1,8 @@
-"""Competitor discovery — find similar deal channels via Telegram search.
+"""Competitor discovery — find deal channels + classify as platform or channel-only.
 
-Instead of a fixed .env list, search public Telegram for deal/loot/coupon channels,
-rank candidates by relevance (deal keywords in title/description) and popularity
-(subscriber count), skip our own + already-tracked channels, and add the top matches
-to the Competitor table so the normal competitor collector monitors them next cycle.
-
-Best-effort + honest: needs an authorised Telegram session; if unavailable it raises
-a clear reason (the caller logs it). It never fabricates channels — only real search
-results with real usernames are added.
+Telegram search finds candidates; then a web probe checks whether the entity also
+has a coupon platform website. The ``category`` field is set during insert so
+the dashboard can split "direct" (platform + Telegram) from "indirect" (Telegram-only).
 """
 
 from __future__ import annotations
@@ -72,8 +67,19 @@ async def _search(settings, exclude: set[str], limit_per_query: int = 20) -> lis
         await client.disconnect()
 
 
+def _detect_category(title: str | None, username: str | None) -> str | None:
+    """Import on demand and probe — the detector uses stdlib http.client."""
+    from src.services.collection.platform_detector import detect
+
+    try:
+        return detect(title=title, username=username)
+    except Exception as e:
+        logger.warning("[discovery] platform detection failed for %r: %s", username or title, e)
+        return None
+
+
 def discover_competitors(max_add: int = 5) -> dict:
-    """Search, rank, and add the top new deal channels. Returns a small report."""
+    """Search, rank, classify, and add the top new competitor channels."""
     s = get_settings()
     if not (s.telegram_api_id and s.telegram_api_hash):
         raise RuntimeError("Telegram MTProto not configured.")
@@ -85,7 +91,6 @@ def discover_competitors(max_add: int = 5) -> dict:
     exclude = existing | owned
 
     candidates = asyncio.run(_search(s, exclude))
-    # rank: deal-keyword relevance first, then popularity (log subscribers)
     for c in candidates:
         c["score"] = _relevance(c["title"], "") + math.log10(max(c["participants"], 1))
     candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -97,13 +102,15 @@ def discover_competitors(max_add: int = 5) -> dict:
                 break
             if sess.scalar(select(Competitor).where(Competitor.username == c["username"])):
                 continue
+            category = _detect_category(c.get("title"), c["username"])
             sess.add(Competitor(
                 username=c["username"], title=c["title"],
                 subscribers_text=str(c["participants"]) if c["participants"] else None,
                 access_status=SourceAccessStatus.AVAILABLE,
-                discovered_via="telegram_search"))
+                discovered_via="telegram_search",
+                category=category,
+            ))
             added += 1
-    logger.info("[discovery] %d candidates, added %d new competitor channel(s)",
-                len(candidates), added)
+    logger.info("[discovery] %d candidates, +%d new", len(candidates), added)
     return {"candidates": len(candidates), "added": added,
             "top": [c["username"] for c in candidates[:max_add]]}
