@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
+venv/
 be/.venv/
 
 # secrets / local data (never commit)
@@ -17,6 +18,12 @@ be/.env
 # frontend
 fe/node_modules/
 fe/dist/
+
+next/node_modules/
+next/.next/
+
+next/.next
+*.next/
 
 *.md
 /*.md
