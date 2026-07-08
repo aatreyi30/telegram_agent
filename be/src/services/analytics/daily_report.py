@@ -93,9 +93,7 @@ def _fill_subs(s: Session, rep: DailyChannelReport, channel_id: int | None, day:
     """subs_start/end/net from ParticipantSnapshot when present; else NULL.
 
     The real subscriber time-series lives in `participant_snapshots.count`
-    (ParticipantSnapshot, captured every collection cycle). ChannelStatSnapshot
-    requires admin `can_view_stats` and is empty in practice, so we read
-    participant snapshots instead.
+    (ParticipantSnapshot, captured every collection cycle).
     """
     try:
         from src.db.models_growth_snapshot import ParticipantSnapshot

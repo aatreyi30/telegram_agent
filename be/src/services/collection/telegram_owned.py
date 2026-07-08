@@ -28,13 +28,13 @@ from src.services.collection.util import content_hash, extract_urls, to_utc
 from src.config.settings import get_settings
 from src.db.models import (
     Channel,
-    ChannelStatSnapshot,
     CollectionType,
     Post,
     PostMetricSnapshot,
 )
-from src.db.models_growth_snapshot import ParticipantSnapshot
+from src.db.models_growth_snapshot import DailySubscriberStat, ParticipantSnapshot
 from src.db.session import session_scope
+from src.services.analytics.periods import IST
 from src.services.events import Event, EventType, get_event_bus
 from src.logger import get_logger
 
@@ -43,6 +43,44 @@ logger = get_logger(__name__)
 HISTORY_WINDOW_DAYS = 365
 # Refresh counters for posts published within this window during ANALYTICS runs.
 METRIC_REFRESH_WINDOW_DAYS = 30
+
+
+def _upsert_daily_subscriber_stat(s, channel_id: int, day, count: int, updated_at: datetime) -> None:
+    """Incrementally roll a fresh participant count into today's (IST) daily
+    subscriber-stat row: first observation of the day seeds start/end, later
+    observations turn the delta since the row's last-seen count into joined/left.
+
+    Must be called in the same session/transaction as the ParticipantSnapshot
+    insert it accompanies so a mid-cycle failure leaves both untouched.
+    """
+    row = s.scalar(
+        select(DailySubscriberStat).where(
+            DailySubscriberStat.channel_id == channel_id,
+            DailySubscriberStat.stat_date == day,
+        )
+    )
+    if row is None:
+        s.add(
+            DailySubscriberStat(
+                channel_id=channel_id,
+                stat_date=day,
+                subs_start=count,
+                subs_end=count,
+                subs_joined=0,
+                subs_left=0,
+                subs_net=0,
+                updated_at=updated_at,
+            )
+        )
+        return
+    delta = count - row.subs_end
+    if delta > 0:
+        row.subs_joined += delta
+    elif delta < 0:
+        row.subs_left += abs(delta)
+    row.subs_end = count
+    row.subs_net = row.subs_end - row.subs_start
+    row.updated_at = updated_at
 
 
 class OwnedChannelCollector(BaseCollector):
@@ -209,17 +247,6 @@ class OwnedChannelCollector(BaseCollector):
     # ------------------------------------------------------------------ #
     async def _collect_analytics(self, client, entity, full, channel_row_id, job_id) -> CollectorResult:
         result = CollectorResult()
-        # (a) broadcast stats snapshot, only if the channel is stats-eligible
-        can_view = bool(getattr(full.full_chat, "can_view_stats", False))
-        if can_view:
-            try:
-                await self._store_broadcast_stats(client, entity, channel_row_id, job_id)
-                result.added += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("broadcast stats unavailable: %s", exc)
-        else:
-            logger.info("channel below stats threshold (can_view_stats=False) — skipping stats")
-
         # (b) refresh counters for recent posts (view-velocity reconstruction)
         with session_scope() as s:
             cutoff = datetime.now(timezone.utc) - timedelta(days=METRIC_REFRESH_WINDOW_DAYS)
@@ -253,40 +280,6 @@ class OwnedChannelCollector(BaseCollector):
                        {"posts_refreshed": len(recent_ids)})
         return result
 
-    async def _store_broadcast_stats(self, client, entity, channel_row_id, job_id) -> None:
-        from telethon.tl.functions.stats import GetBroadcastStatsRequest
-
-        stats = await client(GetBroadcastStatsRequest(channel=entity))
-
-        def _abs(v):
-            return getattr(v, "current", None) if v is not None else None
-
-        with session_scope() as s:
-            snap = store_raw(
-                s,
-                source=f"{self.name}_stats",
-                source_ref=self.channel_ref,
-                payload=str(stats),  # Telethon TL object -> repr for traceability
-                job_id=job_id,
-                content_type="text/plain",
-            )
-            s.add(
-                ChannelStatSnapshot(
-                    channel_id=channel_row_id,
-                    captured_at=datetime.now(timezone.utc),
-                    followers=_abs(getattr(stats, "followers", None)),
-                    views_per_post=_abs(getattr(stats, "views_per_post", None)),
-                    shares_per_post=_abs(getattr(stats, "shares_per_post", None)),
-                    reactions_per_post=_abs(getattr(stats, "reactions_per_post", None)),
-                    enabled_notifications_pct=getattr(
-                        getattr(stats, "enabled_notifications", None), "part", None
-                    ),
-                    graphs_json=None,  # async graphs fetched lazily in a later phase
-                    raw_snapshot_id=snap.id,
-                )
-            )
-        self._emit(EventType.CHANNEL_STATS_UPDATED, "channel", channel_row_id, job_id, {})
-
     # ------------------------------------------------------------------ #
     def _upsert_channel(self, entity, full, job_id) -> int:
         full_chat = full.full_chat
@@ -315,6 +308,7 @@ class OwnedChannelCollector(BaseCollector):
             row.can_view_stats = bool(getattr(full_chat, "can_view_stats", False))
             if pc is not None:
                 s.add(ParticipantSnapshot(channel_id=row.id, captured_at=now, count=pc))
+                _upsert_daily_subscriber_stat(s, row.id, now.astimezone(IST).date(), pc, now)
             row.stats_dc = getattr(full_chat, "stats_dc", None)
             s.flush()
             row_id = row.id

@@ -6,9 +6,9 @@ without needing Telegram admin-level stats (which require can_view_stats).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date as date_, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.base import Base
@@ -24,3 +24,32 @@ class ParticipantSnapshot(Base):
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     count: Mapped[int | None] = mapped_column(Integer)
+
+
+class DailySubscriberStat(Base):
+    """Per-IST-day rollup of subscriber joins/leaves, built incrementally as each
+    collection cycle observes a new participant count (see
+    ``telegram_owned.py::_upsert_daily_subscriber_stat``).
+
+    Unlike ``ParticipantSnapshot`` (a raw point-in-time reading), this table holds
+    one row per (channel, day) that accumulates joined/left counts across the day's
+    collection cycles, so the dashboard can show daily net growth without having to
+    reconstruct it from potentially-gappy snapshots at read time.
+    """
+
+    __tablename__ = "daily_subscriber_stats"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "stat_date", name="uq_dailysub_channel_date"),
+        Index("ix_dailysub_channel_date", "channel_id", "stat_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    stat_date: Mapped[date_] = mapped_column(Date, nullable=False)  # IST calendar day
+
+    subs_start: Mapped[int] = mapped_column(Integer)   # first observed count that day
+    subs_end: Mapped[int] = mapped_column(Integer)      # most recent observed count that day
+    subs_joined: Mapped[int] = mapped_column(Integer, default=0)
+    subs_left: Mapped[int] = mapped_column(Integer, default=0)
+    subs_net: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -260,31 +260,6 @@ class PostMetricSnapshot(Base):
     post: Mapped["Post"] = relationship(back_populates="metric_snapshots")
 
 
-class ChannelStatSnapshot(Base):
-    """MTProto broadcast stats (stats.getBroadcastStats) captured over time.
-
-    Only available when ``Channel.can_view_stats`` is true (server-side size
-    threshold). When unavailable we simply do not write rows — we never invent
-    follower/source numbers.
-    """
-
-    __tablename__ = "channel_stat_snapshots"
-    __table_args__ = (Index("ix_css_channel_time", "channel_id", "captured_at"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    followers: Mapped[int | None] = mapped_column(Integer)
-    views_per_post: Mapped[float | None] = mapped_column(Float)
-    shares_per_post: Mapped[float | None] = mapped_column(Float)
-    reactions_per_post: Mapped[float | None] = mapped_column(Float)
-    enabled_notifications_pct: Mapped[float | None] = mapped_column(Float)
-    # Raw graph JSON preserved verbatim for later parsing (growth/source graphs).
-    graphs_json: Mapped[dict | None] = mapped_column(JSON)
-    raw_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("raw_snapshots.id"))
-
-
 # --------------------------------------------------------------------------- #
 # Competitors (public, OBSERVED only via t.me/s)
 # --------------------------------------------------------------------------- #

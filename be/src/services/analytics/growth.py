@@ -1,79 +1,99 @@
-"""Subscriber growth analytics from participant snapshots.
+"""Subscriber growth analytics from daily subscriber stats.
 
-Tracks how the owned channel's participant count changes over time by reading
-the lightweight ParticipantSnapshot rows written on every collection cycle.
+Tracks how the owned channel's subscriber count changes over time by reading the
+``DailySubscriberStat`` rows that are incrementally rolled up (joined/left/net per
+IST calendar day) on every collection cycle — see
+``services/collection/telegram_owned.py::_upsert_daily_subscriber_stat``.
+
+Per explicit product-owner instruction, this module does NOT compute a growth
+rate / growth-per-day projection — only the observed joined/left/net counts.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from collections import OrderedDict
+from datetime import date as date_, datetime
+from typing import Union
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.db.models import Channel
-from src.db.models_growth_snapshot import ParticipantSnapshot
+from src.db.models_growth_snapshot import DailySubscriberStat, ParticipantSnapshot
 from src.services.analytics.periods import IST
 
+DateLike = Union[date_, datetime, None]
 
-def compute_growth(s: Session, channel_id: int, days: int = 90) -> dict:
-    """Compute subscriber growth metrics from participant snapshots."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = s.scalars(
+
+def _to_ist_date(v: DateLike) -> date_ | None:
+    """Normalize an optional date/datetime bound to a plain IST calendar date."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        dt = v if v.tzinfo else v.replace(tzinfo=IST)
+        return dt.astimezone(IST).date()
+    return v
+
+
+def compute_growth(s: Session, channel_id: int, start: DateLike = None, end: DateLike = None) -> dict:
+    """Compute subscriber growth metrics from daily subscriber stats for one channel."""
+    start_d, end_d = _to_ist_date(start), _to_ist_date(end)
+
+    q = select(DailySubscriberStat).where(DailySubscriberStat.channel_id == channel_id)
+    if start_d is not None:
+        q = q.where(DailySubscriberStat.stat_date >= start_d)
+    if end_d is not None:
+        q = q.where(DailySubscriberStat.stat_date <= end_d)
+    rows = s.scalars(q.order_by(DailySubscriberStat.stat_date)).all()
+
+    # "current" must reflect the TRUE latest count regardless of the start/end filter —
+    # read it straight off the latest ParticipantSnapshot, unaffected by date filtering.
+    latest_snap = s.scalar(
         select(ParticipantSnapshot)
-        .where(
-            ParticipantSnapshot.channel_id == channel_id,
-            ParticipantSnapshot.captured_at >= cutoff,
-        )
-        .order_by(ParticipantSnapshot.captured_at)
-    ).all()
+        .where(ParticipantSnapshot.channel_id == channel_id)
+        .order_by(ParticipantSnapshot.captured_at.desc())
+    )
+    current = latest_snap.count if latest_snap else None
 
-    if len(rows) < 2:
-        return {"available": False, "reason": "Need at least 2 snapshots to show a trend. Snapshots are taken on each collection cycle.", "snapshots": len(rows)}
+    if not rows:
+        return {
+            "available": False,
+            "reason": "No daily subscriber stats yet. These accumulate as each "
+                      "collection cycle observes the participant count.",
+            "current": current,
+            "days": 0,
+        }
 
-    first, last = rows[0], rows[-1]
-    net_change = (last.count or 0) - (first.count or 0)
-    span_seconds = (last.captured_at - first.captured_at).total_seconds()
-    span_days = max(span_seconds / 86400, 1.0)
-    growth_per_day = round(net_change / span_days, 1) if first.count is not None else None
-    growth_rate_pct = round(((last.count or 0) - (first.count or 0)) / max(first.count or 1, 1) * 100, 2)
-
-    # daily deltas
-    daily_map: dict[str, dict] = OrderedDict()
-    prev = None
-    for r in rows:
-        # captured_at is stored naive-UTC; treat naive as UTC before converting to IST
-        # so the daily labels line up with the IST day boundaries used everywhere else.
-        cap = r.captured_at if r.captured_at.tzinfo else r.captured_at.replace(tzinfo=timezone.utc)
-        day_key = cap.astimezone(IST).strftime("%Y-%m-%d")
-        delta = None
-        if prev is not None and r.count is not None and prev.count is not None:
-            delta = r.count - prev.count
-        if day_key in daily_map:
-            daily_map[day_key] = {"count": r.count, "delta": delta}
-        else:
-            daily_map[day_key] = {"count": r.count, "delta": delta}
-        prev = r
+    joined = sum(r.subs_joined or 0 for r in rows)
+    left = sum(r.subs_left or 0 for r in rows)
+    net = sum(r.subs_net or 0 for r in rows)
+    daily = [
+        {
+            "date": r.stat_date.isoformat(),
+            "subs_end": r.subs_end,
+            "joined": r.subs_joined or 0,
+            "left": r.subs_left or 0,
+            "net": r.subs_net or 0,
+        }
+        for r in rows
+    ]
 
     return {
         "available": True,
-        "current": last.count,
-        "first": first.count,
-        "first_date": first.captured_at.isoformat(),
-        "last_date": last.captured_at.isoformat(),
-        "net_change": net_change,
-        "span_days": round(span_days, 1),
-        "growth_per_day": growth_per_day,
-        "growth_rate_pct": growth_rate_pct,
-        "snapshots": len(rows),
-        "daily": [{"date": d, "count": v["count"], "delta": v["delta"]} for d, v in daily_map.items()],
+        "current": current,
+        "joined": joined,
+        "left": left,
+        "net": net,
+        "days": len(rows),
+        "first_date": rows[0].stat_date.isoformat(),
+        "last_date": rows[-1].stat_date.isoformat(),
+        "daily": daily,
     }
 
 
-def get_growth(s: Session) -> dict:
-    """Get growth for the primary owned channel."""
+def get_growth(s: Session, start: DateLike = None, end: DateLike = None) -> dict:
+    """Get growth for the primary owned channel, optionally scoped to [start, end]
+    (inclusive IST calendar dates; a bare date or a datetime is accepted for each)."""
     ch = s.scalar(select(Channel).where(Channel.kind == "owned").order_by(Channel.participants_count.desc()))
     if not ch:
         return {"available": False, "reason": "No owned channel found."}
-    return compute_growth(s, ch.id)
+    return compute_growth(s, ch.id, start, end)

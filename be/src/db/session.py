@@ -79,6 +79,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(get_engine())
     # create_all does not ALTER existing tables; add columns introduced after first run.
-    from src.db.migrate import add_missing_columns, backfill_channel_id
+    from src.db.migrate import add_missing_columns, backfill_channel_id, drop_removed_tables
     add_missing_columns(get_engine())
     backfill_channel_id(get_engine())  # attribute pre-multi-tenancy derived rows to a channel
+    drop_removed_tables(get_engine())  # drop tables whose ORM model no longer exists

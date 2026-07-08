@@ -55,7 +55,19 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("resolution_confidence", "FLOAT"),
         ("verified_by", "VARCHAR(16)"),
     ],
+    # link resolution bookkeeping (async rewrite): distinguish "never attempted"
+    # (NULL) from "failed" / "resolved" / "no_match", and cap retries.
+    "extracted_links": [
+        ("resolution_status", "VARCHAR(16)"),
+        ("resolution_error", "TEXT"),
+        ("resolution_attempts", "INTEGER DEFAULT 0"),
+    ],
 }
+
+
+# tables whose ORM model was removed from the codebase; drop them from disk since
+# create_all() only ever creates tables, it never drops orphaned ones.
+_REMOVED_TABLES: tuple[str, ...] = ("channel_stat_snapshots",)
 
 
 def _existing_columns(conn, table: str) -> set[str]:
@@ -79,6 +91,22 @@ def add_missing_columns(engine: Engine) -> None:
                 if name not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {decl}"))
                     logger.info("[migrate] added %s.%s", table, name)
+
+
+def drop_removed_tables(engine: Engine) -> None:
+    """Drop tables whose ORM model has been deleted from the codebase. Idempotent:
+    ``DROP TABLE IF EXISTS`` is a no-op once the table is gone."""
+    if not engine.url.get_backend_name().startswith("sqlite"):
+        return  # this helper targets the project's SQLite store only
+    with engine.begin() as conn:
+        existing_tables = {
+            r[0] for r in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+        }
+        for table in _REMOVED_TABLES:
+            if table in existing_tables:
+                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+                logger.info("[migrate] dropped removed table %s", table)
 
 
 # derived tables that were computed from the single owned channel before multi-tenancy;
