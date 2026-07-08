@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 from src.services.analytics.periods import IST
 from src.services.analytics.growth import get_growth
 from src.db.models import Post
-from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_normalization import NormalizedPost, SourceType
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -30,19 +29,15 @@ _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 def _owned_rows(s: Session, start=None, end=None):
     """Fetch owned posts with engagement + content signals.
 
-    Returns rows: (posted_at, views, type_descriptor, merchant_key,
+    Returns rows: (posted_at, views, merchant_key,
                     reactions_total, forwards, has_coupon, is_multi_deal, cta_texts)
     Optional [start, end) UTC datetimes restrict the posting-date window."""
     q = (select(Post.posted_at, Post.views,
-                PostTypeCluster.descriptor,
                 NormalizedPost.primary_merchant_key,
                 Post.reactions_total, Post.forwards,
                 NormalizedPost.has_coupon, NormalizedPost.is_multi_deal,
                 NormalizedPost.cta_texts)
          .join(NormalizedPost, NormalizedPost.source_id == Post.id)
-         .join(PostClassification,
-               PostClassification.normalized_post_id == NormalizedPost.id, isouter=True)
-         .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id, isouter=True)
          .where(NormalizedPost.source_type == SourceType.OWNED, Post.views.isnot(None),
                 Post.posted_at.isnot(None)))
     if start is not None:
@@ -78,11 +73,11 @@ def compute(s: Session, start=None, end=None) -> dict:
 
     # Column indices for readability
     I_VIEWS = 1
-    I_REACTIONS = 4
-    I_FORWARDS = 5
-    I_COUPON = 6
-    I_MULTI = 7
-    I_CTA = 8
+    I_REACTIONS = 3
+    I_FORWARDS = 4
+    I_COUPON = 5
+    I_MULTI = 6
+    I_CTA = 7
 
     for r in rows:
         # posted_at is stored naive-UTC (SQLite drops tzinfo). Treat naive values as
@@ -103,10 +98,9 @@ def compute(s: Session, start=None, end=None) -> dict:
         by_day[day_key].append(tup)
         by_hour[ist.hour].append(tup)
         by_weekday[_WEEKDAYS[ist.weekday()]].append(tup)
-        t = r[2]   # type_descriptor
-        if t:
-            by_type[t].append(tup)
-        mk = r[3]  # merchant_key
+        t = "loot_deal" if r[I_MULTI] else "single_deal"
+        by_type[t].append(tup)
+        mk = r[2]  # merchant_key
         if mk:
             by_merchant[mk].append(tup)
 

@@ -96,27 +96,26 @@ def post_type_performance_range(s: Session, start, end) -> list[dict]:
     from datetime import datetime, timezone
 
     from src.db.models import Post
-    from src.db.models_classification import PostClassification, PostTypeCluster
     from src.db.models_normalization import NormalizedPost, SourceType
 
     q = (
-        select(Post.posted_at, Post.views, PostTypeCluster.descriptor)
+        select(Post.posted_at, Post.views, NormalizedPost.is_multi_deal)
         .select_from(Post)
         .join(NormalizedPost, (NormalizedPost.source_id == Post.id)
               & (NormalizedPost.source_type == SourceType.OWNED))
-        .join(PostClassification, PostClassification.normalized_post_id == NormalizedPost.id)
-        .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id)
     )
     if start:
         q = q.where(Post.posted_at >= start)
     if end:
         q = q.where(Post.posted_at < end)
 
+    def _type(is_multi: bool) -> str:
+        return "loot_deal" if is_multi else "single_deal"
+
     now = datetime.now(timezone.utc)
     groups: dict[str, list[tuple]] = defaultdict(list)
-    for posted_at, views, descriptor in s.execute(q).all():
-        if descriptor:
-            groups[descriptor].append((posted_at, views))
+    for posted_at, views, is_multi in s.execute(q).all():
+        groups[_type(is_multi)].append((posted_at, views))
 
     total = sum(len(items) for items in groups.values())
     if not total:
