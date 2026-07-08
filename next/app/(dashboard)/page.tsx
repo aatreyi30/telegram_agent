@@ -15,6 +15,11 @@ import { TimelineChart } from "@/components/charts";
 import { useOverview, useGrowth, useCompetitorDashboard, useInsights, useDrafts, useQueue } from "@/queries/queries";
 import type { OverviewResponse, GrowthRecommendation } from "@/types/api";
 
+function fmtNum(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "—";
+  return n.toLocaleString();
+}
+
 function QueueStats({ queue_counts }: { queue_counts: Record<string, number> }) {
   return (
     <div className="flex flex-wrap gap-1.5">
@@ -78,7 +83,7 @@ export default function OverviewPage() {
                       <CardTitle>Growth</CardTitle>
                       <CardDescription>Subscriber growth over time</CardDescription>
                     </div>
-                    <Link href="/growth" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
+                    <Link href="/analytics" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
                       View details <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
                     </Link>
                   </div>
@@ -87,11 +92,15 @@ export default function OverviewPage() {
                   <Async q={growth} rows={4}>
                     {(g) => {
                       if (!g.available) return <p className="text-sm text-muted-foreground">{g.reason}</p>;
-                      const chartData = g.daily.map((d) => ({ label: d.date, count: d.count ?? 0 }));
+                      const chartData = g.daily.map((d) => ({ label: d.date, subs_end: d.subs_end ?? 0 }));
                       return (
                         <div className="space-y-4">
-                          <StatCard label="Subscribers" value={g.current.toLocaleString()} trend={{ value: g.growth_rate_pct, label: "growth rate" }} />
-                          <TimelineChart data={chartData} dataKey="count" unit="" />
+                          <div className="grid grid-cols-3 gap-3">
+                            <StatCard label="Subscribers" value={fmtNum(g.current)} />
+                            <StatCard label="Joined" value={`+${fmtNum(g.joined)}`} />
+                            <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)} />
+                          </div>
+                          <TimelineChart data={chartData} dataKey="subs_end" unit="" />
                         </div>
                       );
                     }}

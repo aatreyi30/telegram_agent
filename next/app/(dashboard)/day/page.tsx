@@ -22,24 +22,55 @@ function fmtPct(n: number | null | undefined, signed = false): string {
   return `${s}${Math.round(n)}%`;
 }
 
+function minusDays(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
 export default function DayViewPage() {
   const range = useDataRange();
   const min = range.data?.min ?? undefined;
   const max = range.data?.max ?? undefined;
 
   const { get, set } = useQueryParams();
-  const date = get("date", "");
+  const preset = get("preset", "custom");
+  const startParam = get("start", "");
+  const endParam = get("end", "");
 
-  const q = useDay(date || null, { enabled: !!range.data });
+  // "custom" (the default) with no start/end params means "no filter" — the
+  // backend then resolves the latest collected day itself (same as the old
+  // single-date default). Picking a preset or an explicit range widens the
+  // window; start === end still hits the single-day fast path server-side.
+  const { start, end } = useMemo(() => {
+    if (preset === "custom") return { start: startParam || undefined, end: endParam || undefined };
+    if (!max || !min) return { start: undefined, end: undefined };
+    if (preset === "all") return { start: min, end: max };
+    const days: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+    const d = days[preset] ?? 7;
+    return { start: minusDays(max, d), end: max };
+  }, [preset, min, max, startParam, endParam]);
 
-  const resolvedDate = (() => {
-    if (date) return date;
+  const q = useDay(start || null, end || null, { enabled: !!range.data });
+
+  const resolvedStart = (() => {
+    if (start) return start;
     if (q.data && "date" in q.data && q.data.date) return q.data.date;
     return max || "";
   })();
+  const resolvedEnd = (() => {
+    if (end) return end;
+    if (q.data && "date_end" in q.data && q.data.date_end) return q.data.date_end;
+    return resolvedStart;
+  })();
 
-  const handleDateChange = (val: string) => {
-    set({ date: val || null });
+  const handlePresetChange = (p: string) => {
+    const val = p === "custom" ? "7d" : p;
+    set({ preset: val, start: null, end: null });
+  };
+
+  const handleRangeChange = (from: string, to: string) => {
+    set({ preset: "custom", start: from, end: to });
   };
 
   const typeMixChart = useMemo(() => {
@@ -56,14 +87,17 @@ export default function DayViewPage() {
     <div>
       <div className="mb-4">
         <h1 className="text-2xl font-bold tracking-tight">Day view</h1>
-        <p className="text-sm text-muted-foreground">Per-merchant breakdown for a specific date (IST).</p>
+        <p className="text-sm text-muted-foreground">Per-merchant breakdown for a date or date range (IST).</p>
       </div>
 
       <div className="mb-2 flex flex-wrap items-end gap-2">
         <DateFilter
-          mode="single"
-          value={resolvedDate}
-          onChange={handleDateChange}
+          mode="range"
+          preset={preset}
+          onPresetChange={handlePresetChange}
+          from={resolvedStart}
+          to={resolvedEnd}
+          onRangeChange={handleRangeChange}
           min={min}
           max={max}
           showArrows
@@ -93,7 +127,9 @@ export default function DayViewPage() {
                 <CardHeader>
                   <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
                   <div className="flex items-center justify-between">
-                    <CardTitle className="text-base">Merchants — {d.date}</CardTitle>
+                    <CardTitle className="text-base">
+                      Merchants — {d.date}{"date_end" in d && d.date_end ? ` → ${d.date_end}` : ""}
+                    </CardTitle>
                     {d.baseline && (
                       <span className="text-xs text-muted-foreground">
                         vs 30d: {fmtPct(d.vs_baseline?.views_delta_pct, true)} views · {d.vs_baseline?.posts_delta != null ? (d.vs_baseline.posts_delta >= 0 ? "+" : "") + d.vs_baseline.posts_delta : "—"} posts

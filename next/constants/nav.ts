@@ -2,7 +2,6 @@ import type { IconSvgElement } from "@hugeicons/react";
 import {
   Analytics01Icon,
   Calendar03Icon,
-  ChartUpIcon,
   CheckListIcon,
   Home01Icon,
   Sent02Icon,
@@ -23,7 +22,6 @@ export const NAV: NavItem[] = [
   { to: "/analytics", label: "Analytics", icon: Analytics01Icon, group: "Understand" },
   { to: "/day", label: "Day view", icon: Calendar03Icon, group: "Understand" },
   { to: "/competitors", label: "Competitors", icon: UserGroupIcon, group: "Understand" },
-  { to: "/growth", label: "Growth", icon: ChartUpIcon, group: "Understand" },
   { to: "/plan", label: "Plan", icon: CheckListIcon, group: "Act" },
   { to: "/drafts", label: "Drafts", icon: Sent02Icon, group: "Act" },
   { to: "/queue", label: "Schedule", icon: Package02Icon, group: "Act" },
