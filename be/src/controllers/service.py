@@ -303,9 +303,12 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
 
 def merchants() -> dict:
     with session_scope() as s:
+        coverage = ctx.owned_merchant_coverage(s)
         return {
             "profiles": ctx.merchant_profiles(s),
+            "coverage": {"owned": coverage},
             "opportunities": ctx.merchant_opportunities(s),
+            "mix": ctx.merchant_mix(s, owned_coverage_pct=coverage["pct"]),
         }
 
 
@@ -473,6 +476,200 @@ def weekly_report(include_ai: bool = True) -> dict:
 
     return {"available": weekly is not None, "weekly_plan": weekly,
             "what_changed": reasoning, "recommendations": recs, "ai_summary": ai_summary}
+
+
+def _plan_date_bounds(s):
+    from src.services.analytics.periods import IST, owned_window
+    w = owned_window(s)
+    mn = w["start"].astimezone(IST).date() if w.get("start") else None
+    mx = w["end"].astimezone(IST).date() if w.get("end") else None
+    return mn, mx
+
+
+def _today_details(s, recommended_posts: int):
+    """Deterministic 'today' details (posting windows, deal-type allocation, merchant
+    mix, risks) sized to ``recommended_posts``, reusing the campaign engine's pure
+    helpers so the plan stays consistent with the recommended cadence."""
+    from datetime import datetime, timezone
+    from src.services.planning.campaign import CampaignPlanningEngine
+
+    bp = (ctx.growth_blueprint(s).get("blueprint") or {})
+    eng = CampaignPlanningEngine()
+    recent = eng._recent_distribution(s, datetime.now(timezone.utc))
+    # The blueprint's posting_plan is sized to the stale baseline, so use it only for
+    # the RELATIVE shape and rescale each window to the recommended cadence — otherwise
+    # the per-window posts sum to ~18 while the headline says ~50.
+    raw = bp.get("posting_plan") or []
+    raw_sum = sum((p.get("recommended_posts_per_day") or 0) for p in raw) or 1
+    windows = [{"part": p.get("part"), "hours": p.get("hours"),
+                "posts": round((p.get("recommended_posts_per_day") or 0) * recommended_posts / raw_sum)}
+               for p in raw]
+    allocation = eng._allocate_posts(bp, recommended_posts)
+    merchants = eng._merchant_allocation(recent)
+    risks = eng._risks(recent, recommended_posts)
+    return windows, allocation, merchants, (risks or None)
+
+
+def daily_brief(date: str | None = None) -> dict:
+    """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
+    recommendation grounded in the recent posting trajectory (not the stale lifetime
+    baseline). AI writes the narrative + slots best-effort; the numbers are
+    deterministic and fact-checked."""
+    from datetime import date as date_cls, timedelta
+    from src.services.analytics.day import latest_owned_date
+    from src.services.planning.calendar import upcoming_events
+    from src.ai.planner import generate_day_plan
+    from src.ai.factcheck import check_cited_numbers
+
+    with session_scope() as s:
+        mn, mx = _plan_date_bounds(s)
+        day = None
+        if date:
+            try:
+                day = date_cls.fromisoformat(date)
+            except ValueError:
+                day = None
+        if day is None:
+            day = latest_owned_date(s)
+        if day is None:
+            return {"available": False, "reason": "No owned posts yet."}
+        prev = day - timedelta(days=1)
+
+        yesterday = ctx.daily_report_or_live(s, prev)
+        traj = ctx.posting_trajectory(s, days=14, end_day=prev)
+        recommended = traj["recent_cadence"]
+        windows, allocation, merchants, risks = _today_details(s, recommended)
+
+        active = [d["posts"] for d in traj["days"] if d["posts"] > 0]
+        lo, hi = (min(active), max(active)) if active else (0, 0)
+        det_why = (
+            f"Your last {len(active)} active days ran ~{recommended} posts/day "
+            f"(range {lo}–{hi}); holding ~{recommended} matches that pace."
+            + (f" The old {traj['lifetime_baseline']}/day baseline is a lifetime average "
+               "dragged down by early low-activity days — don't plan against it."
+               if traj.get("lifetime_baseline") else "")
+        )
+
+        ai_res = generate_day_plan(s, day, inputs={
+            "recommended_posts": recommended,
+            "posting_windows": windows,
+            "deal_type_allocation": allocation,
+            "merchant_allocation": merchants,
+        })
+        ai_ok = bool(ai_res.get("available"))
+        plan = ai_res.get("plan") or {}
+        digest = ai_res.get("digest", "") if ai_ok else ""
+        # cadence_why is ALWAYS the deterministic explanation so the number in the text
+        # always matches the deterministic recommended_posts headline (the AI's free-text
+        # rationale lives in `digest` instead, where an approximation is harmless).
+        cadence_why = det_why
+        slots = plan.get("post_slots", []) if ai_ok else []
+        emphasis = plan.get("emphasis") if ai_ok else None
+        watch = plan.get("watch") if ai_ok else None
+        fc_status = None
+        if ai_ok:
+            fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
+            fc_status = "pass" if fc["status"] == "passed" else "warn"
+
+        evt = None
+        try:
+            evs = upcoming_events(s, day, within_days=14)
+            if evs:
+                e = evs[0]
+                evt = {"name": e.name, "days_away": (e.next_date - day).days,
+                       "date_confidence": e.date_confidence}
+        except Exception:
+            evt = None
+
+        return {
+            "available": True,
+            "date": day.isoformat(), "prev_date": prev.isoformat(),
+            "min_date": mn.isoformat() if mn else None,
+            "max_date": mx.isoformat() if mx else None,
+            "yesterday": yesterday,
+            "trajectory": {"days": traj["days"], "recent_cadence": recommended,
+                           "lifetime_baseline": traj["lifetime_baseline"]},
+            "today": {
+                "recommended_posts": recommended,
+                "cadence_why": cadence_why,
+                "posting_windows": windows,
+                "deal_type_allocation": allocation,
+                "merchant_allocation": merchants,
+                "slots": slots,
+                "emphasis": emphasis, "watch": watch,
+                "risks": risks,
+                "confidence": round(min(1.0, len(active) / 14), 3),
+            },
+            "digest": digest,
+            "factcheck_status": fc_status,
+            "ai_available": ai_ok,
+            "upcoming_event": evt,
+        }
+
+
+def weekly_brief(end: str | None = None) -> dict:
+    """The weekly view: last 7 days of actual posting + this week's themes + an AI
+    weekly narrative (best-effort)."""
+    from datetime import date as date_cls
+    from src.services.analytics.day import latest_owned_date
+    from src.services.planning.calendar import upcoming_events
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+
+    with session_scope() as s:
+        end_day = None
+        if end:
+            try:
+                end_day = date_cls.fromisoformat(end)
+            except ValueError:
+                end_day = None
+        if end_day is None:
+            end_day = latest_owned_date(s)
+        if end_day is None:
+            return {"available": False, "reason": "No owned posts yet."}
+
+        traj = ctx.posting_trajectory(s, days=7, end_day=end_day)
+        days = [{"date": d["date"],
+                 "weekday": date_cls.fromisoformat(d["date"]).strftime("%a"),
+                 "posts": d["posts"], "views_avg": d["views_avg"]}
+                for d in traj["days"]]
+        posts_total = sum(d["posts"] for d in traj["days"])
+        views_total = round(sum(d["posts"] * d["views_avg"] for d in traj["days"]))
+        totals = {"posts": posts_total, "views_total": views_total,
+                  "avg_posts_per_day": round(posts_total / 7, 1)}
+
+        wk = s.scalar(select(CampaignPlan)
+                      .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                             CampaignPlan.plan_type == PlanType.WEEKLY)
+                      .order_by(CampaignPlan.generated_at.desc()))
+        themes = ((wk.blueprint or {}).get("daily_themes") if wk else None) or []
+
+        evs_out = []
+        try:
+            for e in upcoming_events(s, end_day, within_days=30)[:3]:
+                evs_out.append({"name": e.name, "date": e.next_date.isoformat(),
+                                "days_away": (e.next_date - end_day).days,
+                                "date_confidence": e.date_confidence})
+        except Exception:
+            pass
+
+        ai_summary, ai_ok = "", False
+        try:
+            from src.ai.briefing import BriefingGenerator
+            from src.ai.client import AIUnavailable
+            try:
+                ai_summary = BriefingGenerator().generate(weekly=True) or ""
+                ai_ok = bool(ai_summary)
+            except AIUnavailable:
+                ai_summary = ""
+        except Exception:
+            ai_summary = ""
+
+        return {"available": True,
+                "week_start": traj["days"][0]["date"] if traj["days"] else end_day.isoformat(),
+                "week_end": end_day.isoformat(),
+                "days": days, "totals": totals, "themes": themes,
+                "recommended_posts_per_day": traj["recent_cadence"],
+                "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok}
 
 
 def queue(page: int = 1, page_size: int = 20) -> dict:
