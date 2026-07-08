@@ -16,17 +16,21 @@ const PRESETS = [
   { label: "All", value: "all" },
 ] as const;
 
+// The Calendar (react-day-picker) works in LOCAL time — a clicked day is local
+// midnight. So we must parse/serialize in local time too; using UTC (toISOString /
+// "T00:00:00Z") shifts the calendar date back a day for any timezone east of UTC
+// (e.g. IST), which made picking the 10th send the 9th to the backend.
 function toDate(iso?: string): Date | undefined {
-  return iso ? new Date(iso + "T00:00:00Z") : undefined;
+  return iso ? new Date(iso + "T00:00:00") : undefined;
 }
 
 function toISO(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  return format(d, "yyyy-MM-dd");
 }
 
 function fmt(d?: string): string {
   if (!d) return "";
-  return format(new Date(d + "T00:00:00Z"), "MMM d, yyyy");
+  return format(new Date(d + "T00:00:00"), "MMM d, yyyy");
 }
 
 interface DateFilterCommon {
