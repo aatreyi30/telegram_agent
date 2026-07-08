@@ -83,6 +83,16 @@ def plans():
     return ok(service.plans())
 
 
+@router.get("/plan/daily")
+def plan_daily(date: str | None = None):
+    return ok(service.daily_brief(date=date))
+
+
+@router.get("/plan/weekly")
+def plan_weekly(end: str | None = None):
+    return ok(service.weekly_brief(end=end))
+
+
 @router.get("/weekly")
 def weekly():
     return ok(service.weekly_report())

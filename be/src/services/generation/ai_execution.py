@@ -49,8 +49,10 @@ def run_ai_daily(s: Session) -> dict:
     result = generate_day_plan(s)
     if not result.get("available"):
         return {"ok": False, "reason": result.get("reason", "ai unavailable")}
-    reports = daily_reports(s, days=8)
-    fc = check_cited_numbers(result["plan"].get("cited_numbers", []), reports)
+    # Fact-check against the exact facts the model was given (yesterday + trajectory),
+    # falling back to persisted reports if present.
+    facts = result.get("facts") or daily_reports(s, days=8)
+    fc = check_cited_numbers(result["plan"].get("cited_numbers", []), facts)
     result["factcheck"] = fc
     plan_row = persist_ai_plan(s, result)
 
