@@ -2,11 +2,11 @@
 
 import { useMemo } from "react";
 import { Async } from "@/components/Async";
-import { BarsChart, MultiLineChart, TimelineChart } from "@/components/charts";
+import { BarsChart, TimelineChart } from "@/components/charts";
 import { StatCard } from "@/components/StatCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DateFilter } from "@/components/ui/date-range-picker";
-import { useAnalytics, useCompetitorDashboard, useDataRange } from "@/queries/queries";
+import { useAnalytics, useDataRange } from "@/queries/queries";
 import { useQueryParams } from "@/lib/use-search-params";
 
 function fmtNum(n: number | null | undefined): string {
@@ -16,6 +16,14 @@ function fmtNum(n: number | null | undefined): string {
 function fmtPct(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return `${Math.round(n)}%`;
+}
+// "18:00" -> "6 PM", "09:00" -> "9 AM", "00:00" -> "12 AM"
+function to12h(hhmm: string): string {
+  const h = parseInt(hhmm.slice(0, 2), 10);
+  if (Number.isNaN(h)) return hhmm;
+  const period = h < 12 ? "AM" : "PM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12} ${period}`;
 }
 
 function ChartCard({ title, sub, children }: { title: string; sub?: string; children: React.ReactNode }) {
@@ -60,9 +68,6 @@ export default function AnalyticsPage() {
   }, [preset, min, max, startParam, endParam]);
 
   const q = useAnalytics(start, end, { enabled: !!range.data });
-  const compQ = useCompetitorDashboard(
-    preset === "all" || preset === "custom" ? undefined : Number(preset.replace("d", "")),
-  );
 
   const handlePresetChange = (p: string) => {
     const val = p === "custom" ? "90d" : p;
@@ -122,9 +127,9 @@ export default function AnalyticsPage() {
               </div>
 
               <ChartCard title="Views & engagement over time"
-                sub={`Daily avg views (area) + engagement rate (dashed) · ${win.start || "?"} → ${win.end || "?"}`}>
+                sub={`Daily avg views (area) + engagement rate (dashed) · hover for post count · ${win.start || "?"} → ${win.end || "?"}`}>
                 <TimelineChart data={a.timeline || []} dataKey="avg_views" unit=" views"
-                  secondaryKey="engagement_rate" secondaryUnit="%" />
+                  secondaryKey="engagement_rate" secondaryUnit="%" countKey="n" countLabel="Posts" />
               </ChartCard>
 
               {a.growth?.available && (
@@ -152,55 +157,25 @@ export default function AnalyticsPage() {
                 </ChartCard>
               </div>
 
-              <Async q={compQ} rows={2}>
-                {(cd) => {
-                  const all = [...(cd.platform ?? []), ...(cd.channel ?? [])];
-                  if (all.length < 1) return null;
-
-                  const hourly = Array.from({ length: 24 }, (_, h) => {
-                    const row: any = { label: `${String(h).padStart(2, "0")}` };
-                    if (a.by_hour?.[h]) row["Your channel"] = a.by_hour[h].avg_views;
-                    all.forEach((e: any) => { row[e.name] = e.posts_per_hour_ist?.[h] ?? 0; });
-                    return row;
-                  });
-                  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-                  const wd = days.map((d) => {
-                    const row: any = { label: d };
-                    row["Your channel"] = a.by_weekday?.find((x: any) => x.label === d)?.avg_views ?? 0;
-                    all.forEach((e: any) => { row[e.name] = e.weekday_distribution?.[d] ?? 0; });
-                    return row;
-                  });
-
-                  const series = [{ key: "Your channel", name: "Your channel" }, ...all.map((e: any) => ({ key: e.name, name: e.name }))];
-
-                  return (
-                    <div className="grid gap-4 lg:grid-cols-2">
-                      <ChartCard title="Posting by hour (IST) — vs competitors" sub="Your channel vs competitors (post frequency)">
-                        <MultiLineChart data={hourly} series={series} unit=" posts" height={220} />
-                      </ChartCard>
-                      <ChartCard title="Posting by weekday — vs competitors" sub="Your distribution vs all tracked competitors">
-                        <MultiLineChart data={wd} series={series} unit=" posts" height={220} />
-                      </ChartCard>
-                    </div>
-                  );
-                }}
-              </Async>
-
               <div className="grid gap-6 lg:grid-cols-3">
                 <Card className="flex flex-col">
                   <CardHeader>
                     <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
-                    <CardTitle className="text-base font-semibold">Golden hours</CardTitle>
+                    <CardTitle className="text-base font-semibold">Best times to post</CardTitle>
                   </CardHeader>
-                  <CardContent className="space-y-2 text-sm flex-1">
-                    <p className="text-xs text-muted-foreground mb-3">Top hours by total engagement (reactions + forwards)</p>
+                  <CardContent className="space-y-3 text-sm flex-1">
+                    <p className="text-xs text-muted-foreground">
+                      Your strongest posting hours (IST), ranked by total engagement — reactions + forwards.
+                    </p>
                     {(a.golden_hours?.by_engagement ?? []).length ? (
-                      <div className="flex flex-wrap gap-2">
-                        {a.golden_hours.by_engagement.map((gh) => (
-                          <span key={gh.hour} className="rounded-lg bg-primary/10 px-3 py-1.5 text-sm font-semibold">
-                            {gh.hour}
-                            <span className="ml-1.5 font-normal text-muted-foreground">{fmtNum(gh.total_engagement)} eng.</span>
-                          </span>
+                      <div className="space-y-1.5">
+                        {a.golden_hours.by_engagement.map((gh, i) => (
+                          <div key={gh.hour} className="flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2">
+                            {i === 0 && <span className="text-xs">⭐</span>}
+                            <span className="text-sm font-semibold text-foreground">{to12h(gh.hour)}</span>
+                            <span className="text-xs text-muted-foreground">— good to post</span>
+                            <span className="ml-auto text-xs text-muted-foreground">{fmtNum(gh.total_engagement)} eng.</span>
+                          </div>
                         ))}
                       </div>
                     ) : (
@@ -208,11 +183,11 @@ export default function AnalyticsPage() {
                     )}
                     {(a.golden_hours?.by_views ?? []).length > 0 && (
                       <>
-                        <p className="text-xs text-muted-foreground mt-3">By views</p>
-                        <div className="flex flex-wrap gap-2">
+                        <p className="text-xs text-muted-foreground pt-1">Also strong by views:</p>
+                        <div className="flex flex-wrap gap-1.5">
                           {a.golden_hours.by_views.slice(0, 5).map((gh) => (
                             <span key={gh.hour} className="rounded-md bg-muted px-2.5 py-1 text-xs">
-                              {gh.hour} · {fmtNum(gh.total_views)} views
+                              {to12h(gh.hour)} · {fmtNum(gh.total_views)} views
                             </span>
                           ))}
                         </div>

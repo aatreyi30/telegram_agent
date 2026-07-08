@@ -9,22 +9,40 @@ import {
   CHART_SECONDARY_COLOR as C2, CHART_SERIES_COLORS as SERIES_COLORS,
 } from "@/constants/charts";
 
-function Tip({ active, payload, label, unit }: any) {
+// Humanize a raw dataKey ("avg_views" -> "Avg views") for legible tooltips/legends.
+function humanize(key?: string): string {
+  if (!key) return "";
+  const s = key.replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function Tip({ active, payload, label, unit, countKey, countLabel = "Posts" }: any) {
   if (!active || !payload?.length) return null;
+  // The full data row is on payload[0].payload — use it to surface an extra
+  // context value (e.g. post count) without plotting a mismatched-scale series.
+  const row = payload[0]?.payload;
+  const count = countKey && row ? row[countKey] : undefined;
   return (
     <div className="rounded-lg border bg-popover px-3 py-2 text-xs shadow-md">
       <div className="font-medium text-foreground">{label}</div>
       {payload.map((p: any, i: number) => (
         <div key={i} className="text-muted-foreground">
-          {p.name}: <span className="font-semibold text-foreground">{Number(p.value).toLocaleString()}{unit}</span>
+          {/* per-series unit (p.unit) wins over the chart-wide fallback, so a % series
+              is never labelled with the primary series' unit (e.g. " views"). */}
+          {p.name}: <span className="font-semibold text-foreground">{Number(p.value).toLocaleString()}{p.unit ?? unit}</span>
         </div>
       ))}
+      {count != null && (
+        <div className="text-muted-foreground">
+          {countLabel}: <span className="font-semibold text-foreground">{Number(count).toLocaleString()}</span>
+        </div>
+      )}
     </div>
   );
 }
 
-export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit }: {
-  data: any[]; dataKey?: string; unit?: string; secondaryKey?: string; secondaryUnit?: string;
+export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit, countKey, countLabel }: {
+  data: any[]; dataKey?: string; unit?: string; secondaryKey?: string; secondaryUnit?: string; countKey?: string; countLabel?: string;
 }) {
   return (
     <ResponsiveContainer width="100%" height={240}>
@@ -45,10 +63,10 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
         {secondaryKey && (
           <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} yAxisId="right" orientation="right" />
         )}
-        <Tooltip content={<Tip unit={unit} />} />
-        <Area yAxisId="left" type="monotone" dataKey={dataKey} stroke={C1} strokeWidth={2} fill="url(#fillC1)" name={dataKey} />
+        <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} />} />
+        <Area yAxisId="left" type="monotone" dataKey={dataKey} stroke={C1} strokeWidth={2} fill="url(#fillC1)" name={humanize(dataKey)} unit={unit} />
         {secondaryKey && (
-          <Area yAxisId="right" type="monotone" dataKey={secondaryKey} stroke={C2} strokeWidth={1.5} strokeDasharray="4 3" fill="url(#fillC2)" name={secondaryKey} />
+          <Area yAxisId="right" type="monotone" dataKey={secondaryKey} stroke={C2} strokeWidth={1.5} strokeDasharray="4 3" fill="url(#fillC2)" name={humanize(secondaryKey)} unit={secondaryUnit} />
         )}
       </AreaChart>
     </ResponsiveContainer>
@@ -67,7 +85,7 @@ export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260
           height={data.length > 8 ? 60 : 30} />
         <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
         <Tooltip content={<Tip unit={unit} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
-        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} />
+        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit} />
       </BarChart>
     </ResponsiveContainer>
   );
@@ -85,7 +103,7 @@ export function MultiLineChart({ data, series, unit = "", height = 280 }: {
         <Tooltip content={<Tip unit={unit} />} />
         <Legend wrapperStyle={{ fontSize: 11, color: AXIS }} />
         {series.map((s, i) => (
-          <Line key={s.key} type="monotone" dataKey={s.key} name={s.name}
+          <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} unit={unit}
             stroke={s.color ?? SERIES_COLORS[i % SERIES_COLORS.length]} strokeWidth={2} dot={false} />
         ))}
       </LineChart>
@@ -107,7 +125,7 @@ export function StackedBarsChart({ data, keys, unit = "", height = 280 }: {
         <Tooltip content={<Tip unit={unit} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
         <Legend wrapperStyle={{ fontSize: 11, color: AXIS }} />
         {keys.map((k, i) => (
-          <Bar key={k.key} dataKey={k.key} name={k.name} stackId="stack"
+          <Bar key={k.key} dataKey={k.key} name={k.name} stackId="stack" unit={unit}
             fill={k.color ?? SERIES_COLORS[i % SERIES_COLORS.length]}
             radius={i === keys.length - 1 ? [4, 4, 0, 0] : undefined} />
         ))}
