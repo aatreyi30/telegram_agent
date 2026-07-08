@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChevronDownIcon, AnalyticsUpIcon, AnalyticsDownIcon, Alert01Icon, Idea01Icon } from "@hugeicons/core-free-icons";
+import { ChevronDownIcon, Alert01Icon, Idea01Icon } from "@hugeicons/core-free-icons";
+import { differenceInCalendarDays } from "date-fns";
 import { Async, Empty } from "@/components/Async";
 import { CalloutCard } from "@/components/CalloutCard";
 import { MultiLineChart, StackedBarsChart } from "@/components/charts";
@@ -10,12 +11,31 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatCard } from "@/components/StatCard";
-import { useCompetitorDashboard, useMerchants } from "@/queries/queries";
+import { useCompetitorDashboard, useDataRange, useMerchants } from "@/queries/queries";
 import type { CompetitorEntity } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { useQueryParams } from "@/lib/use-search-params";
+
+function minusDays(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Small proportional inline bar for light visual encoding in table cells. */
+function InlineBar({ pct, tone = "default" }: { pct: number; tone?: "default" | "primary" }) {
+  const clamped = Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0;
+  return (
+    <div className="h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-muted">
+      <div
+        className={cn("h-full rounded-full", tone === "primary" ? "bg-primary" : "bg-muted-foreground/40")}
+        style={{ width: `${clamped}%` }}
+      />
+    </div>
+  );
+}
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -169,6 +189,10 @@ function MerchantsTab() {
         const coverage = d.coverage?.owned;
         const channels = [...(d.mix?.channels || [])].sort((a, b) => (b.is_owned ? 1 : 0) - (a.is_owned ? 1 : 0));
         const merchants = d.mix?.merchants || [];
+        const maxViewsPerDay = Math.max(
+          0,
+          ...(d.profiles || []).map((p) => p.avg_views_per_day ?? 0),
+        );
 
         return (
           <div className="space-y-6">
@@ -211,7 +235,14 @@ function MerchantsTab() {
                             </div>
                           </TableCell>
                           <TableCell>{p.posts}</TableCell>
-                          <TableCell>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <span>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</span>
+                              {p.avg_views_per_day != null && maxViewsPerDay > 0 && (
+                                <InlineBar pct={(p.avg_views_per_day / maxViewsPerDay) * 100} />
+                              )}
+                            </div>
+                          </TableCell>
                           <TableCell>{p.price_median != null ? `₹${fmtNum(p.price_median)}` : "—"}</TableCell>
                           <TableCell>{fmtNum(p.price_sample_size)}</TableCell>
                           <TableCell>
@@ -268,11 +299,19 @@ function MerchantsTab() {
                         {merchants.map((m) => (
                           <TableRow key={m}>
                             <TableCell className="font-medium">{m}</TableCell>
-                            {channels.map((c) => (
-                              <TableCell key={c.name} className={cn(c.is_owned && "font-medium text-primary")}>
-                                {fmtPct(c.shares?.[m])}
-                              </TableCell>
-                            ))}
+                            {channels.map((c) => {
+                              const share = c.shares?.[m];
+                              return (
+                                <TableCell key={c.name} className={cn(c.is_owned && "font-medium text-primary")}>
+                                  <div className="flex items-center gap-2">
+                                    <span>{fmtPct(share)}</span>
+                                    {share != null && (
+                                      <InlineBar pct={share * 100} tone={c.is_owned ? "primary" : "default"} />
+                                    )}
+                                  </div>
+                                </TableCell>
+                              );
+                            })}
                           </TableRow>
                         ))}
                         {merchants.length === 0 && (
@@ -334,16 +373,9 @@ function SignalsSection({ signals }: { signals: any[] }) {
               <p className="text-sm text-muted-foreground">No threats detected.</p>
             ) : (
               threats.map((s, i) => (
-                <div key={i} className="flex items-start gap-3 rounded-lg border border-orange-200 bg-orange-50/50 p-3">
-                  <HugeiconsIcon icon={AnalyticsDownIcon} className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="text-xs">{s.competitor}</Badge>
-                      <span className="text-xs text-muted-foreground">{s.kind}</span>
-                    </div>
-                    <p className="mt-1 text-sm">{s.description}</p>
-                  </div>
-                </div>
+                <CalloutCard key={i} severity="warning" label={s.competitor} title={s.description}>
+                  {s.kind}
+                </CalloutCard>
               ))
             )}
           </CardContent>
@@ -360,16 +392,9 @@ function SignalsSection({ signals }: { signals: any[] }) {
               <p className="text-sm text-muted-foreground">No opportunities spotted.</p>
             ) : (
               opportunities.map((s, i) => (
-                <div key={i} className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
-                  <HugeiconsIcon icon={AnalyticsUpIcon} className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="text-xs">{s.competitor}</Badge>
-                      <span className="text-xs text-muted-foreground">{s.kind}</span>
-                    </div>
-                    <p className="mt-1 text-sm">{s.description}</p>
-                  </div>
-                </div>
+                <CalloutCard key={i} severity="success" label={s.competitor} title={s.description}>
+                  {s.kind}
+                </CalloutCard>
               ))
             )}
           </CardContent>
@@ -380,17 +405,38 @@ function SignalsSection({ signals }: { signals: any[] }) {
 }
 
 export default function CompetitorDashboardPage() {
-  const { get, set } = useQueryParams();
-  const winParam = get("window", "");
-  const window = winParam ? Number(winParam) : undefined;
+  const range = useDataRange();
+  const min = range.data?.min ?? undefined;
+  const max = range.data?.max ?? undefined;
 
-  const [tab, setTab] = useState<"all" | "platform" | "channel" | "merchants">("all");
+  const { get, set } = useQueryParams();
+  const preset = get("preset", "7d");
+  const startParam = get("start", "");
+  const endParam = get("end", "");
+  const tab = get("tab", "all") as "all" | "platform" | "channel" | "merchants";
+
+  const { window, start, end } = useMemo(() => {
+    if (preset === "custom" && startParam && endParam) {
+      const days = Math.max(1, differenceInCalendarDays(new Date(endParam), new Date(startParam)) + 1);
+      return { window: days, start: startParam, end: endParam };
+    }
+    if (preset === "all") return { window: undefined, start: min, end: max };
+    const days: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+    const d = days[preset] ?? 7;
+    return { window: d, start: max ? minusDays(max, d) : undefined, end: max };
+  }, [preset, startParam, endParam, min, max]);
 
   const q = useCompetitorDashboard(window);
 
-  const handlePreset = (preset: string) => {
-    if (preset === "all") set({ window: "" });
-    else set({ window: preset.replace("d", "") });
+  const setTab = (v: string) => set({ tab: v === "all" ? null : v });
+
+  const handlePresetChange = (p: string) => {
+    const val = p === "custom" ? "7d" : p;
+    set({ preset: val === "7d" ? null : val, start: null, end: null });
+  };
+
+  const handleRangeChange = (from: string, to: string) => {
+    set({ preset: "custom", start: from, end: to });
   };
 
   return (
@@ -399,21 +445,23 @@ export default function CompetitorDashboardPage() {
         <h1 className="text-2xl font-bold tracking-tight">Competitor dashboard</h1>
         <p className="text-sm text-muted-foreground">
           Direct competitors (platform + Telegram) vs Telegram-only channels — all metrics, side by side.
+          Date range applies to competitor metrics only — the Merchants tab always shows all-time data.
         </p>
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <DateFilter
           mode="range"
-          preset={window ? `${window}d` : "all"}
-          onPresetChange={handlePreset}
-          from={undefined}
-          to={undefined}
-          onRangeChange={() => {}}
-          showArrows={false}
-          presetsOnly
+          preset={preset}
+          onPresetChange={handlePresetChange}
+          from={start}
+          to={end}
+          onRangeChange={handleRangeChange}
+          min={min}
+          max={max}
+          showArrows
         />
-        <Tabs value={tab} onValueChange={(v) => setTab(v as "all" | "platform" | "channel" | "merchants")} className="ml-auto">
+        <Tabs value={tab} onValueChange={setTab} className="ml-auto">
           <TabsList>
             <TabsTrigger value="all">All</TabsTrigger>
             <TabsTrigger value="platform">Direct</TabsTrigger>
