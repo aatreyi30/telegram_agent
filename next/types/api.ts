@@ -149,11 +149,25 @@ export interface CompetitorDashboardResponse {
   signals: CompetitorSignalDTO[]; unavailable: string[]; note: string; metrics: string[]; applied_window: number | null;
 }
 
-export interface MerchantProfileDTO { merchant: string; posts: number; avg_views_per_day: number | null; price_median: number | null; confidence: number; }
+export interface MerchantProfileRow {
+  merchant: string; posts: number; avg_views_per_day: number | null;
+  price_median: number | null; price_sample_size: number | null; confidence: number;
+}
+export interface MerchantOpportunityDTO { merchant?: string; kind: string; description: string; confidence: number; }
 
-export interface MerchantOpportunityDTO { merchant: string; kind: string; description: string; confidence: number; }
+export interface MerchantMixChannel {
+  name: string; is_owned: boolean; resolved_posts: number;
+  coverage_pct: number | null; shares: Record<string, number>;
+}
 
-export interface MerchantsResponse { profiles: MerchantProfileDTO[]; opportunities: MerchantOpportunityDTO[]; }
+export interface MerchantMix { merchants: string[]; channels: MerchantMixChannel[]; }
+
+export interface MerchantsResponse {
+  profiles: MerchantProfileRow[];
+  coverage: { owned: { resolved: number; total: number; pct: number } };
+  opportunities: MerchantOpportunityDTO[];
+  mix: MerchantMix;
+}
 
 export interface DealTypeAllocation { deal_type: string; post_type: string; target_posts: number; avg_views_per_day: number | null; }
 export interface MerchantAllocation { merchant: string; recent_share: number; }
@@ -242,3 +256,71 @@ export type DigestResponse =
   | { available: false; digest: ""; plan: null; factcheck_status: null; reconciliation: null; generated_at: null; }
   | { available: true; digest: string; plan: DigestPlan | null; factcheck_status: string | null;
       reconciliation: Reconciliation | null; generated_at: string | null; };
+
+export interface YesterdayBrief {
+  source: "report" | "live" | "none";
+  posts_count: number; views_total: number; views_avg: number; views_median: number;
+  reactions_total: number; forwards_total: number; engagement_rate: number;
+  top_post_id: number | null;
+  type_mix: Record<string, number> | null;
+  category_mix: Record<string, number> | null;
+  best_category: string | null; worst_category: string | null;
+  subs_net: number | null;
+}
+
+export interface TrajectoryDay { date: string; posts: number; views_avg: number; }
+
+export interface DailyTrajectory {
+  days: TrajectoryDay[];
+  recent_cadence: number;
+  lifetime_baseline: number | null;
+}
+
+export interface DailySlot { type: string; window_ist: string; count?: number | null; theme: string; merchant?: string | null; why: string; }
+
+export interface DailyPlanToday {
+  recommended_posts: number;
+  cadence_why: string;
+  posting_windows: PostingWindowRow[];
+  deal_type_allocation: { deal_type: string; target_posts: number; avg_views_per_day: number | null }[];
+  merchant_allocation: MerchantAllocation[];
+  slots: DailySlot[];
+  emphasis: string | null; watch: string | null;
+  risks: PlanRisk[] | null;
+  confidence: number;
+}
+
+export interface UpcomingEventBrief { name: string; days_away: number; date_confidence: string; }
+
+export interface DailyBrief {
+  available: boolean;
+  reason?: string;
+  date: string;
+  prev_date: string;
+  min_date: string; max_date: string;
+  yesterday: YesterdayBrief | null;
+  trajectory: DailyTrajectory;
+  today: DailyPlanToday;
+  digest: string;
+  factcheck_status: "pass" | "warn" | null;
+  ai_available: boolean;
+  upcoming_event: UpcomingEventBrief | null;
+}
+
+export interface WeeklyBriefDay { date: string; weekday: string; posts: number; views_avg: number; }
+
+export interface WeeklyBriefTheme { day: string; date: string; theme_focus: string; posts_planned: number; }
+
+export interface WeeklyBriefTotals { posts: number; views_total: number; avg_posts_per_day: number; }
+
+export interface WeeklyBrief {
+  available: boolean; reason?: string;
+  week_start: string; week_end: string;
+  days: WeeklyBriefDay[];
+  totals: WeeklyBriefTotals;
+  themes: WeeklyBriefTheme[];
+  recommended_posts_per_day: number;
+  upcoming_events: UpcomingEventRow[];
+  digest: string;
+  ai_available: boolean;
+}

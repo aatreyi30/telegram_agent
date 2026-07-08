@@ -165,54 +165,151 @@ function MerchantsTab() {
   const q = useMerchants();
   return (
     <Async q={q} rows={2}>
-      {(d) => (
-        <div className="space-y-6">
-          <Card>
-            <CardHeader><CardTitle className="text-base">Profiles</CardTitle></CardHeader>
-            <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Merchant</TableHead>
-                    <TableHead>Posts</TableHead>
-                    <TableHead>Views/day</TableHead>
-                    <TableHead>Median price</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {(d.profiles || []).map((p) => (
-                    <TableRow key={p.merchant}>
-                      <TableCell className="font-medium">{p.merchant}</TableCell>
-                      <TableCell>{p.posts}</TableCell>
-                      <TableCell>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</TableCell>
-                      <TableCell>{p.price_median != null ? `₹${fmtNum(p.price_median)}` : "—"}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
+      {(d) => {
+        const coverage = d.coverage?.owned;
+        const channels = [...(d.mix?.channels || [])].sort((a, b) => (b.is_owned ? 1 : 0) - (a.is_owned ? 1 : 0));
+        const merchants = d.mix?.merchants || [];
 
-          <section>
-            <h2 className="mb-3 text-lg font-semibold">Opportunities</h2>
-            <div className="space-y-3">
-              {(d.opportunities || []).map((o, i) => (
-                <CalloutCard
-                  key={i}
-                  severity="info"
-                  label={o.kind}
-                  title={o.description}
-                >
-                  {o.merchant && <Badge variant="primary">{o.merchant}</Badge>}
-                </CalloutCard>
-              ))}
-              {(d.opportunities || []).length === 0 && (
-                <p className="text-sm text-muted-foreground">No merchant opportunities surfaced.</p>
-              )}
-            </div>
-          </section>
-        </div>
-      )}
+        return (
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Your channel · merchant performance</CardTitle>
+                {coverage && (
+                  <p className="text-xs text-muted-foreground">
+                    Merchant resolved on {fmtNum(coverage.resolved)} of {fmtNum(coverage.total)} posts
+                    ({Math.round(coverage.pct * 100)}%). Only posts with a recognized store link are counted —
+                    shortlinks stay unresolved.
+                  </p>
+                )}
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Merchant</TableHead>
+                      <TableHead>Posts</TableHead>
+                      <TableHead>Views/day</TableHead>
+                      <TableHead>Median price</TableHead>
+                      <TableHead>Sample</TableHead>
+                      <TableHead>Confidence</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(d.profiles || []).map((p) => {
+                      const lowConfidence = p.confidence < 0.3 || p.posts < 10;
+                      return (
+                        <TableRow key={p.merchant} className={cn(lowConfidence && "text-muted-foreground")}>
+                          <TableCell className="font-medium">
+                            <div className="flex items-center gap-2">
+                              <span>{p.merchant}</span>
+                              {lowConfidence && (
+                                <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+                                  low sample
+                                </Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell>{p.posts}</TableCell>
+                          <TableCell>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</TableCell>
+                          <TableCell>{p.price_median != null ? `₹${fmtNum(p.price_median)}` : "—"}</TableCell>
+                          <TableCell>{fmtNum(p.price_sample_size)}</TableCell>
+                          <TableCell>
+                            <Badge variant={lowConfidence ? "outline" : "secondary"} className="text-xs">
+                              {fmtPct(p.confidence)}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                    {(d.profiles || []).length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
+                          No merchant data yet.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Merchant mix — you vs competitors</CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  Share of resolved posts per merchant, compared across channels.
+                </p>
+              </CardHeader>
+              <CardContent className="p-0">
+                {channels.length < 2 ? (
+                  <p className="p-4 text-sm text-muted-foreground">
+                    Not enough resolved merchant data across channels to compare yet.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Merchant</TableHead>
+                          {channels.map((c) => (
+                            <TableHead key={c.name} className={cn(c.is_owned && "text-primary")}>
+                              <div>{c.is_owned ? "You" : c.name}</div>
+                              {c.coverage_pct != null && (
+                                <div className="text-[10px] font-normal text-muted-foreground">
+                                  {fmtPct(c.coverage_pct)} resolved
+                                </div>
+                              )}
+                            </TableHead>
+                          ))}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {merchants.map((m) => (
+                          <TableRow key={m}>
+                            <TableCell className="font-medium">{m}</TableCell>
+                            {channels.map((c) => (
+                              <TableCell key={c.name} className={cn(c.is_owned && "font-medium text-primary")}>
+                                {fmtPct(c.shares?.[m])}
+                              </TableCell>
+                            ))}
+                          </TableRow>
+                        ))}
+                        {merchants.length === 0 && (
+                          <TableRow>
+                            <TableCell colSpan={channels.length + 1} className="text-center text-sm text-muted-foreground">
+                              No merchant mix data yet.
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <section>
+              <h2 className="mb-3 text-lg font-semibold">Opportunities</h2>
+              <div className="space-y-3">
+                {(d.opportunities || []).map((o, i) => (
+                  <CalloutCard
+                    key={i}
+                    severity="info"
+                    label={o.kind}
+                    title={o.description}
+                  >
+                    {o.merchant && <Badge variant="primary">{o.merchant}</Badge>}
+                  </CalloutCard>
+                ))}
+                {(d.opportunities || []).length === 0 && (
+                  <p className="text-sm text-muted-foreground">No merchant opportunities surfaced.</p>
+                )}
+              </div>
+            </section>
+          </div>
+        );
+      }}
     </Async>
   );
 }
