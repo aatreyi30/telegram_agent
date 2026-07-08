@@ -333,6 +333,7 @@ def verify_candidate(brand: str, candidates: list[dict]) -> tuple[str | None, fl
 
     # Ambiguous -> ask the LLM for a structured verdict (best-effort).
     from src.ai.client import AIClient, AIUnavailable
+    from src.ai.prompts import verify_candidate_prompt
 
     ai = AIClient()
     ok, _ = ai.available()
@@ -342,12 +343,7 @@ def verify_candidate(brand: str, candidates: list[dict]) -> tuple[str | None, fl
                 f"- @{c.get('username')}: title={c.get('title', '')!r}"
                 for _, _, c in scored[:6]
             )
-            prompt = (
-                f"Which candidate Telegram channel, if any, is the OFFICIAL channel for the brand "
-                f"\"{brand}\"? Consider only the given candidates.\n{lines}\n\n"
-                "Reply with ONLY a compact JSON object: "
-                '{"username": "<exact username or null>", "confidence": <0..1>}'
-            )
+            prompt = verify_candidate_prompt(brand, lines)
             raw = ai.complete(prompt, max_tokens=120)
             import json
             import re

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from src.ai import context as ctx
 from src.ai.client import AIClient
+from src.ai.prompts import COACH_SYSTEM as _COACH_SYSTEM
 from src.db.session import session_scope
 
 # Read-only tools over the deterministic engines.
@@ -28,17 +29,6 @@ _TOOLS = [
     {"name": "get_competitor_intel", "description": "Competitor profiles, similarity to us, threats/opportunities.",
      "input_schema": {"type": "object", "properties": {}}},
 ]
-
-_COACH_SYSTEM = (
-    "You are the operator's growth coach. Use the tools to fetch whatever engine "
-    "outputs you need before answering — do not answer from assumptions. Base every "
-    "claim on tool results, cite the numbers, and if the tools don't have what's needed "
-    "to answer, say so plainly. Give a direct, prioritized answer, then the evidence. "
-    "Note: 'get_growth' (recommendations) and 'get_learnings' (learned facts) can overlap — "
-    "they're often two views of the same underlying data point. If you cite both, don't "
-    "repeat the same explanation twice; use the recommendation for the action and the "
-    "learning only to back up the number."
-)
 
 
 def _tool_runner(name: str, _input: dict) -> str:
