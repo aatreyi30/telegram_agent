@@ -5,10 +5,8 @@ import {
   ChartUpIcon,
   CheckListIcon,
   Home01Icon,
-  Idea01Icon,
   Sent02Icon,
   Package02Icon,
-  SparklesIcon,
   UserGroupIcon,
 } from "@hugeicons/core-free-icons";
 
@@ -22,8 +20,6 @@ export interface NavItem {
 
 export const NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: Home01Icon, end: true, group: "" },
-  { to: "/digest", label: "Daily Digest", icon: SparklesIcon, group: "Understand" },
-  { to: "/insights", label: "Insights", icon: Idea01Icon, group: "Understand" },
   { to: "/analytics", label: "Analytics", icon: Analytics01Icon, group: "Understand" },
   { to: "/day", label: "Day view", icon: Calendar03Icon, group: "Understand" },
   { to: "/competitors", label: "Competitors", icon: UserGroupIcon, group: "Understand" },

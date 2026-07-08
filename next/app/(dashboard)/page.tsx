@@ -148,8 +148,8 @@ export default function OverviewPage() {
                       return <PriorityCard rec={top} />;
                     }}
                   </Async>
-                  <Link href="/insights" className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
-                    See all recommendations <HugeiconsIcon icon={ChevronRightIcon} className="h-3 w-3" />
+                  <Link href="/plan" className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+                    See today's plan <HugeiconsIcon icon={ChevronRightIcon} className="h-3 w-3" />
                   </Link>
                 </CardContent>
               </Card>
