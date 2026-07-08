@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from src.db.models import Channel
 from src.db.models_growth_snapshot import ParticipantSnapshot
+from src.services.analytics.periods import IST
 
 
 def compute_growth(s: Session, channel_id: int, days: int = 90) -> dict:
@@ -42,7 +43,10 @@ def compute_growth(s: Session, channel_id: int, days: int = 90) -> dict:
     daily_map: dict[str, dict] = OrderedDict()
     prev = None
     for r in rows:
-        day_key = r.captured_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        # captured_at is stored naive-UTC; treat naive as UTC before converting to IST
+        # so the daily labels line up with the IST day boundaries used everywhere else.
+        cap = r.captured_at if r.captured_at.tzinfo else r.captured_at.replace(tzinfo=timezone.utc)
+        day_key = cap.astimezone(IST).strftime("%Y-%m-%d")
         delta = None
         if prev is not None and r.count is not None and prev.count is not None:
             delta = r.count - prev.count

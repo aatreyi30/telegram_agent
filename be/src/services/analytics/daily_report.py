@@ -47,7 +47,10 @@ def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> 
     views_total = sum(views)
     top = max(posts, key=lambda p: p.views or 0, default=None)
     bottom = min(posts, key=lambda p: p.views or 0, default=None)
-    hours = Counter(str(p.posted_at.astimezone(IST).hour) for p in posts if p.posted_at)
+    hours = Counter(
+        str((p.posted_at if p.posted_at.tzinfo else p.posted_at.replace(tzinfo=timezone.utc))
+            .astimezone(IST).hour)
+        for p in posts if p.posted_at)
 
     rep = DailyChannelReport(
         channel_id=channel_id, source_type=ReportSourceType.OWNED,
@@ -87,25 +90,26 @@ def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> 
 
 
 def _fill_subs(s: Session, rep: DailyChannelReport, channel_id: int | None, day: date) -> None:
-    """subs_start/end/net from ChannelStatSnapshot when present; else NULL.
+    """subs_start/end/net from ParticipantSnapshot when present; else NULL.
 
-    NOTE: ChannelStatSnapshot has no `participants_count` column (that lives on
-    Channel). Its follower time-series column is `followers` — confirmed in
-    src/db/models.py:263-286.
+    The real subscriber time-series lives in `participant_snapshots.count`
+    (ParticipantSnapshot, captured every collection cycle). ChannelStatSnapshot
+    requires admin `can_view_stats` and is empty in practice, so we read
+    participant snapshots instead.
     """
     try:
-        from src.db.models import ChannelStatSnapshot
+        from src.db.models_growth_snapshot import ParticipantSnapshot
         start, end = _ist_bounds(day)
         snaps = list(s.scalars(
-            select(ChannelStatSnapshot)
-            .where(ChannelStatSnapshot.channel_id == channel_id,
-                   ChannelStatSnapshot.captured_at >= start,
-                   ChannelStatSnapshot.captured_at < end)
-            .order_by(ChannelStatSnapshot.captured_at)
+            select(ParticipantSnapshot)
+            .where(ParticipantSnapshot.channel_id == channel_id,
+                   ParticipantSnapshot.captured_at >= start,
+                   ParticipantSnapshot.captured_at < end)
+            .order_by(ParticipantSnapshot.captured_at)
         ))
         if snaps:
-            rep.subs_start = snaps[0].followers
-            rep.subs_end = snaps[-1].followers
+            rep.subs_start = snaps[0].count
+            rep.subs_end = snaps[-1].count
             rep.subs_net = (rep.subs_end or 0) - (rep.subs_start or 0)
     except Exception:
         pass

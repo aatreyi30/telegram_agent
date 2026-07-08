@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -85,7 +85,13 @@ def compute(s: Session, start=None, end=None) -> dict:
     I_CTA = 8
 
     for r in rows:
-        ist = r[0].astimezone(IST)
+        # posted_at is stored naive-UTC (SQLite drops tzinfo). Treat naive values as
+        # UTC before converting to IST — otherwise astimezone() assumes system-local
+        # time and the whole hour/weekday split silently shifts by the host's offset.
+        pa = r[0]
+        if pa.tzinfo is None:
+            pa = pa.replace(tzinfo=timezone.utc)
+        ist = pa.astimezone(IST)
         day_key = ist.strftime("%Y-%m-%d")
         views = r[I_VIEWS] or 0
         reactions = r[I_REACTIONS] or 0
@@ -122,9 +128,11 @@ def compute(s: Session, start=None, end=None) -> dict:
             "n": n,
             "avg_views": round(_fmean(v)),
             "total_views": sv,
-            "avg_reactions": round(_fmean(rct)),
+            # reactions/forwards average <1 per post — keep 2 decimals so the hourly
+            # bars carry real signal instead of collapsing to 0/1 under int rounding.
+            "avg_reactions": round(_fmean(rct), 2),
             "total_reactions": sr,
-            "avg_forwards": round(_fmean(fwd)),
+            "avg_forwards": round(_fmean(fwd), 2),
             "total_forwards": sf,
             "total_engagement": sr + sf,
             "engagement_rate": round((sr + sf) / sv * 100, 1) if sv else 0,
@@ -165,7 +173,9 @@ def compute(s: Session, start=None, end=None) -> dict:
     all_agg = _reduce([tup for _, tups in by_day.items() for tup in tups])
 
     # ------- window metadata -------
-    dates = list(by_day.keys())
+    # sort the day keys — dict insertion order is row order, not chronological, so
+    # start/end must come from the sorted min/max, not the first/last inserted key.
+    dates = sorted(by_day.keys())
     days_span = len(dates)
     win = {"source": "owned", "start": (dates[0] if dates else None),
            "end": (dates[-1] if dates else None),
