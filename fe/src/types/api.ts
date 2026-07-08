@@ -223,7 +223,7 @@ export interface DataRangeResponse {
 // ---------------------------------------------------------------------------
 
 export interface DayMerchantRow {
-  key: string;
+  key: string | null;
   display_name: string;
   post_count: number;
   total_views: number;
@@ -248,6 +248,7 @@ export type DayResponse =
       date: string;
       available: true;
       posts: number;
+      merchantless_count: number;
       total_views: number;
       avg_views_per_post: number;
       merchants: DayMerchantRow[];

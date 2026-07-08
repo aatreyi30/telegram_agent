@@ -79,7 +79,7 @@ export interface AnalyticsResponse {
 export interface DataRangeResponse { min: string | null; max: string | null; }
 
 export interface DayMerchantRow {
-  key: string; display_name: string; post_count: number; total_views: number;
+  key: string | null; display_name: string; post_count: number; total_views: number;
   total_reactions: number; total_forwards: number; total_engagement: number;
   engagement_rate: number | null; deal_count: number;
   type_dist: Record<string, number>; top_post: { views: number; preview: string } | null;
@@ -89,7 +89,8 @@ export interface DayBaseline { avg_posts_per_day: number; avg_views_per_post: nu
 
 export type DayResponse =
   | { date: string | null; available: false; note: string; }
-  | { date: string; available: true; posts: number; total_views: number; avg_views_per_post: number;
+  | { date: string; available: true; posts: number; merchantless_count: number;
+      total_views: number; avg_views_per_post: number;
       merchants: DayMerchantRow[]; type_mix: [string, number][]; merchant_mix: [string, number][];
       baseline: DayBaseline; vs_baseline: { posts_delta: number; views_delta_pct: number | null; }; };
 

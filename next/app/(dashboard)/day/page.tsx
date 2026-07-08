@@ -86,7 +86,7 @@ export default function DayViewPage() {
                   value={fmtNum(d.avg_views_per_post)}
                   sub={d.vs_baseline?.views_delta_pct != null ? `${fmtPct(d.vs_baseline.views_delta_pct, true)} vs 30d` : undefined}
                 />
-                <StatCard label="active merchants" value={String(d.merchants?.length ?? 0)} />
+                <StatCard label="active merchants" value={String((d.merchants ?? []).filter((m) => m.key).length ?? 0)} sub={d.merchantless_count > 0 ? `${d.merchantless_count} without merchant` : undefined} />
               </div>
 
               <Card>
@@ -117,8 +117,8 @@ export default function DayViewPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {d.merchants.map((m) => (
-                        <TableRow key={m.key} className="hover:bg-muted/50">
+                      {d.merchants.map((m, idx) => (
+                        <TableRow key={m.key ?? `__unknown__${idx}`} className="hover:bg-muted/50">
                           <TableCell className="font-medium">{m.display_name ?? m.key}</TableCell>
                           <TableCell className="text-right">{fmtNum(m.post_count)}</TableCell>
                           <TableCell className="text-right font-semibold">{fmtNum(m.total_views)}</TableCell>
@@ -230,13 +230,13 @@ export default function DayViewPage() {
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">Top merchant</span>
-                      <span className="font-semibold truncate max-w-32" title={d.merchants[0]?.display_name}>
-                        {d.merchants[0]?.display_name ?? d.merchants[0]?.key ?? "—"}
+                      <span className="font-semibold truncate max-w-32" title={(() => { const t = d.merchants.filter((m) => m.key)[0]; return t?.display_name ?? t?.key; })()}>
+                        {(() => { const t = d.merchants.filter((m) => m.key)[0]; return t?.display_name ?? t?.key ?? "—"; })()}
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">Active merchants</span>
-                      <span className="font-semibold">{d.merchants.filter((m) => m.deal_count > 0).length}</span>
+                      <span className="font-semibold">{d.merchants.filter((m) => m.key && m.deal_count > 0).length}</span>
                     </div>
                   </CardContent>
                 </Card>

@@ -35,7 +35,7 @@ class LinkResolutionEngine(BaseCollector):
     name = "link_resolution"
     retryable = False
 
-    def __init__(self, limit: int = 300, delay: float = 0.1):
+    def __init__(self, limit: int = 2000, delay: float = 0.1):
         self.limit = limit
         self.delay = delay
         self.ua = get_settings().tme_user_agent
@@ -58,7 +58,7 @@ class LinkResolutionEngine(BaseCollector):
 
         affected_posts: set[int] = set()
         with httpx.Client(
-            timeout=5.0, follow_redirects=True,
+            timeout=30.0, follow_redirects=True,
             headers={"User-Agent": self.ua},
         ) as client:
             for link_id, url in pending:
@@ -89,18 +89,29 @@ class LinkResolutionEngine(BaseCollector):
 
     @staticmethod
     def _resolve(client: httpx.Client, url: str) -> tuple[str | None, str | None]:
-        """Follow redirects to the final URL; detect merchant from its domain.
-        Streamed so we read only the final URL, not the merchant page body."""
+        """
+        Resolve a shortlink by following redirects.
+
+        Merchant detection is attempted on every URL in the redirect chain,
+        because affiliate systems often redirect through multiple tracking
+        domains before reaching the merchant.
+        """
         try:
-            with client.stream("GET", url) as resp:
-                final = str(resp.url)
+            response = client.get(url, follow_redirects=True, timeout=15.0)
+
+            redirect_chain = [str(r.url) for r in response.history]
+            redirect_chain.append(str(response.url))
+
+            merchant = None
+            for redirect_url in redirect_chain:
+                merchant = detect_merchant_key(redirect_url)
+                if merchant:
+                    break
+
+            return str(response.url), merchant
+
         except httpx.HTTPError:
-            # some hosts reject HEAD/stream; a normal GET still exposes .url
-            try:
-                final = str(client.get(url).url)
-            except httpx.HTTPError:
-                return None, None
-        return final, detect_merchant_key(final)
+            return None, None
 
     @staticmethod
     def _backfill_primary_merchant(post_ids: set[int]) -> int:

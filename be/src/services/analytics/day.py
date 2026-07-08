@@ -80,13 +80,16 @@ def summarize(s: Session, day: date | None = None) -> dict:
     # --- Per-merchant aggregates ---
     merchant_lookup = _merchant_display_names(s)
 
+    UNKNOWN_LABEL = "__unknown__"
     merchant_buckets: dict[str, dict] = defaultdict(
         lambda: {"post_count": 0, "total_views": 0, "total_reactions": 0,
                  "total_forwards": 0, "deal_count": 0, "top_post": None, "type_dist": Counter()})
+    merchantless_count = 0
     for r in rows:
         mk = r[7]
         if not mk:
-            continue
+            mk = UNKNOWN_LABEL
+            merchantless_count += 1
         md = merchant_buckets[mk]
         md["post_count"] += 1
         md["total_views"] += (r[2] or 0)
@@ -103,8 +106,8 @@ def summarize(s: Session, day: date | None = None) -> dict:
             }
 
     merchants = sorted(
-        [{"key": mk,
-          "display_name": merchant_lookup.get(mk, mk),
+        [{"key": (None if mk == UNKNOWN_LABEL else mk),
+          "display_name": ("Unknown" if mk == UNKNOWN_LABEL else merchant_lookup.get(mk, mk)),
           "post_count": md["post_count"],
           "total_views": md["total_views"],
           "total_reactions": md["total_reactions"],
@@ -135,7 +138,8 @@ def summarize(s: Session, day: date | None = None) -> dict:
 
     return {
         "date": day.isoformat(), "available": True,
-        "posts": len(rows), "total_views": total_views, "avg_views_per_post": avg_views,
+        "posts": len(rows), "merchantless_count": merchantless_count,
+        "total_views": total_views, "avg_views_per_post": avg_views,
         "merchants": merchants,
         "type_mix": type_mix.most_common(),
         "merchant_mix": merchant_mix.most_common(6),

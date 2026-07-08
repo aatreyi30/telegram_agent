@@ -68,7 +68,7 @@ class Settings:
     # --- Competitor monitoring (t.me/s) ---
     competitor_channels_raw: str | None = None
     tme_request_delay_seconds: float = 2.0
-    tme_user_agent: str = "Mozilla/5.0 (compatible; TGIntelBot/1.0)"
+    tme_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     # --- Merchant enrichment (buildable merchants only) ---
     amazon_associate_tag: str | None = None
@@ -144,7 +144,7 @@ class Settings:
             owned_channels_raw=_get("OWNED_CHANNELS"),
             competitor_channels_raw=_get("COMPETITOR_CHANNELS"),
             tme_request_delay_seconds=_get_float("TME_REQUEST_DELAY_SECONDS", 2.0),
-            tme_user_agent=_get("TME_USER_AGENT", "Mozilla/5.0 (compatible; TGIntelBot/1.0)"),
+            tme_user_agent=_get("TME_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
             amazon_associate_tag=_get("AMAZON_ASSOCIATE_TAG"),
             amazon_creators_access_key=_get("AMAZON_CREATORS_ACCESS_KEY"),
             amazon_creators_secret_key=_get("AMAZON_CREATORS_SECRET_KEY"),
