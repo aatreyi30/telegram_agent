@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Async } from "@/components/Async";
 import { BarsChart, TimelineChart } from "@/components/charts";
 import { StatCard } from "@/components/StatCard";
@@ -8,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { useAnalytics, useDataRange } from "@/queries/queries";
 import { useQueryParams } from "@/lib/use-search-params";
+import { CHART_AXIS_COLOR as AXIS, CHART_GRID_COLOR as GRID } from "@/constants/charts";
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -54,7 +56,7 @@ export default function AnalyticsPage() {
   const max = range.data?.max ?? undefined;
 
   const { get, set } = useQueryParams();
-  const preset = get("preset", "90d");
+  const preset = get("preset", "7d");
   const startParam = get("start", "");
   const endParam = get("end", "");
 
@@ -119,41 +121,70 @@ export default function AnalyticsPage() {
               <div className="grid gap-4 sm:grid-cols-4 xl:grid-cols-7 xl:gap-6">
                 <StatCard label="Posts" value={fmtNum(a.total_posts)} />
                 <StatCard label="Views" value={fmtNum(a.total_views)} />
-                <StatCard label="Reactions" value={fmtNum(a.total_reactions)} />
-                <StatCard label="Forwards" value={fmtNum(a.total_forwards)} />
+                <StatCard label="Total reactions" value={fmtNum(a.total_reactions)} />
+                <StatCard label="Total forwards" value={fmtNum(a.total_forwards)} />
                 <StatCard label="Eng. rate" value={a.engagement_rate != null ? `${a.engagement_rate}%` : "—"} />
                 <StatCard label="CTA rate" value={a.cta_rate != null ? `${a.cta_rate}%` : "—"} />
                 <StatCard label="Deal rate" value={a.deal_rate != null ? `${a.deal_rate}%` : "—"} />
               </div>
 
               <ChartCard title="Views & engagement over time"
-                sub={`Daily avg views (area) + engagement rate (dashed) · hover for post count · ${win.start || "?"} → ${win.end || "?"}`}>
-                <TimelineChart data={a.timeline || []} dataKey="avg_views" unit=" views"
+                sub={`Daily total views (area) + engagement rate (dashed) · hover for post count · ${win.start || "?"} → ${win.end || "?"}`}>
+                <TimelineChart data={a.timeline || []} dataKey="total_views" unit=" views"
                   secondaryKey="engagement_rate" secondaryUnit="%" countKey="n" countLabel="Posts" />
               </ChartCard>
 
               {a.growth?.available && (
-                <ChartCard title="Subscriber growth" sub="Follower count over time from collection snapshots.">
-                  <StatCard
-                    label="Subscribers"
-                    value={fmtNum(a.growth.current)}
-                    trend={{ value: a.growth.growth_rate_pct, label: "vs first snapshot" }}
-                  />
-                  <div className="mt-3">
-                    <TimelineChart
-                      data={(a.growth.daily || []).map((d) => ({ label: d.date, count: d.count ?? 0 }))}
-                      dataKey="count"
-                    />
-                  </div>
-                </ChartCard>
+                <>
+                  <ChartCard title="Subscriber growth" sub="Follower count over time from collection snapshots.">
+                    <div className="grid gap-3 sm:grid-cols-4">
+                      <StatCard label="Current subscribers" value={fmtNum(a.growth.current)} />
+                      <StatCard label="Joined" value={`+${fmtNum(a.growth.joined)}`} />
+                      <StatCard label="Left" value={a.growth.left > 0 ? `-${fmtNum(a.growth.left)}` : "0"} />
+                      <StatCard label="Net change" value={a.growth.net > 0 ? `+${fmtNum(a.growth.net)}` : fmtNum(a.growth.net)} />
+                    </div>
+                    <div className="mt-3">
+                      <TimelineChart
+                        data={(a.growth.daily || []).map((d) => ({ label: d.date, subs_end: d.subs_end ?? 0 }))}
+                        dataKey="subs_end"
+                      />
+                    </div>
+                  </ChartCard>
+
+                  {/* Daily change chart — kept as a raw recharts BarChart (not the shared BarsChart) so each
+                      bar can be colored green/red by sign; BarsChart only supports a single fill color. */}
+                  <ChartCard title="Daily change" sub={`Net subscriber gain/loss per day. Green = gained, red = lost · ${a.growth.days} days with data`}>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={a.growth.daily} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
+                        <XAxis dataKey="date" tick={{ fill: AXIS, fontSize: 10 }} tickLine={false} axisLine={false}
+                          minTickGap={60} tickFormatter={(v: string) => v.slice(5)} />
+                        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }}
+                          labelStyle={{ color: "hsl(var(--foreground))", fontWeight: 500 }}
+                          formatter={(value: number, name: string, props: any) => [
+                            `${value >= 0 ? "+" : ""}${value.toLocaleString()} (joined ${props.payload.joined}, left ${props.payload.left})`,
+                            "Net",
+                          ]}
+                        />
+                        <Bar dataKey="net" radius={[2, 2, 0, 0]}>
+                          {a.growth.daily.map((d, i) => (
+                            <Cell key={i} fill={(d?.net || 0) >= 0 ? "hsl(var(--chart-1))" : "hsl(var(--destructive))"} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+                </>
               )}
 
               <div className="grid gap-4 lg:grid-cols-2">
-                <ChartCard title="Avg views by hour (IST)" sub="All 24 hours — empty slots show 0">
-                  <BarsChart data={a.by_hour || []} unit=" views" dataKey="avg_views" />
+                <ChartCard title="Total views by hour (IST)" sub="All 24 hours — empty slots show 0 · hover for post count">
+                  <BarsChart data={a.by_hour || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" />
                 </ChartCard>
-                <ChartCard title="Avg views by weekday (IST)" sub="Within the selected range">
-                  <BarsChart data={a.by_weekday || []} unit=" views" dataKey="avg_views" />
+                <ChartCard title="Total views by weekday (IST)" sub="Within the selected range · hover for post count">
+                  <BarsChart data={a.by_weekday || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" />
                 </ChartCard>
               </div>
 
@@ -165,33 +196,24 @@ export default function AnalyticsPage() {
                   </CardHeader>
                   <CardContent className="space-y-3 text-sm flex-1">
                     <p className="text-xs text-muted-foreground">
-                      Your strongest posting hours (IST), ranked by total engagement — reactions + forwards.
+                      Your strongest posting hours (IST), ranked by median views per post. Only hours with at
+                      least 3 posts are eligible, so this is self-auditing — small sample sizes never win.
                     </p>
-                    {(a.golden_hours?.by_engagement ?? []).length ? (
+                    {(a.golden_hours ?? []).length ? (
                       <div className="space-y-1.5">
-                        {a.golden_hours.by_engagement.map((gh, i) => (
+                        {a.golden_hours.map((gh, i) => (
                           <div key={gh.hour} className="flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2">
                             {i === 0 && <span className="text-xs">⭐</span>}
                             <span className="text-sm font-semibold text-foreground">{to12h(gh.hour)}</span>
                             <span className="text-xs text-muted-foreground">— good to post</span>
-                            <span className="ml-auto text-xs text-muted-foreground">{fmtNum(gh.total_engagement)} eng.</span>
+                            <span className="ml-auto text-xs text-muted-foreground">
+                              {fmtNum(gh.median_views)} median views · {gh.n} posts
+                            </span>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <p className="text-sm text-muted-foreground">—</p>
-                    )}
-                    {(a.golden_hours?.by_views ?? []).length > 0 && (
-                      <>
-                        <p className="text-xs text-muted-foreground pt-1">Also strong by views:</p>
-                        <div className="flex flex-wrap gap-1.5">
-                          {a.golden_hours.by_views.slice(0, 5).map((gh) => (
-                            <span key={gh.hour} className="rounded-md bg-muted px-2.5 py-1 text-xs">
-                              {to12h(gh.hour)} · {fmtNum(gh.total_views)} views
-                            </span>
-                          ))}
-                        </div>
-                      </>
+                      <p className="text-sm text-muted-foreground">Not enough data yet — need at least 3 posts in a single hour slot.</p>
                     )}
                   </CardContent>
                 </Card>
@@ -239,16 +261,16 @@ export default function AnalyticsPage() {
                           <span className="text-sm font-semibold">{fmtNum(a.growth.current)}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
-                          <span className="text-sm text-muted-foreground">Growth rate</span>
-                          <span className="text-sm font-semibold">{a.growth.growth_rate_pct != null ? fmtPct(a.growth.growth_rate_pct) : "—"}</span>
+                          <span className="text-sm text-muted-foreground">Joined</span>
+                          <span className="text-sm font-semibold">+{fmtNum(a.growth.joined)}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
-                          <span className="text-sm text-muted-foreground">Subs/day</span>
-                          <span className="text-sm font-semibold">
-                            {a.growth.growth_per_day != null
-                              ? `${a.growth.growth_per_day > 0 ? "+" : ""}${a.growth.growth_per_day.toFixed(1)}`
-                              : "—"}
-                          </span>
+                          <span className="text-sm text-muted-foreground">Left</span>
+                          <span className="text-sm font-semibold">{a.growth.left > 0 ? `-${fmtNum(a.growth.left)}` : "0"}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
+                          <span className="text-sm text-muted-foreground">Net</span>
+                          <span className="text-sm font-semibold">{a.growth.net > 0 ? `+${fmtNum(a.growth.net)}` : fmtNum(a.growth.net)}</span>
                         </div>
                         <div className="pt-2 text-xs text-muted-foreground">
                           {a.growth.first_date?.slice(0, 10)} → {a.growth.last_date?.slice(0, 10)}
@@ -262,20 +284,20 @@ export default function AnalyticsPage() {
               </div>
 
               <div className="grid gap-4 lg:grid-cols-2">
-                <ChartCard title="Avg reactions by hour (IST)" sub="How reactions distribute across the day">
-                  <BarsChart data={a.by_hour || []} unit=" reactions" dataKey="avg_reactions" />
+                <ChartCard title="Total reactions by hour (IST)" sub="How reactions distribute across the day · hover for post count">
+                  <BarsChart data={a.by_hour || []} unit=" reactions" dataKey="total_reactions" countKey="n" countLabel="Posts" />
                 </ChartCard>
-                <ChartCard title="Avg forwards by hour (IST)" sub="How forwards distribute across the day">
-                  <BarsChart data={a.by_hour || []} unit=" forwards" dataKey="avg_forwards" />
+                <ChartCard title="Total forwards by hour (IST)" sub="How forwards distribute across the day · hover for post count">
+                  <BarsChart data={a.by_hour || []} unit=" forwards" dataKey="total_forwards" countKey="n" countLabel="Posts" />
                 </ChartCard>
               </div>
 
               <div className="grid gap-4 lg:grid-cols-2">
-                <ChartCard title="Avg views by post type" sub="Which formats perform best">
-                  <BarsChart data={a.by_type || []} unit=" views" height={280} />
+                <ChartCard title="Total views by post type" sub="Which formats perform best · hover for post count">
+                  <BarsChart data={a.by_type || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" height={280} />
                 </ChartCard>
-                <ChartCard title="Avg views by merchant (top 10)" sub="Resolved merchants only">
-                  <BarsChart data={a.by_merchant || []} unit=" views" height={280} />
+                <ChartCard title="Total views by merchant (top 10)" sub="Resolved merchants only · hover for post count">
+                  <BarsChart data={a.by_merchant || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" height={280} />
                 </ChartCard>
               </div>
 

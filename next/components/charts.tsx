@@ -73,8 +73,8 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
   );
 }
 
-export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260 }: {
-  data: any[]; dataKey?: string; unit?: string; height?: number;
+export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260, countKey, countLabel }: {
+  data: any[]; dataKey?: string; unit?: string; height?: number; countKey?: string; countLabel?: string;
 }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -84,7 +84,7 @@ export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260
           interval={0} angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? "end" : "middle"}
           height={data.length > 8 ? 60 : 30} />
         <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
-        <Tooltip content={<Tip unit={unit} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
+        <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
         <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit} />
       </BarChart>
     </ResponsiveContainer>
