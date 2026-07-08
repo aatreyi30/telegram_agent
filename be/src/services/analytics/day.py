@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 
 from src.services.analytics.periods import IST
 from src.db.models import Post, Merchant
-from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_normalization import NormalizedPost, SourceType
 
 
@@ -25,21 +24,22 @@ def _ist_bounds(day: date):
     return start, start + timedelta(days=1)
 
 
+def _post_type(is_multi_deal: bool) -> str:
+    return "loot_deal" if is_multi_deal else "single_deal"
+
+
 def _rows_between(s: Session, start, end):
     """Fetch all owned posts in [start, end) with merchant + type + deal flags.
 
     Returns rows: (id, posted_at, views, text, reactions_total, forwards,
-                    type_descriptor, merchant_key, has_coupon, is_multi_deal)
+                    merchant_key, has_coupon, is_multi_deal)
     """
     return s.execute(
         select(Post.id, Post.posted_at, Post.views, Post.text,
                Post.reactions_total, Post.forwards,
-               PostTypeCluster.descriptor, NormalizedPost.primary_merchant_key,
+               NormalizedPost.primary_merchant_key,
                NormalizedPost.has_coupon, NormalizedPost.is_multi_deal)
         .join(NormalizedPost, NormalizedPost.source_id == Post.id)
-        .join(PostClassification,
-              PostClassification.normalized_post_id == NormalizedPost.id, isouter=True)
-        .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id, isouter=True)
         .where(NormalizedPost.source_type == SourceType.OWNED,
                Post.posted_at >= start, Post.posted_at < end)
     ).all()
@@ -86,7 +86,7 @@ def summarize(s: Session, day: date | None = None) -> dict:
                  "total_forwards": 0, "deal_count": 0, "top_post": None, "type_dist": Counter()})
     merchantless_count = 0
     for r in rows:
-        mk = r[7]
+        mk = r[6]
         if not mk:
             mk = UNKNOWN_LABEL
             merchantless_count += 1
@@ -95,9 +95,9 @@ def summarize(s: Session, day: date | None = None) -> dict:
         md["total_views"] += (r[2] or 0)
         md["total_reactions"] += (r[4] or 0)
         md["total_forwards"] += (r[5] or 0)
-        if r[8] or r[9]:       # has_coupon / is_multi_deal
+        if r[7] or r[8]:       # has_coupon / is_multi_deal
             md["deal_count"] += 1
-        t = r[6] or "unclassified"
+        t = _post_type(r[8])
         md["type_dist"][t] += 1
         if md["top_post"] is None or (r[2] or 0) > md["top_post"]["views"]:
             md["top_post"] = {
@@ -122,8 +122,8 @@ def summarize(s: Session, day: date | None = None) -> dict:
          for mk, md in merchant_buckets.items()],
         key=lambda m: m["total_views"], reverse=True)
 
-    type_mix = Counter(r[6] or "unclassified" for r in rows)
-    merchant_mix = Counter(r[7] for r in rows if r[7])
+    type_mix = Counter(_post_type(r[8]) for r in rows)
+    merchant_mix = Counter(r[6] for r in rows if r[6])
 
     # --- trailing 30-day baseline (excludes the day itself) ---
     prior_start = start - timedelta(days=30)

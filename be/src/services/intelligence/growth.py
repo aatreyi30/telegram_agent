@@ -20,7 +20,6 @@ from sqlalchemy import func, select
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.db.models import Post
-from src.db.models_classification import PostClassification, PostTypeCluster
 from collections import Counter
 
 from src.db.models_competitor_intel import (
@@ -615,14 +614,15 @@ class GrowthEngine(BaseCollector):
 
     def _recent_diversity(self, s, now) -> dict | None:
         cutoff = now - timedelta(days=30)
+        from sqlalchemy import case
+        is_multi = NormalizedPost.is_multi_deal
+        type_label = case((is_multi == True, "loot_deal"), else_="single_deal")
         rows = s.execute(
-            select(PostTypeCluster.descriptor, func.count())
-            .select_from(PostClassification)
-            .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id)
-            .join(NormalizedPost, NormalizedPost.id == PostClassification.normalized_post_id)
+            select(type_label, func.count())
+            .select_from(NormalizedPost)
             .join(Post, Post.id == NormalizedPost.source_id)
             .where(NormalizedPost.source_type == SourceType.OWNED, Post.posted_at >= cutoff)
-            .group_by(PostTypeCluster.descriptor)
+            .group_by(type_label)
         ).all()
         total = sum(c for _, c in rows)
         if total < 20:
