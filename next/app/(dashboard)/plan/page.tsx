@@ -1,24 +1,24 @@
 "use client";
 
-import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert01Icon,
   Calendar03Icon,
-  CheckmarkCircle01Icon,
   Clock01Icon,
   Store01Icon,
 } from "@hugeicons/core-free-icons";
 import { Async, Empty } from "@/components/Async";
+import { AiBadge } from "@/components/AiBadge";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { usePlans, useWeekly } from "@/queries/queries";
-import type { CampaignPlanDTO, PlanRisk } from "@/types/api";
-
-type DailyPlan = Extract<CampaignPlanDTO, { plan_type: "daily" }>;
-type EventPlan = Extract<CampaignPlanDTO, { plan_type: "event" }>;
+import { DateFilter } from "@/components/ui/date-range-picker";
+import { useQueryParams } from "@/lib/use-search-params";
+import { cn } from "@/lib/utils";
+import { useDailyBrief, useWeeklyBrief } from "@/queries/queries";
+import type {
+  DailyBrief, DailyPlanToday, DailyTrajectory, PlanRisk, WeeklyBrief, WeeklyBriefDay, YesterdayBrief,
+} from "@/types/api";
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -43,165 +43,17 @@ function RiskList({ risks }: { risks: PlanRisk[] | null }) {
   );
 }
 
-function ConfidenceFooter({ confidence, evidence }: { confidence: number; evidence?: Record<string, unknown> | null }) {
-  const bits = Object.entries(evidence || {}).map(([k, v]) => `${k}: ${v}`).join(" · ");
+function ConfidenceFooter({ confidence }: { confidence: number }) {
   return (
     <p className="border-t border-border pt-2 text-xs text-muted-foreground">
-      Confidence {Math.round(confidence * 100)}%{bits ? ` · ${bits}` : ""}
+      Confidence {Math.round(confidence * 100)}%
     </p>
   );
 }
 
-function DailyPlanCard({ p }: { p: DailyPlan }) {
-  const bp = p.blueprint;
-  return (
-    <Card>
-      <CardHeader><CardTitle className="text-base">{p.title}</CardTitle></CardHeader>
-      <CardContent className="space-y-4 text-sm">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <Stat label="Posts planned" value={String(bp.posts_planned)} />
-          {p.expected_outcome && <Stat label="Est. daily reach" value={`~${p.expected_outcome.estimated_daily_views} views`} />}
-        </div>
-
-        {bp.posting_windows?.length > 0 && (
-          <div>
-            <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <HugeiconsIcon icon={Clock01Icon} size={14} /> Posting windows
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {bp.posting_windows.map((w, i) => (
-                <div key={i} className="rounded-md border border-border px-2.5 py-1.5 text-xs">
-                  <span className="font-medium">{w.part}</span> {w.hours} · {w.posts} posts
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {bp.deal_type_allocation?.length > 0 && (
-          <div>
-            <p className="mb-1.5 text-xs font-medium text-muted-foreground">Deal-type allocation</p>
-            <Table>
-              <TableHeader>
-                <TableRow><TableHead>Deal type</TableHead><TableHead>Target posts</TableHead><TableHead>Views/day</TableHead></TableRow>
-              </TableHeader>
-              <TableBody>
-                {bp.deal_type_allocation.map((a, i) => (
-                  <TableRow key={i}>
-                    <TableCell>{a.deal_type}</TableCell>
-                    <TableCell>{a.target_posts}</TableCell>
-                    <TableCell>{a.avg_views_per_day != null ? Math.round(a.avg_views_per_day) : "—"}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-
-        {bp.merchant_allocation?.length > 0 && (
-          <div>
-            <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <HugeiconsIcon icon={Store01Icon} size={14} /> Merchant mix (last 45d)
-            </p>
-            <div className="space-y-1">
-              {bp.merchant_allocation.map((m) => (
-                <div key={m.merchant} className="flex items-center gap-2">
-                  <div className="w-24 shrink-0 truncate text-xs">{m.merchant}</div>
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-secondary">
-                    <div className="h-full rounded-full bg-primary" style={{ width: `${Math.round(m.recent_share * 100)}%` }} />
-                  </div>
-                  <div className="w-9 shrink-0 text-right text-xs text-muted-foreground">{Math.round(m.recent_share * 100)}%</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {!!bp.emoji_strategy?.length && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">Emoji strategy:</span>
-            {bp.emoji_strategy.map((e) => <Badge key={e} variant="outline">{e}</Badge>)}
-          </div>
-        )}
-
-        {bp.event_note && (
-          <div className="flex items-start gap-2 rounded-md bg-primary/5 px-2.5 py-1.5 text-xs text-foreground">
-            <HugeiconsIcon icon={Calendar03Icon} size={14} className="mt-0.5 shrink-0 text-primary" />
-            {bp.event_note}
-          </div>
-        )}
-
-        <RiskList risks={p.risks} />
-        <ConfidenceFooter confidence={p.confidence} evidence={p.evidence} />
-      </CardContent>
-    </Card>
-  );
-}
-
-function EventPlanCard({ p }: { p: EventPlan }) {
-  const bp = p.blueprint;
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="text-base">{p.title}</CardTitle>
-          <Badge variant={bp.date_confidence === "exact" ? "success" : "warning"}>{bp.date_confidence}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4 text-sm">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Stat label="Event date" value={bp.event_date} />
-          <Stat label="Days away" value={String(bp.days_away)} />
-          <Stat label="Window" value={`${bp.window_days} days`} />
-          <Stat label="Ramp" value={`${bp.ramp_multiplier}x`} />
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center gap-3">
-            <div className="w-28 shrink-0 text-xs text-muted-foreground">Baseline</div>
-            <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
-              <div className="h-full rounded-full bg-muted-foreground/40" style={{ width: `${Math.round(100 / bp.ramp_multiplier)}%` }} />
-            </div>
-            <div className="w-20 shrink-0 text-right text-xs">{bp.baseline_posts_per_day}/day</div>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="w-28 shrink-0 text-xs text-muted-foreground">During event</div>
-            <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
-              <div className="h-full rounded-full bg-primary" style={{ width: "100%" }} />
-            </div>
-            <div className="w-20 shrink-0 text-right text-xs font-medium">{bp.recommended_posts_per_day_during_event}/day</div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5 text-xs">
-          <HugeiconsIcon icon={Store01Icon} size={14} className="text-muted-foreground" />
-          Merchant focus: <span className="font-medium">{bp.merchant_focus}</span>
-        </div>
-
-        <div>
-          <p className="mb-1.5 text-xs font-medium text-muted-foreground">Prep checklist</p>
-          <ul className="space-y-1">
-            {bp.prep_checklist.map((c, i) => (
-              <li key={i} className="flex items-start gap-2 text-xs">
-                <HugeiconsIcon icon={CheckmarkCircle01Icon} size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
-                {c}
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        {bp.notes && <p className="text-xs text-muted-foreground">{bp.notes}</p>}
-        <RiskList risks={p.risks} />
-        <ConfidenceFooter confidence={p.confidence} evidence={p.evidence} />
-      </CardContent>
-    </Card>
-  );
-}
-
-/** Renders each line of the AI weekly summary as a paragraph, promoting a
- * leading "Label: " to a bold inline heading when present — general-purpose,
- * not tied to a fixed set of expected section names. */
-function AiSummaryBlock({ text }: { text: string }) {
+/** Renders an AI narrative, promoting a leading "Label: " to a bold inline
+ * heading when present — general-purpose, not tied to fixed section names. */
+function DigestBlock({ text }: { text: string }) {
   const lines = text.split(/\n+/).filter(Boolean);
   return (
     <div className="space-y-2 text-sm leading-relaxed">
@@ -217,36 +69,284 @@ function AiSummaryBlock({ text }: { text: string }) {
   );
 }
 
-function WeeklyTab() {
-  const q = useWeekly();
+function TypeMixBadges({ mix }: { mix: Record<string, number> | null }) {
+  const entries = Object.entries(mix || {});
+  if (!entries.length) return null;
   return (
-    <Async q={q} rows={2}>
-      {(d) =>
-        !d.weekly_plan && !d.ai_summary ? (
-          <Empty>No weekly report yet — run the agent or the pipeline.</Empty>
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-xs font-medium text-muted-foreground">Type mix:</span>
+      {entries.map(([k, v]) => <Badge key={k} variant="outline">{k}: {v}</Badge>)}
+    </div>
+  );
+}
+
+function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: string }) {
+  const noActivity = !y || y.source === "none";
+  return (
+    <Card>
+      <CardHeader><CardTitle className="text-base">Yesterday — {prevDate}</CardTitle></CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {noActivity ? (
+          <p className="text-sm text-muted-foreground">No activity recorded.</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Stat label="Posts" value={String(y!.posts_count)} />
+              <Stat label="Avg views" value={Math.round(y!.views_avg).toLocaleString()} />
+              <Stat label="Engagement rate" value={`${y!.engagement_rate}%`} />
+              {y!.subs_net != null && (
+                <Stat label="Subscribers" value={`${y!.subs_net >= 0 ? "+" : ""}${y!.subs_net} subs`} />
+              )}
+            </div>
+            {y!.top_post_id != null && (
+              <p className="text-xs text-muted-foreground">Top post: #{y!.top_post_id}</p>
+            )}
+            <TypeMixBadges mix={y!.type_mix} />
+            {(y!.best_category || y!.worst_category) && (
+              <p className="text-xs text-muted-foreground">
+                {y!.best_category && <>Best category: <span className="font-medium text-foreground">{y!.best_category}</span></>}
+                {y!.best_category && y!.worst_category && " · "}
+                {y!.worst_category && <>Worst: <span className="font-medium text-foreground">{y!.worst_category}</span></>}
+              </p>
+            )}
+            {y!.source === "live" && (
+              <p className="text-xs text-muted-foreground">(computed live from posts — no stored report)</p>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TrajectoryBars({ trajectory }: { trajectory: DailyTrajectory }) {
+  const max = Math.max(1, ...trajectory.days.map((d) => d.posts));
+  return (
+    <div className="space-y-2">
+      <div className="flex h-16 items-end gap-1">
+        {trajectory.days.map((d) => (
+          <div key={d.date} className="flex flex-1 flex-col items-center gap-1" title={`${d.date}: ${d.posts} posts · ${Math.round(d.views_avg)} avg views`}>
+            <div
+              className="w-full rounded-t-sm bg-primary/70"
+              style={{ height: `${Math.max(4, Math.round((d.posts / max) * 100))}%` }}
+            />
+            <span className="text-[9px] text-muted-foreground">{d.date.slice(5)}</span>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        recent ~{trajectory.recent_cadence}/day
+        {trajectory.lifetime_baseline != null && <span className="text-muted-foreground"> vs lifetime {trajectory.lifetime_baseline}/day</span>}
+      </p>
+    </div>
+  );
+}
+
+function TodayCard({ brief }: { brief: DailyBrief }) {
+  const t: DailyPlanToday = brief.today;
+  return (
+    <Card>
+      <CardHeader><CardTitle className="text-base">Today — {brief.date}</CardTitle></CardHeader>
+      <CardContent className="space-y-5 text-sm">
+        <div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-4xl font-bold tracking-tight">{t.recommended_posts}</span>
+            <span className="text-sm text-muted-foreground">posts recommended today</span>
+          </div>
+          {t.cadence_why && <p className="mt-1.5 text-sm text-foreground">{t.cadence_why}</p>}
+        </div>
+
+        <TrajectoryBars trajectory={brief.trajectory} />
+
+        {brief.digest ? (
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-muted-foreground">Narrative</span>
+              <AiBadge />
+            </div>
+            <DigestBlock text={brief.digest} />
+            {brief.factcheck_status === "warn" && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Some cited numbers could not be verified against the data.
+              </p>
+            )}
+          </div>
+        ) : !brief.ai_available ? (
+          <p className="text-xs text-muted-foreground">AI narrative unavailable — relying on the numbers below.</p>
+        ) : null}
+
+        {(t.emphasis || t.watch) && (
+          <div className="space-y-1">
+            {t.emphasis && <p><span className="font-medium">Emphasis:</span> {t.emphasis}</p>}
+            {t.watch && <p><span className="font-medium">Watch:</span> {t.watch}</p>}
+          </div>
+        )}
+
+        {t.posting_windows?.length > 0 && (
+          <div>
+            <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <HugeiconsIcon icon={Clock01Icon} size={14} /> Posting windows
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {t.posting_windows.map((w, i) => (
+                <div key={i} className="rounded-md border border-border px-2.5 py-1.5 text-xs">
+                  <span className="font-medium">{w.part}</span> {w.hours} · {w.posts} posts
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {t.deal_type_allocation?.length > 0 && (
+          <div>
+            <p className="mb-1.5 text-xs font-medium text-muted-foreground">Deal-type allocation</p>
+            <Table>
+              <TableHeader>
+                <TableRow><TableHead>Deal type</TableHead><TableHead>Target posts</TableHead><TableHead>Views/day</TableHead></TableRow>
+              </TableHeader>
+              <TableBody>
+                {t.deal_type_allocation.map((a, i) => (
+                  <TableRow key={i}>
+                    <TableCell>{a.deal_type}</TableCell>
+                    <TableCell>{a.target_posts}</TableCell>
+                    <TableCell>{a.avg_views_per_day != null ? Math.round(a.avg_views_per_day) : "—"}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+
+        {t.merchant_allocation?.length > 0 && (
+          <div>
+            <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <HugeiconsIcon icon={Store01Icon} size={14} /> Merchant mix
+            </p>
+            <div className="space-y-1">
+              {t.merchant_allocation.map((m) => (
+                <div key={m.merchant} className="flex items-center gap-2">
+                  <div className="w-24 shrink-0 truncate text-xs">{m.merchant}</div>
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-secondary">
+                    <div className="h-full rounded-full bg-primary" style={{ width: `${Math.round(m.recent_share * 100)}%` }} />
+                  </div>
+                  <div className="w-9 shrink-0 text-right text-xs text-muted-foreground">{Math.round(m.recent_share * 100)}%</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {t.slots?.length > 0 && (
+          <div>
+            <p className="mb-1.5 text-xs font-medium text-muted-foreground">
+              Today's posting schedule — the brief for the content engine
+            </p>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Window (IST)</TableHead><TableHead>Posts</TableHead>
+                  <TableHead>Type</TableHead><TableHead>Theme</TableHead>
+                  <TableHead>Merchant</TableHead><TableHead>Why</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {t.slots.map((s, i) => (
+                  <TableRow key={i}>
+                    <TableCell className="font-medium tabular-nums">{s.window_ist}</TableCell>
+                    <TableCell className="tabular-nums">{s.count ?? "—"}</TableCell>
+                    <TableCell><Badge variant="outline">{s.type}</Badge></TableCell>
+                    <TableCell className="text-muted-foreground">{s.theme}</TableCell>
+                    <TableCell className="text-muted-foreground">{s.merchant || "mixed"}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{s.why || "—"}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+
+        <RiskList risks={t.risks} />
+        <ConfidenceFooter confidence={t.confidence} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function UpcomingEventCallout({ event }: { event: NonNullable<DailyBrief["upcoming_event"]> }) {
+  return (
+    <div className="flex items-center gap-2 rounded-md bg-primary/5 px-3 py-2 text-sm text-foreground">
+      <span>🛍 {event.name} in {event.days_away} days ({event.date_confidence}) — consider ramping.</span>
+    </div>
+  );
+}
+
+function DailyView({ q }: { q: ReturnType<typeof useDailyBrief> }) {
+  return (
+    <Async q={q} rows={3}>
+      {(brief) =>
+        !brief.available ? (
+          <Empty>{brief.reason || "No plan available."}</Empty>
         ) : (
           <div className="space-y-4">
-            {d.ai_summary && (
-              <Card>
-                <CardHeader><CardTitle className="text-base">This week — summary</CardTitle></CardHeader>
-                <CardContent><AiSummaryBlock text={d.ai_summary} /></CardContent>
-              </Card>
-            )}
-            {d.weekly_plan && (
-              <Card>
-                <CardHeader><CardTitle className="text-base">{d.weekly_plan.title}</CardTitle></CardHeader>
-                <CardContent className="space-y-4 text-sm">
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                    <Stat label="Posts/day" value={String(d.weekly_plan.blueprint.posts_per_day)} />
-                    <Stat label="Posts/week" value={String(d.weekly_plan.blueprint.posts_per_week)} />
-                  </div>
-                  {d.weekly_plan.blueprint.daily_themes?.length > 0 && (
+            <YesterdayCard y={brief.yesterday} prevDate={brief.prev_date} />
+            <TodayCard brief={brief} />
+            {brief.upcoming_event && <UpcomingEventCallout event={brief.upcoming_event} />}
+          </div>
+        )
+      }
+    </Async>
+  );
+}
+
+function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Posts</TableHead><TableHead>Avg views</TableHead></TableRow>
+      </TableHeader>
+      <TableBody>
+        {days.map((d) => (
+          <TableRow key={d.date}>
+            <TableCell className="font-medium">{d.weekday}</TableCell>
+            <TableCell className="text-muted-foreground">{d.date}</TableCell>
+            <TableCell>{d.posts}</TableCell>
+            <TableCell>{Math.round(d.views_avg).toLocaleString()}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
+  return (
+    <Async q={q} rows={3}>
+      {(w: WeeklyBrief) =>
+        !w.available ? (
+          <Empty>{w.reason || "No weekly plan available."}</Empty>
+        ) : (
+          <div className="space-y-4">
+            <Card>
+              <CardHeader><CardTitle className="text-base">This week — {w.week_start} to {w.week_end}</CardTitle></CardHeader>
+              <CardContent className="space-y-4 text-sm">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <Stat label="Posts" value={String(w.totals.posts)} />
+                  <Stat label="Total views" value={w.totals.views_total.toLocaleString()} />
+                  <Stat label="Avg posts/day" value={w.totals.avg_posts_per_day.toFixed(1)} />
+                  <Stat label="Recommended/day" value={String(w.recommended_posts_per_day)} />
+                </div>
+
+                {w.days?.length > 0 && <WeekDaysTable days={w.days} />}
+
+                {w.themes?.length > 0 && (
+                  <div>
+                    <p className="mb-1.5 text-xs font-medium text-muted-foreground">Daily themes</p>
                     <Table>
                       <TableHeader>
                         <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Theme focus</TableHead><TableHead>Posts</TableHead></TableRow>
                       </TableHeader>
                       <TableBody>
-                        {d.weekly_plan.blueprint.daily_themes.map((t, i) => (
+                        {w.themes.map((t, i) => (
                           <TableRow key={i}>
                             <TableCell className="font-medium">{t.day}</TableCell>
                             <TableCell className="text-muted-foreground">{t.date}</TableCell>
@@ -256,26 +356,34 @@ function WeeklyTab() {
                         ))}
                       </TableBody>
                     </Table>
-                  )}
-                  {!!d.weekly_plan.blueprint.rotation_for_diversity?.length && (
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs text-muted-foreground">Rotation for diversity:</span>
-                      {d.weekly_plan.blueprint.rotation_for_diversity.map((t) => <Badge key={t} variant="outline">{t}</Badge>)}
-                    </div>
-                  )}
-                  {!!d.weekly_plan.blueprint.upcoming_events?.length && (
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="text-xs text-muted-foreground">Upcoming events:</span>
-                      {d.weekly_plan.blueprint.upcoming_events.map((e) => (
-                        <Badge key={e.name} variant="outline">{e.name} ({e.days_away}d, {e.date_confidence})</Badge>
-                      ))}
-                    </div>
-                  )}
-                  <ConfidenceFooter confidence={d.weekly_plan.confidence} />
-                </CardContent>
+                  </div>
+                )}
+
+                {!!w.upcoming_events?.length && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <HugeiconsIcon icon={Calendar03Icon} size={14} className="text-muted-foreground" />
+                    <span className="text-xs text-muted-foreground">Upcoming events:</span>
+                    {w.upcoming_events.map((e) => (
+                      <Badge key={e.name} variant="outline">{e.name} ({e.days_away}d, {e.date_confidence})</Badge>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {w.digest ? (
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center gap-2">
+                    <CardTitle className="text-base">Weekly narrative</CardTitle>
+                    <AiBadge />
+                  </div>
+                </CardHeader>
+                <CardContent><DigestBlock text={w.digest} /></CardContent>
               </Card>
-            )}
-            <p className="text-xs text-muted-foreground">What changed &amp; the full recommendation list live in <b>Insights</b>.</p>
+            ) : !w.ai_available ? (
+              <p className="text-xs text-muted-foreground">AI narrative unavailable — relying on the numbers above.</p>
+            ) : null}
           </div>
         )
       }
@@ -284,50 +392,50 @@ function WeeklyTab() {
 }
 
 export default function PlanPage() {
-  const [tab, setTab] = useState("daily");
-  const q = usePlans();
+  const { get, set } = useQueryParams();
+  const view = get("view", "daily") === "weekly" ? "weekly" : "daily";
+  const date = get("date", "");
+
+  const dailyQ = useDailyBrief(date || undefined);
+  const weeklyQ = useWeeklyBrief(date || undefined);
+
+  const min = dailyQ.data?.min_date;
+  const max = dailyQ.data?.max_date;
+
+  const handleViewChange = (v: "daily" | "weekly") => set({ view: v === "daily" ? null : v });
+  const handleDateChange = (val: string) => set({ date: val || null });
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Plan</h1>
-        <p className="text-sm text-muted-foreground">
-          What to post and when — built from your growth blueprint + the India sale calendar. Plans only; publishing is scheduled from the queue.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Plan</h1>
+          <p className="text-sm text-muted-foreground">
+            What went well yesterday, and what to post today — grounded in your data.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex rounded-lg border bg-card p-0.5">
+            {(["daily", "weekly"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => handleViewChange(v)}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors",
+                  view === v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+          <DateFilter mode="single" value={date} onChange={handleDateChange} min={min} max={max} showArrows />
+        </div>
       </div>
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="daily">Daily</TabsTrigger>
-          <TabsTrigger value="weekly">Weekly report</TabsTrigger>
-          <TabsTrigger value="events">Events</TabsTrigger>
-        </TabsList>
 
-        <TabsContent value="daily">
-          <div className="mt-4 space-y-4">
-            <Async q={q}>
-              {(plans) => {
-                const daily = plans.filter((p): p is DailyPlan => p.plan_type === "daily");
-                return daily.length ? daily.map((p, i) => <DailyPlanCard key={i} p={p} />)
-                  : <Empty>No daily plan — run the agent or pipeline.</Empty>;
-              }}
-            </Async>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="weekly"><div className="mt-4"><WeeklyTab /></div></TabsContent>
-
-        <TabsContent value="events">
-          <div className="mt-4">
-            <Async q={q}>
-              {(plans) => {
-                const events = plans.filter((p): p is EventPlan => p.plan_type === "event");
-                return events.length ? <div className="space-y-4">{events.map((p, i) => <EventPlanCard key={i} p={p} />)}</div>
-                  : <Empty>No sale event within the next 30 days — event campaigns appear here once one enters the planning window.</Empty>;
-              }}
-            </Async>
-          </div>
-        </TabsContent>
-      </Tabs>
+      {view === "daily" ? <DailyView q={dailyQ} /> : <WeeklyView q={weeklyQ} />}
     </div>
   );
 }

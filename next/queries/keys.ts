@@ -17,4 +17,6 @@ export const queryKeys = {
   channels: () => ["channels"] as const,
   users: () => ["users"] as const,
   digest: () => ["digest"] as const,
+  dailyBrief: (date?: string | null) => ["plan-daily", date] as const,
+  weeklyBrief: (end?: string | null) => ["plan-weekly", end] as const,
 };

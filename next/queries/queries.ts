@@ -5,9 +5,9 @@ import { api } from "@/services/api";
 import { queryKeys } from "./keys";
 import type {
   AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorsResponse,
-  DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
+  DailyBrief, DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
   MerchantsResponse, OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
-  QueueResponse, UsersResponse, WeeklyResponse,
+  QueueResponse, UsersResponse, WeeklyBrief, WeeklyResponse,
 } from "@/types/api";
 
 export function useOverview() {
@@ -89,4 +89,18 @@ export function useUsers() {
 }
 export function useDigest() {
   return useQuery({ queryKey: queryKeys.digest(), queryFn: () => api.get<DigestResponse>("/digest") });
+}
+export function useDailyBrief(date?: string | null) {
+  const qs = date ? `?date=${date}` : "";
+  return useQuery({
+    queryKey: queryKeys.dailyBrief(date),
+    queryFn: () => api.get<DailyBrief>(`/plan/daily${qs}`),
+  });
+}
+export function useWeeklyBrief(end?: string | null) {
+  const qs = end ? `?end=${end}` : "";
+  return useQuery({
+    queryKey: queryKeys.weeklyBrief(end),
+    queryFn: () => api.get<WeeklyBrief>(`/plan/weekly${qs}`),
+  });
 }
