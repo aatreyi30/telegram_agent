@@ -38,14 +38,21 @@ def data_range():
 
 
 @router.get("/day")
-def day(date_str: str | None = Query(default=None, alias="date")):
+def day(date_str: str | None = Query(default=None, alias="date"),
+        end_str: str | None = Query(default=None, alias="end")):
     if not date_str:
         return ok(service.day_summary(None))
     try:
         d = date.fromisoformat(date_str)
     except ValueError:
         return fail("date must be YYYY-MM-DD", 400)
-    return ok(service.day_summary(d))
+    e = None
+    if end_str:
+        try:
+            e = date.fromisoformat(end_str)
+        except ValueError:
+            return fail("end must be YYYY-MM-DD", 400)
+    return ok(service.day_summary(d, e))
 
 
 @router.get("/drafts")
@@ -99,8 +106,11 @@ def weekly():
 
 
 @router.get("/growth")
-def growth():
-    return ok(service.growth())
+def growth(start: str | None = Query(default=None), end: str | None = Query(default=None)):
+    try:
+        return ok(service.growth(start=start, end=end))
+    except ValueError:
+        return fail("start/end must be YYYY-MM-DD", 400)
 
 
 @router.get("/digest")

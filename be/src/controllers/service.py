@@ -70,7 +70,7 @@ def delete_channel(channel_id: int, confirm: bool = False, org_id: int | None = 
     rows, classifications, extracted facts). Destructive + irreversible, so a preview
     is returned unless confirm=True. Deletes in FK-dependency order via subqueries
     (no large IN-lists, so it's safe for channels with many posts)."""
-    from src.db.models import ChannelStatSnapshot, PostMetricSnapshot
+    from src.db.models import PostMetricSnapshot
     from src.db.models_classification import PostClassification
     from src.db.models_normalization import (
         ExtractedCoupon, ExtractedLink, ExtractedPrice, NormalizedPost, SourceType)
@@ -97,7 +97,6 @@ def delete_channel(channel_id: int, confirm: bool = False, org_id: int | None = 
             "normalized_posts": _count(NormalizedPost, NormalizedPost.source_type == SourceType.OWNED,
                                        NormalizedPost.source_id.in_(post_ids)),
             "metric_snapshots": _count(PostMetricSnapshot, PostMetricSnapshot.post_id.in_(post_ids)),
-            "channel_stat_snapshots": _count(ChannelStatSnapshot, ChannelStatSnapshot.channel_id == channel_id),
         }
         if not confirm:
             return {"ok": False, "requires_confirm": True, "would_delete": counts,
@@ -113,8 +112,6 @@ def delete_channel(channel_id: int, confirm: bool = False, org_id: int | None = 
             NormalizedPost.source_id.in_(post_ids)).delete(synchronize_session=False)
         s.query(PostMetricSnapshot).filter(
             PostMetricSnapshot.post_id.in_(post_ids)).delete(synchronize_session=False)
-        s.query(ChannelStatSnapshot).filter(
-            ChannelStatSnapshot.channel_id == channel_id).delete(synchronize_session=False)
         s.query(Post).filter(Post.channel_id == channel_id).delete(synchronize_session=False)
         s.delete(ch)
         return {"ok": True, "deleted": counts}
@@ -430,18 +427,19 @@ def data_range() -> dict:
     }
 
 
-def day_summary(day=None) -> dict:
+def day_summary(day=None, end=None) -> dict:
     from src.services.analytics import day as dd
 
     with session_scope() as s:
-        return dd.summarize(s, day)
+        return dd.summarize(s, day, end)
 
 
-def growth() -> dict:
+def growth(start: str | None = None, end: str | None = None) -> dict:
     from src.services.analytics import growth as gw
 
+    su, eu = _ist_range_to_utc(start, end)
     with session_scope() as s:
-        return gw.get_growth(s)
+        return gw.get_growth(s, su, eu)
 
 
 def weekly_report(include_ai: bool = True) -> dict:
@@ -514,12 +512,19 @@ def daily_brief(date: str | None = None) -> dict:
     """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
     recommendation grounded in the recent posting trajectory (not the stale lifetime
     baseline). AI writes the narrative + slots best-effort; the numbers are
-    deterministic and fact-checked."""
+    deterministic and fact-checked.
+
+    The AI-authored part (digest + slots) is cached per (day, campaign version) as a
+    `CampaignPlan` row: the first request for a given day calls the model and persists
+    the result; every subsequent request for that SAME day reuses the stored row
+    instead of re-calling the AI. A request for a different day always plans fresh."""
     from datetime import date as date_cls, timedelta
     from src.services.analytics.day import latest_owned_date
     from src.services.planning.calendar import upcoming_events
     from src.ai.planner import generate_day_plan
     from src.ai.factcheck import check_cited_numbers
+    from src.db.models_campaign import PlanType
+    from src.services.generation.ai_execution import persist_ai_plan
 
     with session_scope() as s:
         mn, mx = _plan_date_bounds(s)
@@ -550,15 +555,43 @@ def daily_brief(date: str | None = None) -> dict:
                if traj.get("lifetime_baseline") else "")
         )
 
-        ai_res = generate_day_plan(s, day, inputs={
-            "recommended_posts": recommended,
-            "posting_windows": windows,
-            "deal_type_allocation": allocation,
-            "merchant_allocation": merchants,
-        })
-        ai_ok = bool(ai_res.get("available"))
-        plan = ai_res.get("plan") or {}
-        digest = ai_res.get("digest", "") if ai_ok else ""
+        cached = s.scalars(
+            select(CampaignPlan)
+            .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                   CampaignPlan.plan_type == PlanType.DAILY,
+                   CampaignPlan.target_date == day,
+                   CampaignPlan.is_ai_generated == True)  # noqa: E712
+            .order_by(CampaignPlan.generated_at.desc())
+        ).first()
+
+        if cached is not None:
+            # Same-day repeat request — reuse the persisted AI plan instead of
+            # burning another model call. Shape matches a fresh generation below.
+            ai_ok = True
+            plan = cached.blueprint or {}
+            digest = cached.ai_digest or ""
+            fc_status = "pass" if cached.factcheck_status == "passed" else "warn"
+        else:
+            ai_res = generate_day_plan(s, day, inputs={
+                "recommended_posts": recommended,
+                "posting_windows": windows,
+                "deal_type_allocation": allocation,
+                "merchant_allocation": merchants,
+            })
+            ai_ok = bool(ai_res.get("available"))
+            plan = ai_res.get("plan") or {}
+            digest = ai_res.get("digest", "") if ai_ok else ""
+            fc_status = None
+            if ai_ok:
+                fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
+                fc_status = "pass" if fc["status"] == "passed" else "warn"
+                row = persist_ai_plan(s, {**ai_res, "factcheck": fc})
+                if row is not None:
+                    # Pin the cache key to the day we actually planned for — the
+                    # AI's self-reported "date" inside the plan JSON isn't reliable
+                    # enough (missing/mismatched) to key the cache lookup on.
+                    row.target_date = day
+
         # cadence_why is ALWAYS the deterministic explanation so the number in the text
         # always matches the deterministic recommended_posts headline (the AI's free-text
         # rationale lives in `digest` instead, where an approximation is harmless).
@@ -566,10 +599,6 @@ def daily_brief(date: str | None = None) -> dict:
         slots = plan.get("post_slots", []) if ai_ok else []
         emphasis = plan.get("emphasis") if ai_ok else None
         watch = plan.get("watch") if ai_ok else None
-        fc_status = None
-        if ai_ok:
-            fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
-            fc_status = "pass" if fc["status"] == "passed" else "warn"
 
         evt = None
         try:

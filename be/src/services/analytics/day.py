@@ -1,8 +1,9 @@
-"""Per-day summary — 'what happened on this date' from real post data.
+"""Per-day (or date-range) summary — 'what happened' from real post data.
 
-Given an IST calendar date, summarize the owned channel's activity that day:
-per-merchant aggregates (posts, views, reactions, forwards, top post),
-post-type & merchant mix, and trailing 30-day baseline comparison.
+Given an IST calendar date, or an inclusive [start, end] range of them, summarize
+the owned channel's activity: per-merchant aggregates (posts, views, reactions,
+forwards, top post), post-type & merchant mix, and trailing 30-day baseline
+comparison.
 """
 
 from __future__ import annotations
@@ -23,6 +24,13 @@ from src.db.models_normalization import NormalizedPost, SourceType
 def _ist_bounds(day: date):
     start = datetime(day.year, day.month, day.day, tzinfo=IST)
     return start, start + timedelta(days=1)
+
+
+def _ist_range_bounds(day: date, end: date):
+    """IST bounds for the inclusive [day, end] calendar-date range."""
+    start = datetime(day.year, day.month, day.day, tzinfo=IST)
+    stop = datetime(end.year, end.month, end.day, tzinfo=IST) + timedelta(days=1)
+    return start, stop
 
 
 def _rows_between(s: Session, start, end):
@@ -62,14 +70,28 @@ def latest_owned_date(s: Session) -> date | None:
     return mx.astimezone(IST).date() if mx else None
 
 
-def summarize(s: Session, day: date | None = None) -> dict:
+def summarize(s: Session, day: date | None = None, end: date | None = None) -> dict:
+    """Summarize owned-channel activity for an IST date, or an inclusive date range.
+
+    ``end is None or end == day`` is the pre-filter fast path: a single calendar
+    day, identical to the original single-date behavior (same query window, same
+    output shape — no ``date_end`` key). ``end > day`` widens the fetch window to
+    the full ``[day, end]`` range in one query; the aggregation below is already
+    a single pass over whatever rows come back (sums + one running max + merged
+    Counters), so it produces mathematically-correct range totals/rates/mixes
+    without any extra per-day bookkeeping.
+    """
     if day is None:
         day = latest_owned_date(s)
         if day is None:
             return {"date": None, "available": False, "note": "No owned posts collected yet."}
-    start, end = _ist_bounds(day)
-    rows = list(_rows_between(s, start, end))
+    is_range = end is not None and end != day
+    start, stop = _ist_range_bounds(day, end) if is_range else _ist_bounds(day)
+    rows = list(_rows_between(s, start, stop))
     if not rows:
+        if is_range:
+            return {"date": day.isoformat(), "date_end": end.isoformat(), "available": False,
+                    "note": "No posts in this date range (IST). Pick a range within your collected range."}
         return {"date": day.isoformat(), "available": False,
                 "note": "No posts on this date (IST). Pick a date within your collected range."}
 
@@ -125,7 +147,10 @@ def summarize(s: Session, day: date | None = None) -> dict:
     type_mix = Counter(r[6] or "unclassified" for r in rows)
     merchant_mix = Counter(r[7] for r in rows if r[7])
 
-    # --- trailing 30-day baseline (excludes the day itself) ---
+    # --- trailing 30-day baseline ---
+    # Defined as "trailing 30 days before the window START" (`start`) — this is the
+    # single definition that generalizes cleanly from a single day (excludes the day
+    # itself) to a multi-day range (excludes the whole range, not just its start).
     prior_start = start - timedelta(days=30)
     prior = list(_rows_between(s, prior_start, start))
     prior_days = 30
@@ -136,7 +161,7 @@ def summarize(s: Session, day: date | None = None) -> dict:
         "window": f"trailing 30 days ({prior_start.date().isoformat()}→{day.isoformat()})",
     }
 
-    return {
+    result = {
         "date": day.isoformat(), "available": True,
         "posts": len(rows), "merchantless_count": merchantless_count,
         "total_views": total_views, "avg_views_per_post": avg_views,
@@ -150,3 +175,8 @@ def summarize(s: Session, day: date | None = None) -> dict:
                                 if baseline["avg_views_per_post"] else None),
         },
     }
+    if is_range:
+        # Extra key only present for multi-day ranges — single-day callers (and their
+        # existing response shape) are unaffected.
+        result["date_end"] = end.isoformat()
+    return result
