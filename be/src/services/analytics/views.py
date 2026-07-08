@@ -114,8 +114,8 @@ def compute(s: Session, start=None, end=None) -> dict:
     def _reduce(tups: list[tuple]) -> dict:
         n = len(tups)
         if not n:
-            return {"n": 0, "avg_views": 0, "total_views": 0, "avg_reactions": 0,
-                    "total_reactions": 0, "avg_forwards": 0, "total_forwards": 0,
+            return {"n": 0, "avg_views": 0, "median_views": 0, "total_views": 0,
+                    "total_reactions": 0, "total_forwards": 0,
                     "total_engagement": 0, "engagement_rate": 0,
                     "cta_posts": 0, "deal_posts": 0}
         v = [t[0] for t in tups]
@@ -127,12 +127,9 @@ def compute(s: Session, start=None, end=None) -> dict:
         return {
             "n": n,
             "avg_views": round(_fmean(v)),
+            "median_views": round(statistics.median(v)) if v else 0,
             "total_views": sv,
-            # reactions/forwards average <1 per post — keep 2 decimals so the hourly
-            # bars carry real signal instead of collapsing to 0/1 under int rounding.
-            "avg_reactions": round(_fmean(rct), 2),
             "total_reactions": sr,
-            "avg_forwards": round(_fmean(fwd), 2),
             "total_forwards": sf,
             "total_engagement": sr + sf,
             "engagement_rate": round((sr + sf) / sv * 100, 1) if sv else 0,
@@ -153,21 +150,23 @@ def compute(s: Session, start=None, end=None) -> dict:
     # ------- by type -------
     type_series = sorted(
         [{"label": k, **_reduce(v)} for k, v in by_type.items()],
-        key=lambda x: x["avg_views"], reverse=True)
+        key=lambda x: x["total_views"], reverse=True)
 
     # ------- by merchant (top 10) -------
     merchant_series = sorted(
         [{"label": k, **_reduce(v)} for k, v in by_merchant.items()],
         key=lambda x: x["total_views"], reverse=True)[:10]
 
-    # ------- golden hours (top 3 by avg engagement, then by avg views) -------
+    # ------- golden hours: top 3 hours by median views/post, views-only -------
+    # A per-post efficiency question, not a volume one — median (not mean) so a
+    # single viral post can't crown an hour, and a minimum sample size so a lucky
+    # post at a low-volume hour can't either. Threshold mirrors the "post_count >= 3"
+    # gate used for merchant window confidence in src/services/intelligence/merchant.py.
+    MIN_GOLDEN_HOUR_N = 3
     hour_stats = [(h, _reduce(by_hour.get(h, []))) for h in range(24) if by_hour.get(h)]
-    golden_by_engagement = sorted(hour_stats, key=lambda x: x[1]["total_engagement"], reverse=True)[:3]
-    golden_by_views = sorted(hour_stats, key=lambda x: x[1]["avg_views"], reverse=True)[:3]
-    golden_hours = {
-        "by_engagement": [{"hour": f"{h:02d}:00", **hs} for h, hs in golden_by_engagement],
-        "by_views": [{"hour": f"{h:02d}:00", **hs} for h, hs in golden_by_views],
-    }
+    eligible_hour_stats = [(h, hs) for h, hs in hour_stats if hs["n"] >= MIN_GOLDEN_HOUR_N]
+    golden_by_views = sorted(eligible_hour_stats, key=lambda x: x[1]["median_views"], reverse=True)[:3]
+    golden_hours = [{"hour": f"{h:02d}:00", **hs} for h, hs in golden_by_views]
 
     # ------- aggregate totals -------
     all_agg = _reduce([tup for _, tups in by_day.items() for tup in tups])
@@ -189,7 +188,7 @@ def compute(s: Session, start=None, end=None) -> dict:
         "by_type": type_series,
         "by_merchant": merchant_series,
         "golden_hours": golden_hours,
-        "growth": get_growth(s),
+        "growth": get_growth(s, start, end),
         "total_posts": all_agg["n"],
         "total_views": all_agg["total_views"],
         "total_reactions": all_agg["total_reactions"],
