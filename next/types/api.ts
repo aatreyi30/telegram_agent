@@ -9,13 +9,12 @@ export interface OverviewResponse {
   queue_counts: Record<string, number>; affiliate_provider: string; publishing_gates: PublishingGate[];
 }
 
-export interface GrowthDailyPoint { date: string; count: number | null; delta: number | null; }
+export interface GrowthDailyPoint { date: string; subs_end: number | null; joined: number; left: number; net: number; }
 
 export type GrowthResponse =
-  | { available: true; current: number; first: number; first_date: string; last_date: string;
-      net_change: number; span_days: number; growth_per_day: number | null;
-      growth_rate_pct: number; snapshots: number; daily: GrowthDailyPoint[]; }
-  | { available: false; reason: string; snapshots: number; };
+  | { available: true; current: number | null; joined: number; left: number; net: number; days: number;
+      first_date: string; last_date: string; daily: GrowthDailyPoint[]; }
+  | { available: false; reason: string; current: number | null; days: number; };
 
 export interface GrowthRecommendation {
   priority: number; category: string; recommendation: string; reasoning: string;
@@ -58,20 +57,18 @@ export interface InsightsResponse {
 }
 
 export interface MetricBucket {
-  label: string; n: number; avg_views: number; total_views: number;
-  avg_reactions: number; total_reactions: number; avg_forwards: number; total_forwards: number;
+  label: string; n: number; avg_views: number; median_views: number; total_views: number;
+  total_reactions: number; total_forwards: number;
   total_engagement: number; engagement_rate: number; cta_posts: number; deal_posts: number;
 }
 
-export interface GoldenHours {
-  by_engagement: (MetricBucket & { hour: string })[]; by_views: (MetricBucket & { hour: string })[];
-}
+export interface GoldenHour extends MetricBucket { hour: string; }
 
 export interface AnalyticsWindow { source: string; start: string | null; end: string | null; days: number; months: number; n: number; }
 
 export interface AnalyticsResponse {
   window: AnalyticsWindow; timeline: MetricBucket[]; by_hour: MetricBucket[]; by_weekday: MetricBucket[];
-  by_type: MetricBucket[]; by_merchant: MetricBucket[]; golden_hours: GoldenHours; growth: GrowthResponse;
+  by_type: MetricBucket[]; by_merchant: MetricBucket[]; golden_hours: GoldenHour[]; growth: GrowthResponse;
   total_posts: number; total_views: number; total_reactions: number; total_forwards: number;
   total_engagement: number; engagement_rate: number; cta_rate: number; deal_rate: number;
 }
@@ -88,8 +85,10 @@ export interface DayMerchantRow {
 export interface DayBaseline { avg_posts_per_day: number; avg_views_per_post: number; window: string; }
 
 export type DayResponse =
-  | { date: string | null; available: false; note: string; }
-  | { date: string; available: true; posts: number; merchantless_count: number;
+  // `date_end` is only present when a range (start !== end) was requested — a plain
+  // single-date lookup keeps the original shape unchanged.
+  | { date: string | null; date_end?: string; available: false; note: string; }
+  | { date: string; date_end?: string; available: true; posts: number; merchantless_count: number;
       total_views: number; avg_views_per_post: number;
       merchants: DayMerchantRow[]; type_mix: [string, number][]; merchant_mix: [string, number][];
       baseline: DayBaseline; vs_baseline: { posts_delta: number; views_delta_pct: number | null; }; };

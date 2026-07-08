@@ -32,10 +32,11 @@ export function useAnalytics(start?: string | null, end?: string | null, opts?: 
     enabled: opts?.enabled,
   });
 }
-export function useDay(date?: string | null, opts?: { enabled?: boolean }) {
+export function useDay(date?: string | null, end?: string | null, opts?: { enabled?: boolean }) {
+  const qs = date ? `?date=${date}${end ? `&end=${end}` : ""}` : "";
   return useQuery({
-    queryKey: queryKeys.day(date),
-    queryFn: () => api.get<DayResponse>(`/day${date ? `?date=${date}` : ""}`),
+    queryKey: queryKeys.day(date, end),
+    queryFn: () => api.get<DayResponse>(`/day${qs}`),
     enabled: opts?.enabled,
   });
 }
@@ -75,8 +76,13 @@ export function usePlans() {
 export function useWeekly() {
   return useQuery({ queryKey: queryKeys.weekly(), queryFn: () => api.get<WeeklyResponse>("/weekly") });
 }
-export function useGrowth() {
-  return useQuery({ queryKey: queryKeys.growth(), queryFn: () => api.get<GrowthResponse>("/growth") });
+export function useGrowth(start?: string | null, end?: string | null, opts?: { enabled?: boolean }) {
+  const qs = start && end ? `?start=${start}&end=${end}` : "";
+  return useQuery({
+    queryKey: queryKeys.growth(start, end),
+    queryFn: () => api.get<GrowthResponse>(`/growth${qs}`),
+    enabled: opts?.enabled,
+  });
 }
 export function useOrg() {
   return useQuery({ queryKey: queryKeys.org(), queryFn: () => api.get<OrgResponse>("/org") });
