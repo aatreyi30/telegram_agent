@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import httpx
 
+from src.config.settings import get_settings
 from src.services.collection.merchants.base import MerchantSource, ProductData
 
 
@@ -33,7 +34,7 @@ class RelianceDigitalSource(MerchantSource):
         with httpx.Client(
             timeout=20.0,
             follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; TGIntelBot/1.0)"},
+            headers={"User-Agent": get_settings().tme_user_agent},
         ) as client:
             resp = client.get(url)
             resp.raise_for_status()

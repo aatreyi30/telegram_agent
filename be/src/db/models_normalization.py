@@ -149,4 +149,32 @@ class ExtractedLink(Base):
     resolved_url: Mapped[str | None] = mapped_column(String(1024))
     tracking_params: Mapped[dict | None] = mapped_column(JSON)
 
+    # Resolution bookkeeping (added post-launch — see db/migrate.py _ADDITIONS).
+    # NULL = never attempted. "resolved" | "failed" | "no_match" once attempted.
+    resolution_status: Mapped[str | None] = mapped_column(String(16))
+    resolution_error: Mapped[str | None] = mapped_column(Text)
+    resolution_attempts: Mapped[int] = mapped_column(Integer, default=0)
+
     post: Mapped["NormalizedPost"] = relationship(back_populates="links")
+
+
+class DiscoveredDomain(Base):
+    """Dynamic, generic fallback for merchant attribution.
+
+    When a resolved link lands on a domain that isn't in the static
+    ``detect_merchant_key`` whitelist (registry.py), we don't discard it as
+    "unknown" — we capture the registrable domain itself so the post still
+    gets real attribution, and log it here for later human/AI review. This is
+    intentionally separate from the static registry (never auto-promoted into
+    it) per product decision to keep that seed list manually curated.
+    """
+
+    __tablename__ = "discovered_domains"
+
+    domain: Mapped[str] = mapped_column(String(255), primary_key=True)
+    merchant_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_url: Mapped[str | None] = mapped_column(String(1024))
+    sample_post_id: Mapped[int | None] = mapped_column(Integer)
