@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.db.models import CompetitorPost
+from src.db.models import Competitor, CompetitorPost
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.services.analytics.day import _post_type
 from src.services.analytics.periods import ist_day_bounds_utc, to_ist
@@ -271,6 +271,59 @@ def posting_consistency(s: Session, competitor_id: int, days: int = 30) -> dict:
         "stdev": round(statistics.pstdev(daily_counts), 2),
         "variance": round(statistics.pvariance(daily_counts), 2),
     }
+
+
+def dashboard_trends(s: Session, days: int = 30) -> dict:
+    """Posts/day and views/day for EVERY competitor at once, sharing one calendar
+    window (anchored to the most recent post across all competitors, not per-competitor
+    like `_window()` — a stale competitor's "last N days" must not silently be an old
+    window while an active one's is current, or the comparison chart would mislead)."""
+    comps = s.execute(select(Competitor.id, Competitor.username)).all()
+    if not comps:
+        return {"dates": [], "posting_trend": [], "views_trend": [], "competitors": []}
+
+    end_day = _latest_date_all(s)
+    if end_day is None:
+        return {"dates": [], "posting_trend": [], "views_trend": [], "competitors": []}
+    first_day = end_day - timedelta(days=days - 1)
+    start_utc, _ = ist_day_bounds_utc(first_day)
+    _, end_utc = ist_day_bounds_utc(end_day)
+
+    rows = s.execute(
+        select(CompetitorPost.competitor_id, CompetitorPost.posted_at, CompetitorPost.views)
+        .where(CompetitorPost.posted_at >= start_utc, CompetitorPost.posted_at < end_utc)
+    ).all()
+
+    post_counts: dict[tuple[int, date], int] = defaultdict(int)
+    view_totals: dict[tuple[int, date], int] = defaultdict(int)
+    for cid, posted_at, views in rows:
+        if posted_at is None:
+            continue
+        d = to_ist(posted_at).date()
+        post_counts[(cid, d)] += 1
+        view_totals[(cid, d)] += (views or 0)
+
+    names = {cid: username for cid, username in comps}
+    dates = list(_day_range(first_day, days))
+    posting_rows = [
+        {"date": d.isoformat(), **{names[cid]: post_counts.get((cid, d), 0) for cid, _ in comps}}
+        for d in dates
+    ]
+    views_rows = [
+        {"date": d.isoformat(), **{names[cid]: view_totals.get((cid, d), 0) for cid, _ in comps}}
+        for d in dates
+    ]
+    return {
+        "dates": [d.isoformat() for d in dates],
+        "posting_trend": posting_rows,
+        "views_trend": views_rows,
+        "competitors": [{"id": cid, "name": username} for cid, username in comps],
+    }
+
+
+def _latest_date_all(s: Session) -> date | None:
+    mx = s.scalar(select(func.max(CompetitorPost.posted_at)))
+    return to_ist(mx).date() if mx else None
 
 
 def all_trends(s: Session, competitor_id: int, days: int = 30) -> dict:

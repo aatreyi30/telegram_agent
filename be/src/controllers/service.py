@@ -304,6 +304,14 @@ def competitor_trends(competitor_id: int, days: int = 30) -> dict:
         return ct.all_trends(s, competitor_id, days=days)
 
 
+def competitor_dashboard_trends(days: int = 30) -> dict:
+    """Posts/day and views/day for every competitor at once, shared calendar window."""
+    from src.services.analytics import competitor_trends as ct
+
+    with session_scope() as s:
+        return ct.dashboard_trends(s, days=days)
+
+
 _COMPETITOR_CATEGORIES = ("platform", "channel")
 
 

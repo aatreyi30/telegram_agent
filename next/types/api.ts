@@ -169,6 +169,15 @@ export interface CompetitorTopPost {
 
 export interface CompetitorHistogramBucket { bucket?: string; label?: string; count?: number; [key: string]: any; }
 
+// GET /competitor-dashboard/trends — posts/day & views/day for every competitor at
+// once, sharing one calendar window, keyed by competitor name for direct MultiLineChart use.
+export interface CompetitorDashboardTrendsResponse {
+  dates: string[];
+  posting_trend: CompetitorTrendPoint[];
+  views_trend: CompetitorTrendPoint[];
+  competitors: { id: number; name: string }[];
+}
+
 export interface CompetitorTrendsResponse {
   posting_trend: CompetitorTrendPoint[];
   views_trend: CompetitorTrendPoint[];

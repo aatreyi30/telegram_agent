@@ -3,17 +3,17 @@
 import { useMemo } from "react";
 import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { InformationCircleIcon } from "@hugeicons/core-free-icons";
+import { ArrowRight01Icon, InformationCircleIcon } from "@hugeicons/core-free-icons";
 import { differenceInCalendarDays } from "date-fns";
 import { Async, Empty } from "@/components/Async";
 import { CategoryBadge } from "@/components/CategoryBadge";
-import { MultiLineChart, StackedBarsChart } from "@/components/charts";
+import { BarsChart, MultiLineChart, StackedBarsChart } from "@/components/charts";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { StatCard } from "@/components/StatCard";
-import { useCompetitorDashboard, useDataRange } from "@/queries/queries";
+import { useCompetitorDashboard, useCompetitorDashboardTrends, useDataRange } from "@/queries/queries";
 import type { CompetitorEntity } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -109,35 +109,38 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
                 </Tooltip>
               </span>
             </TableHead>
+            <TableHead className="text-right">Trends</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {entities.map((e) => (
-            <TableRow key={e.name} className={cn("hover:bg-muted/50", e.id != null && "cursor-pointer")}>
+            <TableRow key={e.name} className="hover:bg-muted/50">
               <TableCell className="font-medium">
-                {e.id != null ? (
-                  <Link href={`/competitors/${e.id}`} className="flex items-center gap-2 hover:underline">
-                    <span className="truncate">{e.name}</span>
-                    <CategoryBadge category={e.category} />
-                    <ProcessingBadge e={e} />
-                  </Link>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <span className="truncate">{e.name}</span>
-                    <CategoryBadge category={e.category} />
-                    <ProcessingBadge e={e} />
-                  </div>
-                )}
+                <div className="flex items-center gap-2">
+                  <span className="truncate">{e.name}</span>
+                  <CategoryBadge category={e.category} />
+                  <ProcessingBadge e={e} />
+                </div>
               </TableCell>
               <TableCell>{fmtCompact(e.subscribers)}</TableCell>
               <TableCell><PostsPerDayCell e={e} /></TableCell>
               <TableCell>{fmtNum(e.posts)}</TableCell>
               <TableCell>{fmtNum(e.avg_views_per_post)}</TableCell>
+              <TableCell className="text-right">
+                {e.id != null && (
+                  <Link
+                    href={`/competitors/${e.id}`}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                  >
+                    View trends <HugeiconsIcon icon={ArrowRight01Icon} size={14} />
+                  </Link>
+                )}
+              </TableCell>
             </TableRow>
           ))}
           {entities.length === 0 && (
             <TableRow>
-              <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+              <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                 No competitors in this category.
               </TableCell>
             </TableRow>
@@ -171,6 +174,7 @@ export default function CompetitorDashboardPage() {
   }, [preset, startParam, endParam, min, max]);
 
   const q = useCompetitorDashboard(window);
+  const trendsQ = useCompetitorDashboardTrends(30);
 
   const setTab = (v: string) => set({ tab: v === "all" ? null : v });
 
@@ -248,6 +252,29 @@ export default function CompetitorDashboardPage() {
           });
           const dealKeys = dealTypes.map((t) => ({ key: t, name: t }));
 
+          const rankingData = [...entities]
+            .sort((a: any, b: any) => (b.posts_per_day ?? 0) - (a.posts_per_day ?? 0))
+            .map((e: any) => ({ label: e.name, posts_per_day: e.posts_per_day ?? 0 }));
+
+          const coverageData = entities.map((e: any) => ({
+            label: e.name, coverage: Math.round((e.merchant_coverage ?? 0) * 1000) / 10,
+          }));
+
+          const merchantTotals = new Map<string, number>();
+          entities.forEach((e: any) => {
+            Object.entries(e.merchant_mix ?? {}).forEach(([m, n]) => {
+              merchantTotals.set(m, (merchantTotals.get(m) ?? 0) + (n as number));
+            });
+          });
+          const topMerchants = Array.from(merchantTotals.entries())
+            .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([m]) => m);
+          const merchantShareData = entities.map((e: any) => {
+            const row: any = { label: e.name };
+            topMerchants.forEach((m) => { row[m] = e.merchant_mix?.[m] ?? 0; });
+            return row;
+          });
+          const merchantShareKeys = topMerchants.map((m) => ({ key: m, name: m }));
+
           return (
             <div className="space-y-4">
               <div className="grid gap-6 sm:grid-cols-3">
@@ -290,6 +317,60 @@ export default function CompetitorDashboardPage() {
                     <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Posting by hour (IST)</CardTitle></CardHeader>
                     <CardContent>
                       <MultiLineChart data={hourly} series={hourSeries} unit=" posts" height={220} />
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
+              {entities.length >= 2 && (
+                <Card>
+                  <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Competitor ranking</CardTitle>
+                    <p className="text-xs text-muted-foreground">Ranked by posts/day.</p></CardHeader>
+                  <CardContent>
+                    <BarsChart data={rankingData} dataKey="posts_per_day" unit="/day" height={260} />
+                  </CardContent>
+                </Card>
+              )}
+
+              {entities.length >= 2 && (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <Card>
+                    <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Merchant coverage</CardTitle>
+                      <p className="text-xs text-muted-foreground">Share of extracted links resolved to a known merchant.</p></CardHeader>
+                    <CardContent>
+                      <BarsChart data={coverageData} dataKey="coverage" unit="%" height={240} />
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Merchant share by competitor</CardTitle>
+                      <p className="text-xs text-muted-foreground">Top 8 merchants overall.</p></CardHeader>
+                    <CardContent>
+                      <StackedBarsChart data={merchantShareData} keys={merchantShareKeys} height={240} />
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
+              {trendsQ.data && trendsQ.data.competitors.length >= 2 && (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <Card>
+                    <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Posting trend (30d)</CardTitle></CardHeader>
+                    <CardContent>
+                      <MultiLineChart
+                        data={trendsQ.data.posting_trend.map((r) => ({ ...r, label: r.date }))}
+                        series={trendsQ.data.competitors.map((c) => ({ key: c.name, name: c.name }))}
+                        unit=" posts" height={240}
+                      />
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Views trend (30d)</CardTitle></CardHeader>
+                    <CardContent>
+                      <MultiLineChart
+                        data={trendsQ.data.views_trend.map((r) => ({ ...r, label: r.date }))}
+                        series={trendsQ.data.competitors.map((c) => ({ key: c.name, name: c.name }))}
+                        unit=" views" height={240}
+                      />
                     </CardContent>
                   </Card>
                 </div>

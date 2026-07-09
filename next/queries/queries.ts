@@ -4,7 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { queryKeys } from "./keys";
 import type {
-  AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorsResponse, CompetitorTrendsResponse,
+  AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorDashboardTrendsResponse,
+  CompetitorsResponse, CompetitorTrendsResponse,
   DailyBrief, DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
   OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
   QueueResponse, UsersResponse, WeeklyBrief, WeeklyResponse,
@@ -72,6 +73,12 @@ export function useCompetitorTrends(competitorId: number, days: number = 30) {
     queryKey: queryKeys.competitorTrends(competitorId, days),
     queryFn: () => api.get<CompetitorTrendsResponse>(`/competitors/${competitorId}/trends?days=${days}`),
     enabled: !!competitorId,
+  });
+}
+export function useCompetitorDashboardTrends(days: number = 30) {
+  return useQuery({
+    queryKey: queryKeys.competitorDashboardTrends(days),
+    queryFn: () => api.get<CompetitorDashboardTrendsResponse>(`/competitor-dashboard/trends?days=${days}`),
   });
 }
 export function usePlans() {

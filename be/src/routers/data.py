@@ -115,6 +115,11 @@ def competitor_dashboard(window: int | None = Query(default=None, description="W
     return ok(service.competitor_dashboard(window_days=window))
 
 
+@router.get("/competitor-dashboard/trends")
+def competitor_dashboard_trends(days: int = Query(default=30, description="Trend window in days")):
+    return ok(service.competitor_dashboard_trends(days))
+
+
 @router.get("/competitors/{competitor_id}/trends")
 def competitor_trends(competitor_id: int, days: int = Query(default=30, description="Trend window in days")):
     result = service.competitor_trends(competitor_id, days)
