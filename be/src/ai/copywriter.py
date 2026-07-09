@@ -40,6 +40,5 @@ class Copywriter:
                 if isinstance(t, str) and t.startswith("coupon:"):
                     product["coupon"] = t.split(":", 1)[1]
             style = channel_style(s)
-        user = (f"{_INSTRUCTIONS}\n\nPRODUCT:\n{to_json(product)}\n\n"
-                f"CHANNEL STYLE:\n{to_json(style)}")
-        return self.ai.complete(user, max_tokens=600, effort="low")
+        user = f"PRODUCT:\n{to_json(product)}\n\nCHANNEL STYLE:\n{to_json(style)}"
+        return self.ai.complete(user, system_extra=_INSTRUCTIONS, max_tokens=600, effort="low")
