@@ -22,7 +22,6 @@ from src.db.models_learning import ChannelStyleProfile, PostTypePerformance, LEA
 from src.db.models_competitor_intel import (
     CompetitorBenchmark,
     CompetitorProfile,
-    CompetitorSignal,
     COMPETITOR_INTEL_VERSION,
 )
 
@@ -84,6 +83,31 @@ def _entity_name(prefix: str, cp: CompetitorProfile | None, cid: int) -> str:
     return prefix
 
 
+_SUBSCRIBER_SUFFIXES = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+
+
+def _parse_subscribers(text: str | None) -> int | None:
+    """Parse the public t.me/s subscriber count string (e.g. "1.2K", "45,231",
+    "980") into an int. Not guaranteed numeric/parseable — returns None rather
+    than guessing when the format doesn't match, per this project's convention
+    of showing unavailable data as unavailable (see UNAVAILABLE/_UNAVAILABLE_NOTE)."""
+    if not text:
+        return None
+    t = text.strip().replace(",", "")
+    if not t:
+        return None
+    multiplier = 1
+    suffix = t[-1].upper()
+    if suffix in _SUBSCRIBER_SUFFIXES:
+        multiplier = _SUBSCRIBER_SUFFIXES[suffix]
+        t = t[:-1]
+    try:
+        value = float(t)
+    except ValueError:
+        return None
+    return int(round(value * multiplier))
+
+
 def compare(s: Session, max_competitors: int = 6, window_days: int | None = None) -> dict:
     cutoff = None
     if window_days and window_days > 0:
@@ -107,7 +131,6 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
     if len(owned_dates) < min(MIN_POSTS, 2) if cutoff else MIN_POSTS:
         return {
             "entities": [],
-            "signals": [],
             "unavailable": UNAVAILABLE,
             "note": "Not enough owned posts in the selected window." if cutoff else "Not enough owned posts collected yet.",
             "metrics": STYLE_METRICS + ["posts_per_day", "avg_views_per_post"],
@@ -168,21 +191,6 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
     entities.append(owned)
 
     # ------------------------------------------------------------------ #
-    # Signals (always full-window)
-    # ------------------------------------------------------------------ #
-    signals = [
-        {
-            "type": sig.signal_type, "competitor": sig.username, "kind": sig.kind,
-            "description": sig.description, "confidence": sig.confidence,
-        }
-        for sig in s.scalars(
-            select(CompetitorSignal)
-            .where(CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorSignal.confidence.desc())
-        ).all()
-    ]
-
-    # ------------------------------------------------------------------ #
     # Competitor entities
     # ------------------------------------------------------------------ #
     # Pre-fetch benchmarks grouped by competitor_id
@@ -195,6 +203,12 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
             "dimension": b.dimension, "owned_value": b.owned_value,
             "competitor_value": b.competitor_value, "delta": b.delta,
         })
+
+    # Pre-fetch subscriber counts (public t.me/s scrape, not guaranteed numeric)
+    subscribers_by_comp: dict[int, int | None] = {
+        c.id: _parse_subscribers(c.subscribers_text)
+        for c in s.scalars(select(Competitor)).all()
+    }
 
     if cutoff:
         # ------------------------------------------------------------------ #
@@ -230,6 +244,7 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
                 ),
                 "is_owned": False,
                 "is_window_filtered": True,
+                "subscribers": subscribers_by_comp.get(cid),
             }
             ent.update(bs)
             # override tenure label to reflect the window filter
@@ -269,6 +284,7 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
         for cp in profiles[:max_competitors]:
             ent: dict = {
                 "name": cp.username, "is_owned": False, "is_window_filtered": False,
+                "subscribers": subscribers_by_comp.get(cp.competitor_id),
                 "posts": cp.post_count, "window_days": cp.span_days,
                 "avg_views_per_post": cp.avg_views, "posts_per_day": cp.posts_per_day,
                 "avg_text_len": cp.avg_text_len, "emoji_rate": cp.emoji_rate,
@@ -295,7 +311,6 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
 
     return {
         "entities": entities,
-        "signals": signals,
         "unavailable": UNAVAILABLE,
         "note": _UNAVAILABLE_NOTE,
         "metrics": STYLE_METRICS + ["posts_per_day", "avg_views_per_post"],

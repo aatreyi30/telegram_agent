@@ -226,18 +226,17 @@ def competitors() -> dict:
     with session_scope() as s:
         return {
             "profiles": ctx.competitor_profiles(s),
-            "signals": ctx.competitor_signals(s),
         }
 
 
 def competitor_dashboard(window_days: int | None = None) -> dict:
-    """Unified competitor dashboard — profiles, benchmarks, signals, grouped by category.
+    """Unified competitor dashboard — profiles + benchmarks, grouped by category.
 
     ``window_days`` when set filters basic stats to the last N days (like comparison).
     """
     from src.services.analytics import comparison as cmp
     from src.db.models_competitor_intel import (
-        CompetitorProfile, CompetitorBenchmark, CompetitorSignal,
+        CompetitorProfile, CompetitorBenchmark,
         COMPETITOR_INTEL_VERSION,
     )
 
@@ -276,7 +275,6 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
             else:
                 channel_ents.append(e)
 
-        signals = comp.get("signals", [])
         unavailable = comp.get("unavailable", [])
         note = comp.get("note", "")
         metrics = comp.get("metrics", [])
@@ -286,26 +284,13 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
                 "total": len(entities) - 1,  # exclude owned
                 "platform": len(platform_ents),
                 "channel": len(channel_ents),
-                "signals": len(signals),
             },
             "platform": platform_ents,
             "channel": channel_ents,
-            "signals": signals,
             "unavailable": unavailable,
             "note": note,
             "metrics": metrics,
             "applied_window": window_days,
-        }
-
-
-def merchants() -> dict:
-    with session_scope() as s:
-        coverage = ctx.owned_merchant_coverage(s)
-        return {
-            "profiles": ctx.merchant_profiles(s),
-            "coverage": {"owned": coverage},
-            "opportunities": ctx.merchant_opportunities(s),
-            "mix": ctx.merchant_mix(s, owned_coverage_pct=coverage["pct"]),
         }
 
 

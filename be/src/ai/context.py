@@ -16,7 +16,6 @@ from src.db.models import Channel
 from src.db.models_competitor_intel import (
     COMPETITOR_INTEL_VERSION,
     CompetitorProfile,
-    CompetitorSignal,
 )
 from src.db.models_growth import GROWTH_VERSION, GrowthRecommendation, GrowthStrategy
 from src.db.models_intelligence import (
@@ -238,14 +237,6 @@ def merchant_mix(s: Session, owned_coverage_pct: float | None = None) -> dict:
     return {"merchants": merchants_sorted, "channels": channels}
 
 
-def competitor_signals(s: Session) -> list[dict]:
-    return [{"type": sig.signal_type, "competitor": sig.username, "kind": sig.kind,
-             "description": sig.description, "confidence": sig.confidence}
-            for sig in s.scalars(select(CompetitorSignal)
-                .where(CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION)
-                .order_by(CompetitorSignal.confidence.desc()))]
-
-
 def competitor_profiles(s: Session) -> list[dict]:
     return [{
         "competitor": p.username, "posts": p.post_count, "span_days": p.span_days,
@@ -273,7 +264,6 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
         "what_changed_and_why": reasoning_insights(s),
         "growth_recommendations": growth_recommendations(s),
         "post_type_performance": post_type_performance(s),
-        "competitor_signals": competitor_signals(s),
         "merchant_opportunities": merchant_opportunities(s),
         "channel_style": channel_style(s),
     }

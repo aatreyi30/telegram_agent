@@ -25,7 +25,6 @@ from collections import Counter
 from src.db.models_competitor_intel import (
     COMPETITOR_INTEL_VERSION,
     CompetitorProfile,
-    CompetitorSignal,
 )
 from src.db.models_growth import (
     GROWTH_VERSION,
@@ -363,30 +362,7 @@ class GrowthEngine(BaseCollector):
             reasoning = narrate("why to prioritize this merchant", text, ev, fallback)
             rec("merchant", text, reasoning, ev, lr.confidence, impact=0.4)
 
-        # (8) frequency vs competitors (Phase 5 threats)
-        threats = s.scalars(
-            select(CompetitorSignal).where(
-                CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION,
-                CompetitorSignal.signal_type == "threat",
-                CompetitorSignal.kind == "higher_posting_cadence",
-            ).order_by(CompetitorSignal.confidence.desc())
-        ).all()
-        if threats:
-            t = threats[0]
-            ev = t.evidence or {}
-            cppd = ev.get("competitor_posts_per_day")
-            oppd = ev.get("owned_posts_per_day_same_window")
-            uname = t.username or "a category leader"
-            text = (f"Raise posting cadence in peak windows: {uname} posted ~{cppd}/day vs your "
-                    f"~{oppd}/day in the same window."
-                    if cppd and oppd else
-                    "Increase posting cadence during peak windows to match category leaders.")
-            rec("frequency", text,
-                f"{t.description} Sustained higher cadence by leaders can crowd out your reach.",
-                ev, t.confidence, impact=0.6,
-                outcome="More impressions during high-competition windows.")
-
-        # (9) competitor patterns — what similar, high-sample competitors emphasize
+        # (8) competitor patterns — what similar, high-sample competitors emphasize
         #     that we underuse, CROSS-CHECKED against our own performance so we never
         #     recommend copying something our own data shows hurts us.
         own_mix = {p["post_type"]: (p.get("current_share") or 0.0) for p in (blueprint.get("content_mix") or [])}
@@ -437,7 +413,7 @@ class GrowthEngine(BaseCollector):
                 emitted += 1
                 break
 
-        # (10) content diversity (recent 30d concentration)
+        # (9) content diversity (recent 30d concentration)
         div = self._recent_diversity(s, now)
         if div and div["top_share"] > 0.7:
             rec("diversity",

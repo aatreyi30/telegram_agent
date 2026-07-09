@@ -1,7 +1,7 @@
 """AI daily / weekly growth briefing.
 
-Turns the verified engine outputs (reasoning, growth recs, competitor signals,
-merchant opportunities) into the operator's plain-language morning briefing.
+Turns the verified engine outputs (reasoning, growth recs, merchant
+opportunities) into the operator's plain-language morning briefing.
 Grounded: the model only narrates the data bundle it is given.  Falls back to
 a local template-based narrative when the AI API is unavailable or rate-limited.
 """
@@ -70,11 +70,6 @@ class BriefingGenerator:
             for r in self._pick(recs, "post_type", "frequency", "diversity", "timing")[:3]:
                 lines.append(f"  * {r['recommendation']}")
 
-        sigs = ctx.get("competitor_signals", [])
-        top_sig = sigs[0] if sigs else None
-        if top_sig:
-            lines.append(f"\nCompetitor note: {top_sig['description']}")
-
     def _fallback_daily(self, ctx: dict, lines: list[str]) -> None:
         ch = ctx.get("channel", {})
         sub = ch.get("subscribers")
@@ -93,11 +88,6 @@ class BriefingGenerator:
             lines.append("\nDo today:")
             for r in recs[:3]:
                 lines.append(f"  * {r['recommendation']}")
-
-        sigs = ctx.get("competitor_signals", [])
-        top_sig = sigs[0] if sigs else None
-        if top_sig:
-            lines.append(f"\nWatch: {top_sig['description']}")
 
     @staticmethod
     def _type_label(pt: str) -> str:

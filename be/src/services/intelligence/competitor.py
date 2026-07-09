@@ -1,13 +1,14 @@
 """Competitor Intelligence Engine (Phase 5).
 
 Builds behaviour-first competitor profiles, benchmarks our channel against each
-competitor, computes content-style similarity, and raises evidence-backed
-threats/opportunities. Consumes metrics (does not compute raw metrics or scrape).
+competitor, and computes content-style similarity. Consumes metrics (does not
+compute raw metrics or scrape).
 
 Honesty (README/15 core principle — never a number without WHY, and no insight
-without evidence): signals are gated by a minimum competitor sample size, since
-t.me/s only exposes a recent-post snapshot; below that we withhold the signal.
-Forwards/reactions and business categories are unavailable and are not invented.
+without evidence): benchmarks are gated by a minimum competitor sample size,
+since t.me/s only exposes a recent-post snapshot; below that we withhold the
+comparison. Forwards/reactions and business categories are unavailable and are
+not invented.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from src.db.models_competitor_intel import (
     COMPETITOR_INTEL_VERSION,
     CompetitorBenchmark,
     CompetitorProfile,
-    CompetitorSignal,
 )
 from src.db.session import session_scope
 from src.services.events import Event, EventType, get_event_bus
@@ -33,8 +33,8 @@ from src.services.metrics.competitor_metrics import (
 logger = get_logger(__name__)
 
 # t.me/s gives a recent-post snapshot; below this many posts we don't trust
-# cadence/mix comparisons enough to raise strategic signals.
-MIN_SAMPLE_FOR_SIGNALS = 20
+# cadence/mix comparisons enough to compute a benchmark.
+MIN_SAMPLE_FOR_BENCHMARKS = 20
 FULL_CONFIDENCE_N = 30
 
 BENCHMARK_DIMS = [
@@ -91,10 +91,9 @@ class CompetitorIntelligenceEngine(BaseCollector):
             return result
 
         owned_style = _style_vector(owned)
-        signals = self._detect_signals(owned, owned_dates, comp_summaries)
 
         with session_scope() as s:
-            for model in (CompetitorSignal, CompetitorBenchmark, CompetitorProfile):
+            for model in (CompetitorBenchmark, CompetitorProfile):
                 s.query(model).filter(
                     model.intel_version == COMPETITOR_INTEL_VERSION
                 ).delete()
@@ -126,7 +125,7 @@ class CompetitorIntelligenceEngine(BaseCollector):
                 result.added += 1
 
                 # benchmark rows (only for competitors with a meaningful sample)
-                if n >= MIN_SAMPLE_FOR_SIGNALS:
+                if n >= MIN_SAMPLE_FOR_BENCHMARKS:
                     for dim in BENCHMARK_DIMS:
                         ov, cv = owned.get(dim), summ.get(dim)
                         delta = (cv - ov) if (ov is not None and cv is not None) else None
@@ -136,28 +135,12 @@ class CompetitorIntelligenceEngine(BaseCollector):
                             competitor_value=cv, delta=delta, computed_at=now,
                         ))
 
-            for sig in signals:
-                s.add(CompetitorSignal(
-                    intel_version=COMPETITOR_INTEL_VERSION,
-                    competitor_id=sig["competitor_id"], username=sig["username"],
-                    signal_type=sig["signal_type"], kind=sig["kind"],
-                    description=sig["description"], evidence=sig["evidence"],
-                    confidence=sig["confidence"], detected_at=now,
-                ))
-
         self.bus.publish(Event(
             event_type=EventType.COMPETITOR_STRATEGY_UPDATED, entity_type="competitor_set",
             entity_id=str(COMPETITOR_INTEL_VERSION),
-            data={"competitors": len(comp_summaries), "signals": len(signals)}, job_id=job.id,
+            data={"competitors": len(comp_summaries)}, job_id=job.id,
         ))
-        for sig in signals:
-            etype = (EventType.COMPETITOR_THREAT_DETECTED if sig["signal_type"] == "threat"
-                     else EventType.COMPETITOR_OPPORTUNITY_DETECTED)
-            self.bus.publish(Event(
-                event_type=etype, entity_type="competitor",
-                entity_id=str(sig["competitor_id"]), data={"kind": sig["kind"]}, job_id=job.id,
-            ))
-        logger.info("[competitor_intel] %d profiles, %d signals", len(comp_summaries), len(signals))
+        logger.info("[competitor_intel] %d profiles", len(comp_summaries))
         return result
 
     # ------------------------------------------------------------------ #
@@ -175,60 +158,3 @@ class CompetitorIntelligenceEngine(BaseCollector):
         count = hi - lo
         span_days = max((end - start).days, 0) + 1
         return round(count / span_days, 3)
-
-    def _detect_signals(self, owned: dict, owned_dates: list, comp_summaries: dict) -> list[dict]:
-        signals: list[dict] = []
-        owned_mix = owned.get("deal_mix") or {}
-        owned_total = sum(owned_mix.values()) or 1
-        owned_share = {k: v / owned_total for k, v in owned_mix.items()}
-
-        for cid, summ in comp_summaries.items():
-            n = summ["post_count"]
-            if n < MIN_SAMPLE_FOR_SIGNALS:
-                continue  # withhold signals below trustworthy sample
-            conf = round(min(1.0, n / FULL_CONFIDENCE_N), 3)
-            uname = summ["label"]
-
-            # THREAT: competitor posts markedly more often than us — compared over
-            # the SAME window (competitor's observed date range), not full history.
-            cppd = summ.get("posts_per_day") or 0.0
-            owned_ppd_window = self._owned_cadence_in_window(
-                owned_dates, summ.get("first_posted_at"), summ.get("last_posted_at")
-            )
-            if owned_ppd_window and owned_ppd_window > 0 and cppd > 1.5 * owned_ppd_window:
-                signals.append({
-                    "competitor_id": cid, "username": uname, "signal_type": "threat",
-                    "kind": "higher_posting_cadence",
-                    "description": (
-                        f"{uname} posts ~{cppd}/day vs our ~{owned_ppd_window}/day "
-                        "over the same window."
-                    ),
-                    "evidence": {"competitor_posts_per_day": cppd,
-                                 "owned_posts_per_day_same_window": owned_ppd_window,
-                                 "competitor_sample": n,
-                                 "window": [str(summ.get("first_posted_at")), str(summ.get("last_posted_at"))]},
-                    "confidence": conf,
-                })
-
-            # OPPORTUNITY: a DISTINCTIVE deal-type the competitor emphasizes that we
-            # underuse. Skip the 'baseline' catch-all cluster — it is not a deal type.
-            comp_mix = summ.get("deal_mix") or {}
-            comp_total = sum(comp_mix.values()) or 1
-            for cluster, cnt in comp_mix.items():
-                if cluster is None or cluster.startswith("baseline"):
-                    continue
-                comp_sh = cnt / comp_total
-                our_sh = owned_share.get(cluster, 0.0)
-                if comp_sh >= 0.25 and comp_sh > 2 * our_sh:
-                    signals.append({
-                        "competitor_id": cid, "username": uname, "signal_type": "opportunity",
-                        "kind": "underused_deal_type",
-                        "description": (
-                            f"{uname} allocates {int(comp_sh*100)}% of posts to "
-                            f"'{cluster}' vs our {int(our_sh*100)}%."
-                        ),
-                        "evidence": {"cluster": cluster, "competitor_share": round(comp_sh, 3),
-                                     "owned_share": round(our_sh, 3), "competitor_sample": n},
-                        "confidence": conf,
-                    })
-        return signals

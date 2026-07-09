@@ -49,20 +49,25 @@ def _isolated_db():
 
 
 def test_merchants_mix_contract():
-    from src.controllers import service
+    # The /api/merchants HTTP route (and its service.merchants() facade) was
+    # removed as a UI-only cut, but the underlying merchant intelligence
+    # engine + grounding context (src.ai.context) stay fully intact — this
+    # test now exercises those directly.
+    from src.ai import context as ctx
+    from src.db.session import session_scope
 
-    result = service.merchants()
+    with session_scope() as s:
+        profiles = ctx.merchant_profiles(s)
+        assert len(profiles) == 2
+        assert "price_sample_size" in profiles[0]
 
-    profiles = result["profiles"]
-    assert len(profiles) == 2
-    assert "price_sample_size" in profiles[0]
+        coverage = ctx.owned_merchant_coverage(s)
+        assert coverage["total"] == 10
+        assert coverage["resolved"] == 7
+        assert coverage["pct"] == pytest.approx(0.7)
 
-    coverage = result["coverage"]["owned"]
-    assert coverage["total"] == 10
-    assert coverage["resolved"] == 7
-    assert coverage["pct"] == pytest.approx(0.7)
+        mix = ctx.merchant_mix(s, owned_coverage_pct=coverage["pct"])
 
-    mix = result["mix"]
     channels = {c["name"]: c for c in mix["channels"]}
     assert "You" in channels
     you = channels["You"]

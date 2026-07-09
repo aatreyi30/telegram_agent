@@ -78,7 +78,7 @@ def test_me_returns_user(client, token):
 # ------------------------- data + pagination ------------------------- #
 def test_data_endpoints_ok_with_token(client, token):
     for path in ["/api/overview", "/api/insights", "/api/analytics", "/api/competitors",
-                 "/api/merchants", "/api/plans"]:
+                 "/api/plans"]:
         assert client.get(path, headers=_auth(token)).status_code == 200, path
 
 
