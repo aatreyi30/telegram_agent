@@ -1,9 +1,11 @@
 # be/src/services/analytics/daily_report.py
 """Deterministic day-wise aggregator — persists DailyChannelReport rows.
 
-Owned reports are computed directly from Post rows for the IST day. day.py's
-summarize() is reused for composition context, but the numeric spine here is
-independent and exact so it is testable and stable.
+Owned reports are computed from day.py's `_rows_between` — the same
+INNER JOIN Post->NormalizedPost(source_type=OWNED) query used by /day and
+/analytics — so this is the single source of truth for "owned posts on IST
+day D" across the Plan page, /day, and /analytics. day.py's summarize() is
+also reused for composition context (merchant/type mix).
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from statistics import fmean, median
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.db.models import Channel, Post
+from src.db.models import Channel
 from src.db.models_report import DailyChannelReport, REPORT_VERSION, ReportSourceType
 from src.services.analytics.periods import IST
 
@@ -31,40 +33,45 @@ def _owned_channel(s: Session) -> Channel | None:
 
 
 def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> DailyChannelReport:
+    from src.services.analytics.day import _rows_between
+
     start, end = _ist_bounds(day)
     ch = None
     if channel_id is None:
         ch = _owned_channel(s)
         channel_id = ch.id if ch else None
-    q = select(Post).where(Post.posted_at >= start, Post.posted_at < end)
-    if channel_id is not None:
-        q = q.where(Post.channel_id == channel_id)
-    posts = list(s.scalars(q))
+    # Single source of truth for "owned posts in [start, end)": the same
+    # INNER JOIN Post->NormalizedPost(source_type=OWNED) query used by
+    # /day and /analytics, so this card can never disagree with those pages
+    # for the same calendar date.
+    rows = list(_rows_between(s, start, end, channel_id=channel_id))
+    # row shape: (id, posted_at, views, text, reactions_total, forwards,
+    #             merchant_key, has_coupon, is_multi_deal, tg_message_id)
 
-    views = [p.views or 0 for p in posts]
-    reactions = sum(p.reactions_total or 0 for p in posts)
-    forwards = sum(p.forwards or 0 for p in posts)
+    views = [r[2] or 0 for r in rows]
+    reactions = sum(r[4] or 0 for r in rows)
+    forwards = sum(r[5] or 0 for r in rows)
     views_total = sum(views)
-    top = max(posts, key=lambda p: p.views or 0, default=None)
-    bottom = min(posts, key=lambda p: p.views or 0, default=None)
+    top = max(rows, key=lambda r: r[2] or 0, default=None)
+    bottom = min(rows, key=lambda r: r[2] or 0, default=None)
     hours = Counter(
-        str((p.posted_at if p.posted_at.tzinfo else p.posted_at.replace(tzinfo=timezone.utc))
+        str((r[1] if r[1].tzinfo else r[1].replace(tzinfo=timezone.utc))
             .astimezone(IST).hour)
-        for p in posts if p.posted_at)
+        for r in rows if r[1])
 
     rep = DailyChannelReport(
         channel_id=channel_id, source_type=ReportSourceType.OWNED,
         report_date=day, report_version=REPORT_VERSION,
-        posts_count=len(posts),
-        deals_posted=sum(1 for p in posts if (p.text or "").strip()),
+        posts_count=len(rows),
+        deals_posted=sum(1 for r in rows if (r[3] or "").strip()),
         merchants_featured=0,  # refined below from summarize() when available
         views_total=views_total,
         views_avg=round(fmean(views), 2) if views else 0.0,
         views_median=round(median(views), 2) if views else 0.0,
         views_max=max(views) if views else 0,
         views_min=min(views) if views else 0,
-        top_post_id=(top.tg_message_id if top else None),
-        bottom_post_id=(bottom.tg_message_id if bottom else None),
+        top_post_id=(top[9] if top else None),
+        bottom_post_id=(bottom[9] if bottom else None),
         reactions_total=reactions, forwards_total=forwards,
         engagement_rate=round((reactions + forwards) / views_total, 4) if views_total else 0.0,
         posting_hours=dict(hours),

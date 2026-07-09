@@ -18,7 +18,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.db.models import Channel
-from src.db.models_growth_snapshot import DailySubscriberStat, ParticipantSnapshot
+from src.db.models_growth_snapshot import (
+    DailyJoinSource,
+    DailySubscriberStat,
+    DailyViewSource,
+    ParticipantSnapshot,
+)
 from src.services.analytics.periods import IST
 
 DateLike = Union[date_, datetime, None]
@@ -34,9 +39,50 @@ def _to_ist_date(v: DateLike) -> date_ | None:
     return v
 
 
-def compute_growth(s: Session, channel_id: int, start: DateLike = None, end: DateLike = None) -> dict:
-    """Compute subscriber growth metrics from daily subscriber stats for one channel."""
+def _source_breakdown(s: Session, model, channel_id: int, value_field: str,
+                       start_d: date_ | None, end_d: date_ | None) -> dict:
+    """Read a per-source daily table (DailyViewSource / DailyJoinSource) for a
+    channel/date-range into ``{totals: {source: total}, daily: {date: {source: value}}}``."""
+    q = select(model).where(model.channel_id == channel_id)
+    if start_d is not None:
+        q = q.where(model.stat_date >= start_d)
+    if end_d is not None:
+        q = q.where(model.stat_date <= end_d)
+    rows = s.scalars(q.order_by(model.stat_date)).all()
+
+    totals: dict[str, int] = {}
+    daily: dict[str, dict[str, int]] = {}
+    for r in rows:
+        value = getattr(r, value_field) or 0
+        totals[r.source_label] = totals.get(r.source_label, 0) + value
+        daily.setdefault(r.stat_date.isoformat(), {})[r.source_label] = value
+    return {"totals": totals, "daily": daily}
+
+
+def compute_growth(
+    s: Session,
+    channel_id: int,
+    start: DateLike = None,
+    end: DateLike = None,
+    can_view_stats: bool = False,
+) -> dict:
+    """Compute subscriber growth metrics from daily subscriber stats for one channel.
+
+    ``view_sources``/``follower_sources`` (Telegram's admin-only "views by
+    source" / "joins by source" breakdowns — see
+    ``telegram_owned.py::_collect_broadcast_stats``) are included only when
+    ``can_view_stats`` is true; otherwise both are ``None`` so the frontend can
+    hide the section rather than show an empty/broken one.
+    """
     start_d, end_d = _to_ist_date(start), _to_ist_date(end)
+    view_sources = (
+        _source_breakdown(s, DailyViewSource, channel_id, "views", start_d, end_d)
+        if can_view_stats else None
+    )
+    follower_sources = (
+        _source_breakdown(s, DailyJoinSource, channel_id, "joins", start_d, end_d)
+        if can_view_stats else None
+    )
 
     q = select(DailySubscriberStat).where(DailySubscriberStat.channel_id == channel_id)
     if start_d is not None:
@@ -61,6 +107,8 @@ def compute_growth(s: Session, channel_id: int, start: DateLike = None, end: Dat
                       "collection cycle observes the participant count.",
             "current": current,
             "days": 0,
+            "view_sources": view_sources,
+            "follower_sources": follower_sources,
         }
 
     joined = sum(r.subs_joined or 0 for r in rows)
@@ -87,6 +135,8 @@ def compute_growth(s: Session, channel_id: int, start: DateLike = None, end: Dat
         "first_date": rows[0].stat_date.isoformat(),
         "last_date": rows[-1].stat_date.isoformat(),
         "daily": daily,
+        "view_sources": view_sources,
+        "follower_sources": follower_sources,
     }
 
 
@@ -96,4 +146,4 @@ def get_growth(s: Session, start: DateLike = None, end: DateLike = None) -> dict
     ch = s.scalar(select(Channel).where(Channel.kind == "owned").order_by(Channel.participants_count.desc()))
     if not ch:
         return {"available": False, "reason": "No owned channel found."}
-    return compute_growth(s, ch.id, start, end)
+    return compute_growth(s, ch.id, start, end, can_view_stats=bool(ch.can_view_stats))

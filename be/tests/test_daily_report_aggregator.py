@@ -16,6 +16,7 @@ def _isolated_db():
     get_settings.cache_clear(); sess.get_engine.cache_clear(); sess.get_sessionmaker.cache_clear()
     from src.db.session import init_db, session_scope
     from src.db.models import Channel, Post
+    from src.db.models_normalization import NormalizedPost, SourceType
     init_db()
     # seed one owned channel + posts on an IST day
     from src.services.analytics.periods import IST
@@ -26,10 +27,18 @@ def _isolated_db():
         ch = Channel(tg_channel_id=111, username="MyChannel", title="Mine", kind="owned")
         s.add(ch); s.flush()
         for i, v in enumerate([800, 4000, 1500]):
-            s.add(Post(channel_id=ch.id, tg_message_id=1000 + i,
-                       posted_at=base + timedelta(minutes=i), views=v,
-                       reactions_total=10 * i, forwards=i, text=f"deal {i}",
-                       collected_at=base))
+            p = Post(channel_id=ch.id, tg_message_id=1000 + i,
+                     posted_at=base + timedelta(minutes=i), views=v,
+                     reactions_total=10 * i, forwards=i, text=f"deal {i}",
+                     collected_at=base)
+            s.add(p)
+            s.flush()
+            # build_owned_report() now goes through day.py's canonical
+            # Post->NormalizedPost(source_type=OWNED) join (same query used by
+            # /day and /analytics) — every Post fixture needs a matching row or
+            # it's invisible to the report, same as test_analytics_views.py.
+            s.add(NormalizedPost(source_id=p.id, source_type=SourceType.OWNED,
+                                 normalized_at=base))
     yield
 
 

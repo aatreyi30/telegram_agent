@@ -11,6 +11,7 @@ Creates plans only — no captions, no publishing, no raw-metric calculation.
 
 from __future__ import annotations
 
+import statistics
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -33,8 +34,19 @@ from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.session import session_scope
 from src.services.events import Event, EventType, get_event_bus
 from src.services.intelligence.growth import plain_label
+from src.services.metrics.merchant_metrics import compute_merchant_metrics
 from src.logger import get_logger
 from src.services.planning.calendar import seed_sale_events, upcoming_events
+
+# Minimum recent-window sample size before a merchant's performance signal is
+# treated as evidence-backed rather than a low-sample guess.
+_MIN_PERFORMANCE_SAMPLES = 3
+# Discount applied to a low-sample merchant's blended score (still surfaced,
+# just not weighted as if it were evidence-backed).
+_LOW_SAMPLE_DISCOUNT = 0.7
+# Cap on performance_index (multiples of the cross-merchant median views/day)
+# so one viral outlier post doesn't dominate the merchant mix.
+_PERFORMANCE_INDEX_CAP = 3.0
 
 logger = get_logger(__name__)
 
@@ -78,7 +90,7 @@ class CampaignPlanningEngine(BaseCollector):
             } for e in events]
 
             # build plans
-            daily = self._daily_plan(blueprint, perf, recent, today, event_data)
+            daily = self._daily_plan(s, now, blueprint, perf, recent, today, event_data)
             weekly = self._weekly_plan(blueprint, perf, today, event_data)
             evt = self._event_plan(event_data[0], blueprint, perf) if event_data else None
 
@@ -138,12 +150,66 @@ class CampaignPlanningEngine(BaseCollector):
                         "avg_views_per_day": m.get("avg_views_per_day")})
         return out
 
-    def _merchant_allocation(self, recent: dict) -> list[dict]:
+    def _merchant_allocation(self, s: Session, recent: dict, now: datetime) -> list[dict]:
+        """Blend recency-share with an age-normalized performance signal (avg
+        views/day over the last 45 days) so the mix isn't just an echo of
+        whichever merchant happened to post most recently. A merchant with
+        fewer than `_MIN_PERFORMANCE_SAMPLES` posts in that window has its
+        `performance_index` treated as low-confidence: it's still reported,
+        but the blended score is discounted and `basis` says so explicitly."""
         merch = recent["merchants"]
         known_total = sum(merch.values()) or 1
+        if not merch:
+            return []
+
+        metrics = compute_merchant_metrics(s)
+        candidates = merch.most_common(6)
+
+        windows: dict[str, dict] = {}
+        for m, _c in candidates:
+            mm = metrics.get(m)
+            windows[m] = mm.window_summary(now, 45) if mm is not None else {
+                "avg_views_per_day": None, "post_count": 0,
+            }
+
+        # Baseline for the performance index = median avg-views/day across
+        # these merchants (not any one merchant's own number), so the index
+        # reads as "N x the typical merchant" rather than a self-referential
+        # ratio a single merchant could trivially maximize.
+        vpds = [w["avg_views_per_day"] for w in windows.values() if w["avg_views_per_day"]]
+        baseline = statistics.median(vpds) if vpds else None
+
         out = []
-        for m, c in merch.most_common(6):
-            out.append({"merchant": m, "recent_share": round(c / known_total, 3)})
+        for m, c in candidates:
+            recent_share = round(c / known_total, 3)
+            w = windows[m]
+            avg_vpd = w["avg_views_per_day"]
+            sample_size = w["post_count"] or 0
+            performance_index = (
+                round(min(avg_vpd / baseline, _PERFORMANCE_INDEX_CAP), 3)
+                if avg_vpd and baseline else None
+            )
+            low_sample = sample_size < _MIN_PERFORMANCE_SAMPLES
+            basis = "recency-only (low sample)" if low_sample else "recency+performance"
+
+            # Blend: half recency-share, half performance-index (normalized to
+            # the same 0..1-ish scale via the cap); missing performance data
+            # falls back to a neutral 1.0x so it doesn't zero out the score.
+            perf_component = performance_index if performance_index is not None else 1.0
+            score = 0.5 * recent_share + 0.5 * (perf_component / _PERFORMANCE_INDEX_CAP)
+            if low_sample:
+                score *= _LOW_SAMPLE_DISCOUNT
+
+            out.append({
+                "merchant": m,
+                "recent_share": recent_share,
+                "avg_views_per_day": round(avg_vpd, 1) if avg_vpd is not None else None,
+                "performance_index": performance_index,
+                "sample_size": sample_size,
+                "basis": basis,
+                "score": round(score, 4),
+            })
+        out.sort(key=lambda x: x["score"], reverse=True)
         return out
 
     def _risks(self, recent: dict, posts_per_day: float) -> list[dict]:
@@ -176,17 +242,19 @@ class CampaignPlanningEngine(BaseCollector):
                 "basis": "target posts per deal-type × that type's age-normalized views/day",
                 "caveat": "estimate; sharpens as per-post velocity data accrues"}
 
-    def _daily_plan(self, blueprint, perf, recent, today, events) -> dict:
+    def _daily_plan(self, s: Session, now: datetime, blueprint, perf, recent, today, events) -> dict:
         posts = int(round(blueprint.get("posting_frequency_baseline") or 8))
         allocation = self._allocate_posts(blueprint, posts)
         schedule = blueprint.get("posting_plan") or []
-        merchants = self._merchant_allocation(recent)
+        merchants = self._merchant_allocation(s, recent, now)
         risks = self._risks(recent, posts)
         near = events[0] if events and events[0]["days_away"] <= 7 else None
         bp = {
             "posts_planned": posts,
             "posting_windows": [{"part": p["part"], "hours": p["hours"],
-                                 "posts": p["recommended_posts_per_day"]} for p in schedule],
+                                 "posts": p["recommended_posts_per_day"],
+                                 "sample_size": p.get("sample_size")} for p in schedule],
+            "posting_windows_sample_size": blueprint.get("posting_plan_sample_size"),
             "deal_type_allocation": allocation,
             "merchant_allocation": merchants,
             "emoji_strategy": blueprint.get("emoji_strategy"),
