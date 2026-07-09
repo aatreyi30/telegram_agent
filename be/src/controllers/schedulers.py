@@ -26,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.logger import get_logger
+from src.controllers import cadences as C
 
 logger = get_logger(__name__)
 _RETRY_DELAYS_MIN = [5, 15, 30]
@@ -45,6 +46,34 @@ class Job:
     trigger: object       # APScheduler trigger
     priority: str         # critical | high | medium | low
     fn: Callable[[], dict]
+
+
+# --------------------------------------------------------------------------- #
+# Trigger+label builders — each returns (cadence_label, trigger) together so
+# the two can never say different things about when a job runs.
+# --------------------------------------------------------------------------- #
+def _every_min(n: int):
+    return f"every {n} min", IntervalTrigger(minutes=n)
+
+
+def _every_hr(n: int):
+    return f"every {n} h", IntervalTrigger(hours=n)
+
+
+def _daily(hm: tuple[int, int]):
+    h, m = hm
+    return f"daily {h:02d}:{m:02d} IST", CronTrigger(hour=h, minute=m)
+
+
+def _weekly(dow: str, hm: tuple[int, int]):
+    h, m = hm
+    return f"{dow.capitalize()} {h:02d}:{m:02d} IST", CronTrigger(day_of_week=dow, hour=h, minute=m)
+
+
+def _monthly(day: int, hm: tuple[int, int]):
+    h, m = hm
+    suffix = "st" if day == 1 else ("nd" if day == 2 else ("rd" if day == 3 else "th"))
+    return f"{day}{suffix} {h:02d}:{m:02d} IST", CronTrigger(day=day, hour=h, minute=m)
 
 
 # --------------------------------------------------------------------------- #
@@ -338,35 +367,34 @@ def j_db_cleanup() -> dict:
 
 # --------------------------------------------------------------------------- #
 JOBS: list[Job] = [
-    Job("telegram_sync", "Telegram Channel Sync", "every 5 min", IntervalTrigger(minutes=5), "critical", j_telegram_sync),
-    Job("competitor_sync", "Competitor Channel Sync", "every 10 min", IntervalTrigger(minutes=10), "high", j_competitor_sync),
-    Job("normalize_posts", "Post Normalizer", "every 5 min", IntervalTrigger(minutes=5), "high", j_normalize_posts),
-    Job("stats_refresh", "Message Statistics Refresh", "every 30 min", IntervalTrigger(minutes=30), "high", j_stats_refresh),
-    Job("deal_monitoring", "Deal Monitoring", "every 2 h", IntervalTrigger(hours=2), "critical", j_deal_monitoring),
-    Job("price_history", "Price History Update", "every 6 h", IntervalTrigger(hours=6), "medium", j_price_history),
-    Job("deal_ranking", "Deal Ranking Engine", "every 30 min", IntervalTrigger(minutes=30), "high", j_deal_ranking),
+    Job("telegram_sync", "Telegram Channel Sync", *_every_min(C.TELEGRAM_SYNC_MIN), "critical", j_telegram_sync),
+    Job("competitor_sync", "Competitor Channel Sync", *_every_min(C.COMPETITOR_SYNC_MIN), "high", j_competitor_sync),
+    Job("normalize_posts", "Post Normalizer", *_every_min(C.NORMALIZE_POSTS_MIN), "high", j_normalize_posts),
+    Job("stats_refresh", "Message Statistics Refresh", *_every_min(C.STATS_REFRESH_MIN), "high", j_stats_refresh),
+    Job("deal_monitoring", "Deal Monitoring", *_every_hr(C.DEAL_MONITORING_HOURS), "critical", j_deal_monitoring),
+    Job("price_history", "Price History Update", *_every_hr(C.PRICE_HISTORY_HOURS), "medium", j_price_history),
+    Job("deal_ranking", "Deal Ranking Engine", *_every_min(C.DEAL_RANKING_MIN), "high", j_deal_ranking),
     # Defer reading runtime settings until SchedulerRegistry.start() to avoid
     # calling get_settings() at module import time (startup/circular import issues).
-    # Use a safe default here; the real cadence/trigger will be applied at start().
-    Job("link_resolution", "Shortlink Resolution", "every 15 min",
-        IntervalTrigger(minutes=15), "high", j_link_resolution),
-    Job("growth_detection", "Growth Opportunity Detection", "daily 06:00", CronTrigger(hour=6, minute=0), "medium", j_growth_detection),
-    Job("competitor_discover", "Competitor Discovery", "daily 06:30", CronTrigger(hour=6, minute=30), "medium", j_competitor_discover),
-    Job("competitor_intel", "Competitor Intelligence", "daily 07:00", CronTrigger(hour=7, minute=0), "medium", j_competitor_intel),
-    Job("ai_daily_summary", "AI Daily Summary", "daily 08:00", CronTrigger(hour=8, minute=0), "medium", j_ai_daily_summary),
-    Job("weekly_report", "Weekly Report", "Mon 08:30", CronTrigger(day_of_week="mon", hour=8, minute=30), "medium", j_weekly_report),
-    Job("monthly_report", "Monthly Report", "1st 00:00", CronTrigger(day=1, hour=0, minute=5), "medium", j_monthly_report),
-    Job("learning", "AI Learning Dataset Builder", "daily 02:00", CronTrigger(hour=2, minute=0), "medium", j_learning),
-    Job("deal_expiry", "Deal Expiry Monitor", "every 1 h", IntervalTrigger(hours=1), "high", j_deal_expiry),
-    Job("queue_processor", "Scheduler Queue Processor", "every 1 min", IntervalTrigger(minutes=1), "critical", j_queue_processor),
-    Job("url_health", "URL Health Check", "every 12 h", IntervalTrigger(hours=12), "low", j_url_health),
-    Job("analytics_aggregation", "Analytics Aggregation", "every 1 h", IntervalTrigger(hours=1), "low", j_analytics_aggregation),
-    Job("merchant_feed_sync", "Merchant Feed Sync", "every 30 min", IntervalTrigger(minutes=30), "high", j_merchant_feed_sync),
-    Job("notification_engine", "Notification Engine", "every 5 min", IntervalTrigger(minutes=5), "medium", j_notification_engine),
-    Job("org_health", "Organization Health Check", "every 1 h", IntervalTrigger(hours=1), "low", j_org_health),
-    Job("db_cleanup", "Database Cleanup", "daily 03:00", CronTrigger(hour=3, minute=0), "low", j_db_cleanup),
-    Job("daily_report", "Daily Channel Report", "daily 05:15 IST", CronTrigger(hour=5, minute=15), "high", j_daily_report),
-    Job("daily_plan", "Daily Post Planner", "daily 05:30 IST", CronTrigger(hour=5, minute=30), "high", j_daily_plan),
+    # Use the default cadence constant here; the real cadence/trigger will be applied at start().
+    Job("link_resolution", "Shortlink Resolution", *_every_min(C.LINK_RESOLUTION_DEFAULT_MIN), "high", j_link_resolution),
+    Job("growth_detection", "Growth Opportunity Detection", *_daily(C.GROWTH_DETECTION_TIME), "medium", j_growth_detection),
+    Job("competitor_discover", "Competitor Discovery", *_daily(C.COMPETITOR_DISCOVER_TIME), "medium", j_competitor_discover),
+    Job("competitor_intel", "Competitor Intelligence", *_daily(C.COMPETITOR_INTEL_TIME), "medium", j_competitor_intel),
+    Job("ai_daily_summary", "AI Daily Summary", *_daily(C.AI_DAILY_SUMMARY_TIME), "medium", j_ai_daily_summary),
+    Job("weekly_report", "Weekly Report", *_weekly(C.WEEKLY_REPORT_DOW, C.WEEKLY_REPORT_TIME), "medium", j_weekly_report),
+    Job("monthly_report", "Monthly Report", *_monthly(C.MONTHLY_REPORT_DAY, C.MONTHLY_REPORT_TIME), "medium", j_monthly_report),
+    Job("learning", "AI Learning Dataset Builder", *_daily(C.LEARNING_TIME), "medium", j_learning),
+    Job("deal_expiry", "Deal Expiry Monitor", *_every_hr(C.DEAL_EXPIRY_HOURS), "high", j_deal_expiry),
+    Job("queue_processor", "Scheduler Queue Processor", *_every_min(C.QUEUE_PROCESSOR_MIN), "critical", j_queue_processor),
+    Job("url_health", "URL Health Check", *_every_hr(C.URL_HEALTH_HOURS), "low", j_url_health),
+    Job("analytics_aggregation", "Analytics Aggregation", *_every_hr(C.ANALYTICS_AGGREGATION_HOURS), "low", j_analytics_aggregation),
+    Job("merchant_feed_sync", "Merchant Feed Sync", *_every_min(C.MERCHANT_FEED_SYNC_MIN), "high", j_merchant_feed_sync),
+    Job("notification_engine", "Notification Engine", *_every_min(C.NOTIFICATION_ENGINE_MIN), "medium", j_notification_engine),
+    Job("org_health", "Organization Health Check", *_every_hr(C.ORG_HEALTH_HOURS), "low", j_org_health),
+    Job("db_cleanup", "Database Cleanup", *_daily(C.DB_CLEANUP_TIME), "low", j_db_cleanup),
+    Job("daily_report", "Daily Channel Report", *_daily(C.DAILY_REPORT_TIME), "high", j_daily_report),
+    Job("daily_plan", "Daily Post Planner", *_daily(C.DAILY_PLAN_TIME), "high", j_daily_plan),
 ]
 
 
