@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { InformationCircleIcon } from "@hugeicons/core-free-icons";
 import { differenceInCalendarDays } from "date-fns";
@@ -112,13 +113,21 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
         </TableHeader>
         <TableBody>
           {entities.map((e) => (
-            <TableRow key={e.name} className="hover:bg-muted/50">
+            <TableRow key={e.name} className={cn("hover:bg-muted/50", e.id != null && "cursor-pointer")}>
               <TableCell className="font-medium">
-                <div className="flex items-center gap-2">
-                  <span className="truncate">{e.name}</span>
-                  <CategoryBadge category={e.category} />
-                  <ProcessingBadge e={e} />
-                </div>
+                {e.id != null ? (
+                  <Link href={`/competitors/${e.id}`} className="flex items-center gap-2 hover:underline">
+                    <span className="truncate">{e.name}</span>
+                    <CategoryBadge category={e.category} />
+                    <ProcessingBadge e={e} />
+                  </Link>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="truncate">{e.name}</span>
+                    <CategoryBadge category={e.category} />
+                    <ProcessingBadge e={e} />
+                  </div>
+                )}
               </TableCell>
               <TableCell>{fmtCompact(e.subscribers)}</TableCell>
               <TableCell><PostsPerDayCell e={e} /></TableCell>

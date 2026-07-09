@@ -136,6 +136,7 @@ export interface QueueResponse extends PageMeta { counts: Record<string, number>
 export interface CompetitorBenchmarkRow { dimension: string; owned_value: number | null; competitor_value: number | null; delta: number | null; }
 
 export interface CompetitorEntity {
+  id?: number;
   name: string; is_owned?: boolean; category?: "platform" | "channel" | "unclassified";
   subscribers?: number | null;
   posts_per_day?: number | null; avg_views_per_post?: number | null;
@@ -154,6 +155,31 @@ export interface CompetitorDashboardResponse {
   summary: { total: number; platform: number; channel: number; };
   platform: CompetitorEntity[]; channel: CompetitorEntity[];
   unavailable: string[]; note: string; metrics: string[]; applied_window: number | null;
+}
+
+// GET /competitors/{id}/trends — day-bucketed series for the per-competitor detail page.
+// Row/field shapes are treated loosely (index signatures) since the endpoint is being built
+// concurrently; the detail page picks whichever keys are actually present defensively.
+export interface CompetitorTrendPoint { date: string; [key: string]: any; }
+
+export interface CompetitorTopPost {
+  post_id?: number; views?: number | null; forwards?: number | null; reactions?: number | null;
+  caption?: string | null; posted_at?: string | null; [key: string]: any;
+}
+
+export interface CompetitorHistogramBucket { bucket?: string; label?: string; count?: number; [key: string]: any; }
+
+export interface CompetitorTrendsResponse {
+  posting_trend: CompetitorTrendPoint[];
+  views_trend: CompetitorTrendPoint[];
+  merchant_trend: CompetitorTrendPoint[];
+  top_posts: CompetitorTopPost[];
+  content_mix_trend: CompetitorTrendPoint[];
+  media_text_trend: CompetitorTrendPoint[];
+  link_usage_trend: CompetitorTrendPoint[];
+  caption_length_distribution: CompetitorHistogramBucket[];
+  posting_consistency: { stdev?: number | null; variance?: number | null; daily?: CompetitorTrendPoint[]; [key: string]: any };
+  [key: string]: any;
 }
 
 export interface DealTypeAllocation { deal_type: string; post_type: string; target_posts: number; avg_views_per_day: number | null; }
