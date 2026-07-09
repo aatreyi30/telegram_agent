@@ -115,6 +115,14 @@ def competitor_dashboard(window: int | None = Query(default=None, description="W
     return ok(service.competitor_dashboard(window_days=window))
 
 
+@router.get("/competitors/{competitor_id}/trends")
+def competitor_trends(competitor_id: int, days: int = Query(default=30, description="Trend window in days")):
+    result = service.competitor_trends(competitor_id, days)
+    if result.get("ok") is False:
+        return fail(result.get("error", "Competitor not found"), 404)
+    return ok(result)
+
+
 @router.post("/competitors")
 def add_competitor(background_tasks: BackgroundTasks,
                    user: dict = Depends(require_role("editor")),
