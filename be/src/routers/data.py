@@ -115,11 +115,6 @@ def competitor_dashboard(window: int | None = Query(default=None, description="W
     return ok(service.competitor_dashboard(window_days=window))
 
 
-@router.get("/merchants")
-def merchants():
-    return ok(service.merchants())
-
-
 @router.get("/plans")
 def plans():
     return ok(service.plans())

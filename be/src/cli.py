@@ -517,7 +517,7 @@ def merchant_intel_status() -> None:
 
 @app.command("competitor-intel")
 def competitor_intel() -> None:
-    """Phase 5: build competitor profiles, benchmarks, and evidence-backed signals."""
+    """Phase 5: build competitor profiles and benchmarks."""
     from src.services.intelligence.competitor import CompetitorIntelligenceEngine
 
     job = JobRunner().run_collector(
@@ -530,13 +530,12 @@ def competitor_intel() -> None:
 
 @app.command("competitor-intel-status")
 def competitor_intel_status() -> None:
-    """Show competitor profiles, similarity to us, and threats/opportunities."""
+    """Show competitor profiles and similarity to us."""
     from sqlalchemy import select
 
     from src.db.models_competitor_intel import (
         COMPETITOR_INTEL_VERSION,
         CompetitorProfile,
-        CompetitorSignal,
     )
 
     with session_scope() as s:
@@ -567,22 +566,6 @@ def competitor_intel_status() -> None:
             "[dim]t.me/s snapshot: views are rounded/cumulative; forwards & reactions "
             "unavailable; business category not extracted. Small samples -> low confidence.[/dim]"
         )
-
-        signals = s.scalars(
-            select(CompetitorSignal)
-            .where(CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorSignal.confidence.desc())
-        ).all()
-        if signals:
-            st = Table(title="Threats & opportunities (evidence-gated, sample>=20)")
-            for col in ("type", "competitor", "kind", "conf", "description"):
-                st.add_column(col)
-            for sig in signals:
-                st.add_row(sig.signal_type, sig.username or "-", sig.kind,
-                           f"{sig.confidence:.2f}", sig.description[:64])
-            console.print(st)
-        else:
-            console.print("[dim]No signals passed the evidence/sample threshold.[/dim]")
 
 
 @app.command("learn")

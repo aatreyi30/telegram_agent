@@ -36,8 +36,6 @@ class EventType:
     MERCHANT_OPPORTUNITY_DETECTED = "MerchantOpportunityDetected"
     # --- Phase 5: competitor intelligence events ---
     COMPETITOR_STRATEGY_UPDATED = "CompetitorStrategyUpdated"
-    COMPETITOR_THREAT_DETECTED = "CompetitorThreatDetected"
-    COMPETITOR_OPPORTUNITY_DETECTED = "CompetitorOpportunityDetected"
     # --- Phase 6: channel learning events ---
     LEARNING_RECORDED = "LearningRecorded"
     KNOWLEDGE_UPDATED = "KnowledgeUpdated"

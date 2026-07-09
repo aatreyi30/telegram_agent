@@ -26,7 +26,7 @@ _TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_merchant_intel", "description": "Merchant profiles (engagement/price) and opportunities.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "get_competitor_intel", "description": "Competitor profiles, similarity to us, threats/opportunities.",
+    {"name": "get_competitor_intel", "description": "Competitor profiles and similarity to us.",
      "input_schema": {"type": "object", "properties": {}}},
 ]
 
@@ -48,8 +48,7 @@ def _tool_runner(name: str, _input: dict) -> str:
             return ctx.to_json({"profiles": ctx.merchant_profiles(s),
                                 "opportunities": ctx.merchant_opportunities(s)})
         if name == "get_competitor_intel":
-            return ctx.to_json({"profiles": ctx.competitor_profiles(s),
-                                "signals": ctx.competitor_signals(s)})
+            return ctx.to_json({"profiles": ctx.competitor_profiles(s)})
     return f"Unknown tool: {name}"
 
 

@@ -68,7 +68,7 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
 
 # tables whose ORM model was removed from the codebase; drop them from disk since
 # create_all() only ever creates tables, it never drops orphaned ones.
-_REMOVED_TABLES: tuple[str, ...] = ("channel_stat_snapshots",)
+_REMOVED_TABLES: tuple[str, ...] = ("channel_stat_snapshots", "competitor_signals")
 
 
 def _existing_columns(conn, table: str) -> set[str]:

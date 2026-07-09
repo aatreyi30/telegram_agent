@@ -66,21 +66,3 @@ def test_cadence_compared_over_same_window():
     ppd = engine._owned_cadence_in_window(owned_dates, start, end)
     # exactly 1 owned post (Jul 15 12:00) falls in the window, span 1 day
     assert ppd == 1.0
-
-
-def test_baseline_cluster_excluded_from_opportunities():
-    engine = CompetitorIntelligenceEngine()
-    owned = {"posts_per_day": 5.0, "deal_mix": {"coupon-heavy": 10}}
-    owned_dates = [datetime(2026, 7, 1, tzinfo=UTC)]
-    comp = {
-        1: {
-            "post_count": 40, "label": "x", "posts_per_day": 3.0,
-            "first_posted_at": datetime(2026, 7, 1, tzinfo=UTC),
-            "last_posted_at": datetime(2026, 7, 2, tzinfo=UTC),
-            "deal_mix": {"baseline (near dataset average)": 38, "coupon-heavy": 2},
-        }
-    }
-    signals = engine._detect_signals(owned, owned_dates, comp)
-    kinds = [(s["signal_type"], s["kind"], s["evidence"].get("cluster")) for s in signals]
-    # baseline must NOT appear as an underused_deal_type opportunity
-    assert not any(k[1] == "underused_deal_type" and "baseline" in str(k[2]) for k in kinds)
