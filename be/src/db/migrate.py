@@ -23,6 +23,7 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("org_id", "INTEGER"),
         ("kind", "VARCHAR(16) DEFAULT 'owned'"),
         ("status", "VARCHAR(16) DEFAULT 'active'"),
+        ("stats_synced_at", "DATETIME"),
     ],
     "generated_posts": [
         ("strategy_rationale", "JSON"),

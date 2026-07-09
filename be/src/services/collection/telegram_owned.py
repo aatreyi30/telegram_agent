@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.services.collection.raw_store import store_raw
-from src.services.collection.util import content_hash, extract_urls, to_utc
+from src.services.collection.util import content_hash, extract_urls, parse_stats_graph_json, to_utc
 from src.config.settings import get_settings
 from src.db.models import (
     Channel,
@@ -32,7 +32,12 @@ from src.db.models import (
     Post,
     PostMetricSnapshot,
 )
-from src.db.models_growth_snapshot import DailySubscriberStat, ParticipantSnapshot
+from src.db.models_growth_snapshot import (
+    DailyJoinSource,
+    DailySubscriberStat,
+    DailyViewSource,
+    ParticipantSnapshot,
+)
 from src.db.session import session_scope
 from src.services.analytics.periods import IST
 from src.services.events import Event, EventType, get_event_bus
@@ -278,7 +283,188 @@ class OwnedChannelCollector(BaseCollector):
                     result.updated += 1
             self._emit(EventType.POST_METRICS_UPDATED, "channel", channel_row_id, job_id,
                        {"posts_refreshed": len(recent_ids)})
+
+        # (c) broadcast stats snapshot ("views by source" / "joins by source") —
+        # gated on can_view_stats and rate-limited internally; never raises.
+        await self._collect_broadcast_stats(client, entity, channel_row_id, job_id, result)
         return result
+
+    # ------------------------------------------------------------------ #
+    async def _collect_broadcast_stats(
+        self, client, entity, channel_row_id, job_id, result: CollectorResult
+    ) -> None:
+        """Snapshot Telegram's admin-only broadcast stats (views/new-followers
+        "by source") into ``DailyViewSource`` / ``DailyJoinSource``.
+
+        Gated on ``Channel.can_view_stats`` (Telegram only exposes this to
+        channels large enough to have admin stats) and rate-limited to once per
+        IST calendar day via ``Channel.stats_synced_at`` — Telegram's own stats
+        graphs update at most daily, so polling more often would just re-fetch
+        the same data.
+
+        Any failure — including the DC-export path, which leans on semi-private
+        Telethon internals (``_borrow_exported_sender``) — is logged and
+        swallowed here rather than raised, so a stats hiccup never fails the
+        whole ANALYTICS collection cycle.
+        """
+        with session_scope() as s:
+            ch = s.get(Channel, channel_row_id)
+            if not ch.can_view_stats:
+                return
+            now = datetime.now(timezone.utc)
+            today_ist = now.astimezone(IST).date()
+            if ch.stats_synced_at is not None:
+                last_ist_day = to_utc(ch.stats_synced_at).astimezone(IST).date()
+                if last_ist_day >= today_ist:
+                    return  # already synced today (IST)
+            stats_dc = ch.stats_dc
+
+        try:
+            stats, resolve = await self._fetch_broadcast_stats(client, entity, stats_dc)
+        except Exception as exc:  # noqa: BLE001 - stats collection must never fail the cycle
+            logger.warning("[telegram_owned] broadcast stats fetch raised: %s", exc)
+            stats, resolve = None, None
+
+        if stats is None:
+            logger.warning(
+                "[telegram_owned] no broadcast stats available for channel_id=%s; skipping",
+                channel_row_id,
+            )
+            return
+
+        view_rows = await self._resolve_graph(getattr(stats, "views_by_source_graph", None), resolve)
+        join_rows = await self._resolve_graph(
+            getattr(stats, "new_followers_by_source_graph", None), resolve
+        )
+
+        with session_scope() as s:
+            self._upsert_source_rows(s, DailyViewSource, channel_row_id, view_rows, "views")
+            self._upsert_source_rows(s, DailyJoinSource, channel_row_id, join_rows, "joins")
+            ch = s.get(Channel, channel_row_id)
+            ch.stats_synced_at = datetime.now(timezone.utc)
+
+        result.detail["broadcast_stats"] = {
+            "view_source_rows": len(view_rows),
+            "join_source_rows": len(join_rows),
+        }
+        self._emit(
+            EventType.CHANNEL_UPDATED,
+            "channel",
+            channel_row_id,
+            job_id,
+            {"broadcast_stats_synced": True},
+        )
+
+    @staticmethod
+    async def _fetch_broadcast_stats(client, entity, stats_dc: int | None):
+        """Call ``stats.getBroadcastStats``, exporting a sender to ``stats_dc``
+        when it differs from the client's main DC.
+
+        Telethon does not expose a public helper for this (unlike file
+        downloads, which handle ``FileMigrateError`` internally); the closest
+        equivalent is the semi-private ``TelegramClient._borrow_exported_sender``
+        / ``_return_exported_sender`` pair that Telethon's own download path
+        uses for ``FileMigrateError``. That pattern is mirrored here for
+        ``StatsMigrateError``. Because these are private, version-sensitive
+        internals, this whole method is defensive: any failure (missing
+        attribute, RPC error, etc.) is caught by the caller and treated as
+        "no stats available" rather than crashing collection.
+
+        Returns ``(stats, resolve)`` — ``resolve`` is an async callable that
+        loads a ``StatsGraphAsync`` token from the *same* DC the stats came
+        from (required by Telegram) — or ``(None, None)`` if the initial
+        request itself failed.
+        """
+        from telethon import utils
+        from telethon.errors import StatsMigrateError
+        from telethon.tl.functions.stats import GetBroadcastStatsRequest, LoadAsyncGraphRequest
+
+        input_channel = utils.get_input_channel(entity)
+        main_dc = client.session.dc_id
+        target_dc = stats_dc or main_dc
+
+        async def _call(request, dc: int):
+            if dc == main_dc:
+                return await client(request)
+            sender = await client._borrow_exported_sender(dc)
+            try:
+                return await sender.send(request)
+            finally:
+                await client._return_exported_sender(sender)
+
+        try:
+            try:
+                stats = await _call(GetBroadcastStatsRequest(channel=input_channel), target_dc)
+            except StatsMigrateError as exc:
+                # Telegram is authoritative about the DC; retry there once.
+                target_dc = exc.dc
+                stats = await _call(GetBroadcastStatsRequest(channel=input_channel), target_dc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[telegram_owned] GetBroadcastStatsRequest failed (dc=%s): %s", target_dc, exc
+            )
+            return None, None
+
+        async def resolve(token: str):
+            return await _call(LoadAsyncGraphRequest(token=token), target_dc)
+
+        return stats, resolve
+
+    @staticmethod
+    async def _resolve_graph(graph, resolve) -> list[tuple]:
+        """Resolve a ``stats.StatsGraph{,Async,Error}`` field into parsed
+        ``(date, source_label, value)`` rows. Never raises: any resolution
+        failure yields no rows rather than fabricated data."""
+        from telethon.tl.types import StatsGraphAsync, StatsGraphError
+
+        if graph is None:
+            return []
+        if isinstance(graph, StatsGraphError):
+            logger.warning("[telegram_owned] stats graph error: %s", graph.error)
+            return []
+        if isinstance(graph, StatsGraphAsync):
+            if resolve is None:
+                return []
+            try:
+                resolved = await resolve(graph.token)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[telegram_owned] LoadAsyncGraphRequest failed: %s", exc)
+                return []
+            if isinstance(resolved, StatsGraphError):
+                logger.warning("[telegram_owned] resolved stats graph error: %s", resolved.error)
+                return []
+            graph = resolved
+        raw = getattr(getattr(graph, "json", None), "data", None)
+        return parse_stats_graph_json(raw) if raw else []
+
+    @staticmethod
+    def _upsert_source_rows(s, model, channel_id: int, rows, value_field: str) -> None:
+        """Upsert parsed (date, source_label, value) rows into a per-source daily
+        table (DailyViewSource / DailyJoinSource). Telegram's graph is itself
+        already a daily rollup, so a resync overwrites the value in place rather
+        than accumulating a delta (unlike ``_upsert_daily_subscriber_stat``)."""
+        now = datetime.now(timezone.utc)
+        for day, label, value in rows:
+            row = s.scalar(
+                select(model).where(
+                    model.channel_id == channel_id,
+                    model.stat_date == day,
+                    model.source_label == label,
+                )
+            )
+            if row is None:
+                s.add(
+                    model(
+                        channel_id=channel_id,
+                        stat_date=day,
+                        source_label=label,
+                        updated_at=now,
+                        **{value_field: value},
+                    )
+                )
+            else:
+                setattr(row, value_field, value)
+                row.updated_at = now
 
     # ------------------------------------------------------------------ #
     def _upsert_channel(self, entity, full, job_id) -> int:

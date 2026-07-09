@@ -182,6 +182,9 @@ class Channel(Base, TimestampMixin):
     participants_count: Mapped[int | None] = mapped_column(Integer)  # last observed
     can_view_stats: Mapped[bool] = mapped_column(Boolean, default=False)
     stats_dc: Mapped[int | None] = mapped_column(Integer)  # MTProto stats datacenter
+    # last time stats.getBroadcastStats was synced for this channel (rate-limited to
+    # once/IST-day — see telegram_owned.py::_collect_broadcast_stats)
+    stats_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[dict | None] = mapped_column(JSON)
 
     first_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
