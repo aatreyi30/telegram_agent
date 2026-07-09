@@ -9,7 +9,6 @@ export const queryKeys = {
   queue: (page: number) => ["queue", page] as const,
   competitors: () => ["competitors"] as const,
   competitorDashboard: (window?: number | null) => ["competitor-dashboard", window] as const,
-  merchants: () => ["merchants"] as const,
   plans: () => ["plans"] as const,
   weekly: () => ["weekly"] as const,
   growth: (start?: string | null, end?: string | null) => ["growth", start, end] as const,

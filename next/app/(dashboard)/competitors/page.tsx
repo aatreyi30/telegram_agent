@@ -1,17 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChevronDownIcon, Alert01Icon, Idea01Icon } from "@hugeicons/core-free-icons";
+import { InformationCircleIcon } from "@hugeicons/core-free-icons";
 import { differenceInCalendarDays } from "date-fns";
 import { Async, Empty } from "@/components/Async";
-import { CalloutCard } from "@/components/CalloutCard";
 import { MultiLineChart, StackedBarsChart } from "@/components/charts";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { StatCard } from "@/components/StatCard";
-import { useCompetitorDashboard, useDataRange, useMerchants } from "@/queries/queries";
+import { useCompetitorDashboard, useDataRange } from "@/queries/queries";
 import type { CompetitorEntity } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -24,383 +24,110 @@ function minusDays(iso: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Small proportional inline bar for light visual encoding in table cells. */
-function InlineBar({ pct, tone = "default" }: { pct: number; tone?: "default" | "primary" }) {
-  const clamped = Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0;
-  return (
-    <div className="h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-muted">
-      <div
-        className={cn("h-full rounded-full", tone === "primary" ? "bg-primary" : "bg-muted-foreground/40")}
-        style={{ width: `${clamped}%` }}
-      />
-    </div>
-  );
-}
-
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString();
 }
 
-function fmtPct(n: number | null | undefined): string {
+/** Compact K/M formatting for large counts like subscribers — plain, no false precision. */
+function fmtCompact(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
-  return `${Math.round(n * 100)}%`;
+  const trim = (s: string) => (s.endsWith(".0") ? s.slice(0, -2) : s);
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `${trim((n / 1_000_000).toFixed(1))}M`;
+  if (abs >= 1_000) return `${trim((n / 1_000).toFixed(1))}K`;
+  return n.toLocaleString();
 }
 
-const STYLE_DIMS: { key: string; label: string; fmt?: (v: any) => string }[] = [
-  { key: "avg_views_per_post", label: "Avg views", fmt: (v: any) => fmtNum(v) },
-  { key: "posts_per_day", label: "Posts/day", fmt: (v: any) => Number(v).toFixed(2) },
-  { key: "cta_rate", label: "CTA rate", fmt: (v: any) => fmtPct(v) },
-  { key: "coupon_rate", label: "Coupon rate", fmt: (v: any) => fmtPct(v) },
-  { key: "multi_deal_rate", label: "Multi-deal", fmt: (v: any) => fmtPct(v) },
-  { key: "media_rate", label: "Media rate", fmt: (v: any) => fmtPct(v) },
-  { key: "emoji_rate", label: "Emoji/post", fmt: (v: any) => Number(v).toFixed(1) },
-  { key: "avg_text_len", label: "Caption len", fmt: (v: any) => Number(v).toFixed(0) },
-  { key: "hashtag_rate", label: "Hashtags/post", fmt: (v: any) => Number(v).toFixed(2) },
-  { key: "avg_links", label: "Links/post", fmt: (v: any) => Number(v).toFixed(2) },
-];
+function CategoryBadge({ category }: { category?: CompetitorEntity["category"] }) {
+  if (category === "platform") return <Badge variant="primary" className="text-[10px] font-normal">Direct</Badge>;
+  if (category === "channel") return <Badge variant="outline" className="text-[10px] font-normal">Indirect</Badge>;
+  return null;
+}
 
-function CompCard({ e, isBest }: { e: CompetitorEntity; isBest: Record<string, boolean> }) {
-  const [open, setOpen] = useState(false);
-  const catBadge = e.category === "platform"
-    ? <Badge variant="primary">Platform + Telegram</Badge>
-    : e.category === "channel"
-      ? <Badge variant="outline">Telegram only</Badge>
-      : <Badge variant="outline">Unclassified</Badge>;
-
-  const topDims = STYLE_DIMS.slice(0, 3);
-  const restDims = STYLE_DIMS.slice(3);
-
+/**
+ * "You 2.1/day · Them 5.3/day (+3.2)" — the diff is a plain subtraction (their posts_per_day
+ * minus ours), never a ratio of the delta over our own (often small) value. That ratio pattern
+ * was removed because dividing by a small "owned" denominator produces misleadingly huge %s.
+ */
+function PostsPerDayCell({ e }: { e: CompetitorEntity }) {
+  const theirs = e.posts_per_day;
+  if (theirs == null) return <span className="text-muted-foreground">—</span>;
+  const bench = (e.benchmarks ?? []).find((b) => b.dimension === "posts_per_day");
+  const yours = bench?.owned_value;
+  const delta = bench?.delta;
   return (
-    <Card className="transition-all duration-200">
-      <div className="p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              {catBadge}
-              <span className="font-semibold truncate">{e.name}</span>
-              {e.similarity_to_us != null && !e.is_owned && (
-                <span className="text-xs text-muted-foreground">
-                  {(e.similarity_to_us * 100).toFixed(0)}% similar
-                </span>
-              )}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {topDims.map((dim) => {
-                const v = e[dim.key];
-                if (v == null) return null;
-                return (
-                  <span key={dim.key}
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium",
-                      isBest[dim.key] ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
-                    )}
-                  >
-                    <span className="text-muted-foreground">{dim.label}</span>
-                    {dim.fmt ? dim.fmt(v) : v}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-          <span className="shrink-0 text-xs text-muted-foreground">{e.posts ?? "?"} posts</span>
-        </div>
-
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          {(e.benchmarks ?? []).slice(0, 3).map((b) => (
-            <span key={b.dimension}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs",
-                b.delta != null && b.delta > 0
-                  ? "bg-emerald-50 text-emerald-700"
-                  : "bg-muted text-muted-foreground",
-              )}
-            >
-              {b.dimension}: {b.delta != null ? `${b.delta >= 0 ? "+" : ""}${(b.owned_value ? (b.delta / b.owned_value * 100).toFixed(0) : "—")}%` : "—"}
-            </span>
-          ))}
-          {e.tenure_label && (
-            <span className="text-xs text-muted-foreground">{e.tenure_label}</span>
+    <span className="text-xs whitespace-nowrap">
+      {yours != null && <span className="text-muted-foreground">You {yours.toFixed(1)}/day · </span>}
+      <span>Them {theirs.toFixed(1)}/day</span>
+      {delta != null && (
+        <span
+          className={cn(
+            "ml-1 font-medium",
+            delta > 0 ? "text-emerald-600" : delta < 0 ? "text-red-600" : "text-muted-foreground",
           )}
-        </div>
-
-        {open && (
-          <div className="mt-3 space-y-3 border-t pt-3">
-            <div className="flex flex-wrap gap-1.5">
-              {restDims.map((dim) => {
-                const v = e[dim.key];
-                if (v == null) return null;
-                return (
-                  <Badge key={dim.key} variant={isBest[dim.key] ? "primary" : "outline"} className="text-xs">
-                    {dim.label}: {dim.fmt ? dim.fmt(v) : v}
-                  </Badge>
-                );
-              })}
-            </div>
-
-            {(e.benchmarks ?? []).length > 3 && (
-              <div>
-                <p className="mb-1 text-xs font-medium text-muted-foreground">More benchmarks</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {(e.benchmarks ?? []).slice(3).map((b) => (
-                    <Badge key={b.dimension}
-                      variant={b.delta != null && b.delta > 0 ? "warning" : "default"}
-                      className="text-xs">
-              {b.dimension}: {b.delta != null ? `${b.delta >= 0 ? "+" : ""}${(b.owned_value ? (b.delta / b.owned_value * 100).toFixed(0) : "—")}%` : "—"}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {e.deal_mix && Object.keys(e.deal_mix).length > 0 && (
-              <div>
-                <p className="mb-1 text-xs font-medium text-muted-foreground">Deal mix</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {Object.entries(e.deal_mix).map(([t, s]: [string, any]) => (
-                    <Badge key={t} variant="outline" className="text-xs">
-                      {t}: {(s * 100).toFixed(0)}%
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          className="mt-2 flex w-full items-center justify-center gap-1 rounded-md py-1 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
         >
-          <HugeiconsIcon icon={ChevronDownIcon} className={cn("h-3 w-3 transition-transform", open && "rotate-180")} />
-          {open ? "Less" : `${restDims.filter((d) => e[d.key] != null).length} more metrics`}
-        </button>
-      </div>
-    </Card>
+          ({delta >= 0 ? "+" : ""}{delta.toFixed(1)})
+        </span>
+      )}
+    </span>
   );
 }
 
-function MerchantsTab() {
-  const q = useMerchants();
+/**
+ * Single consolidated competitor table — replaces the old card grid + separate style/behaviour
+ * benchmark table. Deliberately drops similarity_to_us, deal-mix badges, and granular style
+ * rates (cta/coupon/multi_deal/emoji/hashtag/links/media) from display; the backend may keep
+ * computing them, they're just not rendered here.
+ */
+function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
   return (
-    <Async q={q} rows={2}>
-      {(d) => {
-        const coverage = d.coverage?.owned;
-        const channels = [...(d.mix?.channels || [])].sort((a, b) => (b.is_owned ? 1 : 0) - (a.is_owned ? 1 : 0));
-        const merchants = d.mix?.merchants || [];
-        const maxViewsPerDay = Math.max(
-          0,
-          ...(d.profiles || []).map((p) => p.avg_views_per_day ?? 0),
-        );
-
-        return (
-          <div className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Your channel · merchant performance</CardTitle>
-                {coverage && (
-                  <p className="text-xs text-muted-foreground">
-                    Merchant resolved on {fmtNum(coverage.resolved)} of {fmtNum(coverage.total)} posts
-                    ({Math.round(coverage.pct * 100)}%). Only posts with a recognized store link are counted —
-                    shortlinks stay unresolved.
-                  </p>
-                )}
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Merchant</TableHead>
-                      <TableHead>Posts</TableHead>
-                      <TableHead>Views/day</TableHead>
-                      <TableHead>Median price</TableHead>
-                      <TableHead>Sample</TableHead>
-                      <TableHead>Confidence</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {(d.profiles || []).map((p) => {
-                      const lowConfidence = p.confidence < 0.3 || p.posts < 10;
-                      return (
-                        <TableRow key={p.merchant} className={cn(lowConfidence && "text-muted-foreground")}>
-                          <TableCell className="font-medium">
-                            <div className="flex items-center gap-2">
-                              <span>{p.merchant}</span>
-                              {lowConfidence && (
-                                <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
-                                  low sample
-                                </Badge>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell>{p.posts}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-2">
-                              <span>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</span>
-                              {p.avg_views_per_day != null && maxViewsPerDay > 0 && (
-                                <InlineBar pct={(p.avg_views_per_day / maxViewsPerDay) * 100} />
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell>{p.price_median != null ? `₹${fmtNum(p.price_median)}` : "—"}</TableCell>
-                          <TableCell>{fmtNum(p.price_sample_size)}</TableCell>
-                          <TableCell>
-                            <Badge variant={lowConfidence ? "outline" : "secondary"} className="text-xs">
-                              {fmtPct(p.confidence)}
-                            </Badge>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                    {(d.profiles || []).length === 0 && (
-                      <TableRow>
-                        <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
-                          No merchant data yet.
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Merchant mix — you vs competitors</CardTitle>
-                <p className="text-xs text-muted-foreground">
-                  Share of resolved posts per merchant, compared across channels.
-                </p>
-              </CardHeader>
-              <CardContent className="p-0">
-                {channels.length < 2 ? (
-                  <p className="p-4 text-sm text-muted-foreground">
-                    Not enough resolved merchant data across channels to compare yet.
-                  </p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Merchant</TableHead>
-                          {channels.map((c) => (
-                            <TableHead key={c.name} className={cn(c.is_owned && "text-primary")}>
-                              <div>{c.is_owned ? "You" : c.name}</div>
-                              {c.coverage_pct != null && (
-                                <div className="text-[10px] font-normal text-muted-foreground">
-                                  {fmtPct(c.coverage_pct)} resolved
-                                </div>
-                              )}
-                            </TableHead>
-                          ))}
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {merchants.map((m) => (
-                          <TableRow key={m}>
-                            <TableCell className="font-medium">{m}</TableCell>
-                            {channels.map((c) => {
-                              const share = c.shares?.[m];
-                              return (
-                                <TableCell key={c.name} className={cn(c.is_owned && "font-medium text-primary")}>
-                                  <div className="flex items-center gap-2">
-                                    <span>{fmtPct(share)}</span>
-                                    {share != null && (
-                                      <InlineBar pct={share * 100} tone={c.is_owned ? "primary" : "default"} />
-                                    )}
-                                  </div>
-                                </TableCell>
-                              );
-                            })}
-                          </TableRow>
-                        ))}
-                        {merchants.length === 0 && (
-                          <TableRow>
-                            <TableCell colSpan={channels.length + 1} className="text-center text-sm text-muted-foreground">
-                              No merchant mix data yet.
-                            </TableCell>
-                          </TableRow>
-                        )}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <section>
-              <h2 className="mb-3 text-lg font-semibold">Opportunities</h2>
-              <div className="space-y-3">
-                {(d.opportunities || []).map((o, i) => (
-                  <CalloutCard
-                    key={i}
-                    severity="info"
-                    label={o.kind}
-                    title={o.description}
-                  >
-                    {o.merchant && <Badge variant="primary">{o.merchant}</Badge>}
-                  </CalloutCard>
-                ))}
-                {(d.opportunities || []).length === 0 && (
-                  <p className="text-sm text-muted-foreground">No merchant opportunities surfaced.</p>
-                )}
-              </div>
-            </section>
-          </div>
-        );
-      }}
-    </Async>
-  );
-}
-
-function SignalsSection({ signals }: { signals: any[] }) {
-  if (!signals.length) return null;
-  const threats = signals.filter((s) => s.type === "threat");
-  const opportunities = signals.filter((s) => s.type === "opportunity");
-  return (
-    <section>
-      <h2 className="mb-3 text-lg font-semibold">Signals &amp; opportunities</h2>
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <HugeiconsIcon icon={Alert01Icon} className="h-4 w-4 text-orange-500" />
-              <CardTitle className="text-sm font-semibold">Threats</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {threats.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No threats detected.</p>
-            ) : (
-              threats.map((s, i) => (
-                <CalloutCard key={i} severity="warning" label={s.competitor} title={s.description}>
-                  {s.kind}
-                </CalloutCard>
-              ))
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <HugeiconsIcon icon={Idea01Icon} className="h-4 w-4 text-emerald-500" />
-              <CardTitle className="text-sm font-semibold">Opportunities</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {opportunities.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No opportunities spotted.</p>
-            ) : (
-              opportunities.map((s, i) => (
-                <CalloutCard key={i} severity="success" label={s.competitor} title={s.description}>
-                  {s.kind}
-                </CalloutCard>
-              ))
-            )}
-          </CardContent>
-        </Card>
-      </div>
-    </section>
+    <div className="overflow-x-auto">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Competitor</TableHead>
+            <TableHead>Subscribers</TableHead>
+            <TableHead>Posts/day</TableHead>
+            <TableHead>Num posts</TableHead>
+            <TableHead>
+              <span className="inline-flex items-center gap-1">
+                Avg views/post
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <HugeiconsIcon icon={InformationCircleIcon} className="h-3.5 w-3.5 cursor-help text-muted-foreground" />
+                  </TooltipTrigger>
+                  <TooltipContent>approx · public view count</TooltipContent>
+                </Tooltip>
+              </span>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {entities.map((e) => (
+            <TableRow key={e.name} className="hover:bg-muted/50">
+              <TableCell className="font-medium">
+                <div className="flex items-center gap-2">
+                  <span className="truncate">{e.name}</span>
+                  <CategoryBadge category={e.category} />
+                </div>
+              </TableCell>
+              <TableCell>{fmtCompact(e.subscribers)}</TableCell>
+              <TableCell><PostsPerDayCell e={e} /></TableCell>
+              <TableCell>{fmtNum(e.posts)}</TableCell>
+              <TableCell>{fmtNum(e.avg_views_per_post)}</TableCell>
+            </TableRow>
+          ))}
+          {entities.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+                No competitors in this category.
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
   );
 }
 
@@ -413,7 +140,7 @@ export default function CompetitorDashboardPage() {
   const preset = get("preset", "7d");
   const startParam = get("start", "");
   const endParam = get("end", "");
-  const tab = get("tab", "all") as "all" | "platform" | "channel" | "merchants";
+  const tab = get("tab", "all") as "all" | "platform" | "channel";
 
   const { window, start, end } = useMemo(() => {
     if (preset === "custom" && startParam && endParam) {
@@ -445,7 +172,6 @@ export default function CompetitorDashboardPage() {
         <h1 className="text-2xl font-bold tracking-tight">Competitor dashboard</h1>
         <p className="text-sm text-muted-foreground">
           Direct competitors (platform + Telegram) vs Telegram-only channels — all metrics, side by side.
-          Date range applies to competitor metrics only — the Merchants tab always shows all-time data.
         </p>
       </div>
 
@@ -466,153 +192,95 @@ export default function CompetitorDashboardPage() {
             <TabsTrigger value="all">All</TabsTrigger>
             <TabsTrigger value="platform">Direct</TabsTrigger>
             <TabsTrigger value="channel">Indirect</TabsTrigger>
-            <TabsTrigger value="merchants">Merchants</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
 
-      {tab === "merchants" ? <MerchantsTab /> : (
-        <Async q={q} rows={2}>
-          {(d) => {
-            if ((d.platform ?? []).length === 0 && (d.channel ?? []).length === 0) {
-              return <Empty>No competitor data yet. Run competitor discovery first.</Empty>;
-            }
+      <Async q={q} rows={2}>
+        {(d) => {
+          if ((d.platform ?? []).length === 0 && (d.channel ?? []).length === 0) {
+            return <Empty>No competitor data yet. Run competitor discovery first.</Empty>;
+          }
 
-            const rawEntities = [...(d.platform ?? []), ...(d.channel ?? [])];
-            const entities = tab === "all" ? rawEntities : rawEntities.filter((e: any) => e.category === tab);
+          const rawEntities = [...(d.platform ?? []), ...(d.channel ?? [])];
+          const entities = tab === "all" ? rawEntities : rawEntities.filter((e: any) => e.category === tab);
 
-            const best: Record<string, boolean> = {};
-            STYLE_DIMS.forEach((dim) => {
-              const vals = entities.map((e: any) => e[dim.key]).filter((v: any) => v != null);
-              const maxV = vals.length ? Math.max(...vals) : null;
-              entities.forEach((e: any) => {
-                if (e[dim.key] != null && maxV != null && e[dim.key] === maxV) best[`${e.name}_${dim.key}`] = true;
-              });
-            });
+          const allTypes = new Set<string>();
+          entities.forEach((e: any) => { if (e.deal_mix) Object.keys(e.deal_mix).forEach((t) => allTypes.add(t)); });
+          const dealTypes = Array.from(allTypes);
 
-            const allTypes = new Set<string>();
-            entities.forEach((e: any) => { if (e.deal_mix) Object.keys(e.deal_mix).forEach((t) => allTypes.add(t)); });
-            const dealTypes = Array.from(allTypes);
+          const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+          const wdData = days.map((day) => {
+            const row: any = { label: day };
+            entities.forEach((e: any) => { row[e.name] = e.weekday_distribution?.[day] ?? 0; });
+            return row;
+          });
+          const hourly = Array.from({ length: 24 }, (_, h) => {
+            const row: any = { label: `${String(h).padStart(2, "0")}` };
+            entities.forEach((e: any) => { row[e.name] = e.posts_per_hour_ist?.[h] ?? 0; });
+            return row;
+          });
 
-            const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-            const wdData = days.map((day) => {
-              const row: any = { label: day };
-              entities.forEach((e: any) => { row[e.name] = e.weekday_distribution?.[day] ?? 0; });
-              return row;
-            });
-            const hourly = Array.from({ length: 24 }, (_, h) => {
-              const row: any = { label: `${String(h).padStart(2, "0")}` };
-              entities.forEach((e: any) => { row[e.name] = e.posts_per_hour_ist?.[h] ?? 0; });
-              return row;
-            });
+          const weekSeries = entities.map((e: any) => ({ key: e.name, name: e.name }));
+          const hourSeries = entities.map((e: any) => ({ key: e.name, name: e.name }));
 
-            const weekSeries = entities.map((e: any) => ({ key: e.name, name: e.name }));
-            const hourSeries = entities.map((e: any) => ({ key: e.name, name: e.name }));
+          const dealData = entities.map((e: any) => {
+            const row: any = { label: e.name };
+            dealTypes.forEach((t) => { row[t] = e.deal_mix?.[t] ?? 0; });
+            return row;
+          });
+          const dealKeys = dealTypes.map((t) => ({ key: t, name: t }));
 
-            const dealData = entities.map((e: any) => {
-              const row: any = { label: e.name };
-              dealTypes.forEach((t) => { row[t] = e.deal_mix?.[t] ?? 0; });
-              return row;
-            });
-            const dealKeys = dealTypes.map((t) => ({ key: t, name: t }));
+          return (
+            <div className="space-y-4">
+              <div className="grid gap-6 sm:grid-cols-3">
+                <StatCard label="Competitors" value={fmtNum(d.summary?.total ?? 0)} />
+                <StatCard label="Direct (platform)" value={fmtNum(d.summary?.platform ?? 0)} />
+                <StatCard label="Indirect (Telegram)" value={fmtNum(d.summary?.channel ?? 0)} />
+              </div>
 
-            return (
-              <div className="space-y-4">
-                <div className="grid gap-6 sm:grid-cols-4">
-                  <StatCard label="Competitors" value={fmtNum(d.summary?.total ?? 0)} />
-                  <StatCard label="Direct (platform)" value={fmtNum(d.summary?.platform ?? 0)} />
-                  <StatCard label="Indirect (Telegram)" value={fmtNum(d.summary?.channel ?? 0)} />
-                  <StatCard label="Signals" value={fmtNum(d.summary?.signals ?? 0)} />
-                </div>
-
-                <div className="space-y-2">
-                  <h2 className="text-lg font-semibold">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">
                     {tab === "all" ? "All competitors" : tab === "platform" ? "Direct competitors" : "Indirect competitors"}
                     <span className="ml-2 text-sm font-normal text-muted-foreground">{entities.length}</span>
-                  </h2>
-                  {entities.length === 0 ? (
-                    <Empty>No competitors in this category.</Empty>
-                  ) : (
-                    entities.map((e: any) => (
-                      <CompCard key={e.name} e={e}
-                        isBest={Object.fromEntries(STYLE_DIMS.map((dim) => [dim.key, best[`${e.name}_${dim.key}`]]))} />
-                    ))
-                  )}
-                </div>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <CompetitorsTable entities={entities} />
+                </CardContent>
+              </Card>
 
-                {entities.length >= 2 && (
-                  <Card>
-                    <CardHeader><CardTitle className="text-base">Style &amp; behaviour benchmark</CardTitle>
-                      </CardHeader>
-                    <CardContent className="overflow-x-auto p-0">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Metric</TableHead>
-                            {entities.map((e: any, i: number) => (
-                              <TableHead key={i} className="text-right">{e.name}</TableHead>
-                            ))}
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {STYLE_DIMS.map((dim) => {
-                            const vals = entities.map((e: any) => e[dim.key]);
-                            const numeric = vals.filter((v: any) => v != null && typeof v === "number");
-                            const bestV = numeric.length ? Math.max(...numeric) : null;
-                            return (
-                              <TableRow key={dim.key} className="hover:bg-muted/50">
-                                <TableCell className="text-xs text-muted-foreground">{dim.label}</TableCell>
-                                {entities.map((e: any, i: number) => {
-                                  const v = e[dim.key];
-                                  const isB = v != null && bestV != null && v === bestV;
-                                  return (
-                                    <TableCell key={i} className={cn("text-right font-mono text-xs", isB && "font-bold text-green-500")}>
-                                      {v != null ? (dim.fmt ? dim.fmt(v) : v) : "—"}
-                                    </TableCell>
-                                  );
-                                })}
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                      </Table>
-                    </CardContent>
-                  </Card>
-                )}
+              {dealTypes.length > 0 && entities.length >= 2 && (
+                <Card>
+                  <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Deal-type mix</CardTitle>
+                    <p className="text-xs text-muted-foreground">What each competitor emphasises.</p></CardHeader>
+                  <CardContent>
+                    <StackedBarsChart data={dealData} keys={dealKeys} unit="%" height={260} />
+                  </CardContent>
+                </Card>
+              )}
 
-                {dealTypes.length > 0 && entities.length >= 2 && (
+              {entities.length >= 2 && (
+                <div className="grid gap-4 lg:grid-cols-2">
                   <Card>
-                    <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Deal-type mix</CardTitle>
-                      <p className="text-xs text-muted-foreground">What each competitor emphasises.</p></CardHeader>
+                    <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Posting by weekday</CardTitle></CardHeader>
                     <CardContent>
-                      <StackedBarsChart data={dealData} keys={dealKeys} unit="%" height={260} />
+                      <MultiLineChart data={wdData} series={weekSeries} unit=" posts" height={220} />
                     </CardContent>
                   </Card>
-                )}
-
-                {entities.length >= 2 && (
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    <Card>
-                      <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Posting by weekday</CardTitle></CardHeader>
-                      <CardContent>
-                        <MultiLineChart data={wdData} series={weekSeries} unit=" posts" height={220} />
-                      </CardContent>
-                    </Card>
-                    <Card>
-                      <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Posting by hour (IST)</CardTitle></CardHeader>
-                      <CardContent>
-                        <MultiLineChart data={hourly} series={hourSeries} unit=" posts" height={220} />
-                      </CardContent>
-                    </Card>
-                  </div>
-                )}
-
-                <SignalsSection signals={d.signals ?? []} />
-              </div>
-            );
-          }}
-        </Async>
-      )}
+                  <Card>
+                    <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Posting by hour (IST)</CardTitle></CardHeader>
+                    <CardContent>
+                      <MultiLineChart data={hourly} series={hourSeries} unit=" posts" height={220} />
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+            </div>
+          );
+        }}
+      </Async>
     </div>
   );
 }

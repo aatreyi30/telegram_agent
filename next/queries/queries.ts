@@ -6,7 +6,7 @@ import { queryKeys } from "./keys";
 import type {
   AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorsResponse,
   DailyBrief, DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
-  MerchantsResponse, OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
+  OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
   QueueResponse, UsersResponse, WeeklyBrief, WeeklyResponse,
 } from "@/types/api";
 
@@ -66,9 +66,6 @@ export function useCompetitorDashboard(window?: number | null) {
     queryKey: queryKeys.competitorDashboard(window),
     queryFn: () => api.get<CompetitorDashboardResponse>(`/competitor-dashboard${window ? `?window=${window}` : ""}`),
   });
-}
-export function useMerchants() {
-  return useQuery({ queryKey: queryKeys.merchants(), queryFn: () => api.get<MerchantsResponse>("/merchants") });
 }
 export function usePlans() {
   return useQuery({ queryKey: queryKeys.plans(), queryFn: () => api.get<PlansResponse>("/plans") });

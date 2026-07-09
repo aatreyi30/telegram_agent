@@ -9,10 +9,9 @@ import {
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { StatCard } from "@/components/StatCard";
-import { CalloutCard } from "@/components/CalloutCard";
 import { Async } from "@/components/Async";
 import { TimelineChart, StackedBarsChart } from "@/components/charts";
-import { useOverview, useGrowth, useCompetitorDashboard, useInsights, useDrafts, useQueue } from "@/queries/queries";
+import { useOverview, useGrowth, useInsights, useDrafts, useQueue } from "@/queries/queries";
 import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint, SourceBreakdown } from "@/types/api";
 
 function fmtNum(n: number | null | undefined): string {
@@ -148,7 +147,6 @@ function PriorityCard({ rec }: { rec: GrowthRecommendation }) {
 export default function OverviewPage() {
   const overview = useOverview();
   const growth = useGrowth();
-  const competitors = useCompetitorDashboard();
   const insights = useInsights();
 
   return (
@@ -173,89 +171,50 @@ export default function OverviewPage() {
               <StatCard label="Queued" value={Object.values(data.queue_counts).reduce((a, b) => a + b, 0).toLocaleString()} sub={<QueueStats queue_counts={data.queue_counts} />} icon={<HugeiconsIcon icon={BarChartIcon} className="h-4 w-4" />} />
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-3">
-              <Card className="col-span-2 rounded-xl overflow-hidden">
-                <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <CardTitle>Growth</CardTitle>
-                      <CardDescription>Subscriber growth over time</CardDescription>
-                    </div>
-                    <Link href="/analytics" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
-                      View details <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
-                    </Link>
+            <Card className="rounded-xl overflow-hidden">
+              <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Growth</CardTitle>
+                    <CardDescription>Subscriber growth over time</CardDescription>
                   </div>
-                </CardHeader>
-                <CardContent>
-                  <Async q={growth} rows={4}>
-                    {(g) => {
-                      if (!g.available) return <p className="text-sm text-muted-foreground">{g.reason}</p>;
-                      const chartData = g.daily.map((d) => ({ label: d.date, subs_end: d.subs_end ?? 0 }));
-                      const churnData = g.daily.map((d) => ({ label: d.date, joined: d.joined, left: d.left }));
-                      const subsTrend = periodTrend(g.daily, "subs_end", "avg");
-                      const joinedTrend = periodTrend(g.daily, "joined", "sum");
-                      const netTrend = periodTrend(g.daily, "net", "sum");
-                      return (
-                        <div className="space-y-4">
-                          <div className="grid grid-cols-3 gap-3">
-                            <StatCard label="Subscribers" value={fmtNum(g.current)}
-                              trend={subsTrend ? { ...subsTrend, label: "vs prior period" } : undefined} />
-                            <StatCard label="Joined" value={`+${fmtNum(g.joined)}`}
-                              trend={joinedTrend ? { ...joinedTrend, label: "vs prior period" } : undefined} />
-                            <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)}
-                              trend={netTrend ? { ...netTrend, label: "vs prior period" } : undefined} />
-                          </div>
-                          <TimelineChart data={chartData} dataKey="subs_end" unit="" />
-                          <div>
-                            <p className="mb-1 text-xs font-medium text-muted-foreground">Joined vs left</p>
-                            <TimelineChart data={churnData} dataKey="joined" secondaryKey="left" unit="" secondaryUnit="" />
-                          </div>
-                          <SourceBreakdownSection viewSources={g.view_sources} followerSources={g.follower_sources} />
+                  <Link href="/analytics" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
+                    View details <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
+                  </Link>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <Async q={growth} rows={4}>
+                  {(g) => {
+                    if (!g.available) return <p className="text-sm text-muted-foreground">{g.reason}</p>;
+                    const chartData = g.daily.map((d) => ({ label: d.date, subs_end: d.subs_end ?? 0 }));
+                    const churnData = g.daily.map((d) => ({ label: d.date, joined: d.joined, left: d.left }));
+                    const subsTrend = periodTrend(g.daily, "subs_end", "avg");
+                    const joinedTrend = periodTrend(g.daily, "joined", "sum");
+                    const netTrend = periodTrend(g.daily, "net", "sum");
+                    return (
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-3 gap-3">
+                          <StatCard label="Subscribers" value={fmtNum(g.current)}
+                            trend={subsTrend ? { ...subsTrend, label: "vs prior period" } : undefined} />
+                          <StatCard label="Joined" value={`+${fmtNum(g.joined)}`}
+                            trend={joinedTrend ? { ...joinedTrend, label: "vs prior period" } : undefined} />
+                          <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)}
+                            trend={netTrend ? { ...netTrend, label: "vs prior period" } : undefined} />
                         </div>
-                      );
-                    }}
-                  </Async>
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-xl">
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <CardTitle>Competitor signals</CardTitle>
-                      <CardDescription>Recent threats &amp; opportunities</CardDescription>
-                    </div>
-                    <Link href="/competitors" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
-                      View <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
-                    </Link>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <Async q={competitors} rows={3}>
-                    {(c) => {
-                      const top = c.signals.slice(0, 2);
-                      if (top.length === 0) return <p className="text-sm text-muted-foreground">No signals detected.</p>;
-                      return (
-                        <>
-                          {top.map((s, i) => (
-                            <CalloutCard
-                              key={i}
-                              severity={s.type === "threat" ? "warning" : "success"}
-                              title={s.description}
-                              label={`${s.competitor} · ${s.kind}`}
-                            />
-                          ))}
-                          <p className="text-xs text-muted-foreground">
-                            Showing {top.length} of {c.signals.length} signal{c.signals.length === 1 ? "" : "s"}
-                          </p>
-                        </>
-                      );
-                    }}
-                  </Async>
-                </CardContent>
-              </Card>
-            </div>
+                        <TimelineChart data={chartData} dataKey="subs_end" unit="" />
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">Joined vs left</p>
+                          <TimelineChart data={churnData} dataKey="joined" secondaryKey="left" unit="" secondaryUnit="" />
+                        </div>
+                        <SourceBreakdownSection viewSources={g.view_sources} followerSources={g.follower_sources} />
+                      </div>
+                    );
+                  }}
+                </Async>
+              </CardContent>
+            </Card>
 
             <div className="grid gap-6 lg:grid-cols-4">
               <Card className="col-span-3 rounded-xl">

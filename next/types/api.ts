@@ -137,6 +137,7 @@ export interface CompetitorBenchmarkRow { dimension: string; owned_value: number
 
 export interface CompetitorEntity {
   name: string; is_owned?: boolean; category?: "platform" | "channel" | "unclassified";
+  subscribers?: number | null;
   posts_per_day?: number | null; avg_views_per_post?: number | null;
   emoji_rate?: number | null; cta_rate?: number | null; coupon_rate?: number | null;
   hashtag_rate?: number | null; media_rate?: number | null; avg_links?: number | null;
@@ -147,34 +148,12 @@ export interface CompetitorEntity {
   [key: string]: any;
 }
 
-export interface CompetitorSignalDTO { type: "threat" | "opportunity"; competitor: string; kind: string; description: string; confidence: number; }
-
-export interface CompetitorsResponse { profiles: CompetitorEntity[]; signals: CompetitorSignalDTO[]; }
+export interface CompetitorsResponse { profiles: CompetitorEntity[]; }
 
 export interface CompetitorDashboardResponse {
-  summary: { total: number; platform: number; channel: number; signals: number; };
+  summary: { total: number; platform: number; channel: number; };
   platform: CompetitorEntity[]; channel: CompetitorEntity[];
-  signals: CompetitorSignalDTO[]; unavailable: string[]; note: string; metrics: string[]; applied_window: number | null;
-}
-
-export interface MerchantProfileRow {
-  merchant: string; posts: number; avg_views_per_day: number | null;
-  price_median: number | null; price_sample_size: number | null; confidence: number;
-}
-export interface MerchantOpportunityDTO { merchant?: string; kind: string; description: string; confidence: number; }
-
-export interface MerchantMixChannel {
-  name: string; is_owned: boolean; resolved_posts: number;
-  coverage_pct: number | null; shares: Record<string, number>;
-}
-
-export interface MerchantMix { merchants: string[]; channels: MerchantMixChannel[]; }
-
-export interface MerchantsResponse {
-  profiles: MerchantProfileRow[];
-  coverage: { owned: { resolved: number; total: number; pct: number } };
-  opportunities: MerchantOpportunityDTO[];
-  mix: MerchantMix;
+  unavailable: string[]; note: string; metrics: string[]; applied_window: number | null;
 }
 
 export interface DealTypeAllocation { deal_type: string; post_type: string; target_posts: number; avg_views_per_day: number | null; }
