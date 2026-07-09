@@ -27,10 +27,9 @@ from src.db.models_competitor_intel import (
 )
 
 MIN_POSTS = 10
-UNAVAILABLE = ["reactions", "forwards", "reach", "engagement_rate"]
+UNAVAILABLE = ["reach", "engagement_rate"]
 _UNAVAILABLE_NOTE = (
-    "Reactions, forwards, reach and engagement-rate need channel admin "
-    "rights (your channel) or a bot in the channel; competitor data is the "
+    "Reach and engagement-rate need channel admin rights; competitor data is the "
     "public t.me/s view count only. Shown as unavailable, never estimated."
 )
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -96,7 +95,7 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
     # Owned entity
     # ------------------------------------------------------------------ #
     owned_q = (
-        select(Post.posted_at, Post.views)
+        select(Post.posted_at, Post.views, Post.reactions_total, Post.forwards)
         .join(NormalizedPost, NormalizedPost.source_id == Post.id)
         .where(NormalizedPost.source_type == SourceType.OWNED, Post.posted_at.isnot(None))
     )
@@ -104,7 +103,7 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
         owned_q = owned_q.where(Post.posted_at >= cutoff)
     owned_rows = s.execute(owned_q).all()
 
-    owned_dates = [d for d, _ in owned_rows if d]
+    owned_dates = [d for d, _, _, _ in owned_rows if d]
     if len(owned_dates) < min(MIN_POSTS, 2) if cutoff else MIN_POSTS:
         return {
             "entities": [],
@@ -115,7 +114,11 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
             "applied_window": window_days,
         }
 
-    stats = _basic_stats([(d, v) for d, v in owned_rows])
+    stats = _basic_stats([(d, v) for d, v, _, _ in owned_rows])
+    owned_reactions = [r for _, _, r, _ in owned_rows if r is not None]
+    owned_forwards = [f for _, _, _, f in owned_rows if f is not None]
+    owned_avg_reactions = round(statistics.fmean(owned_reactions)) if owned_reactions else None
+    owned_avg_forwards = round(statistics.fmean(owned_forwards)) if owned_forwards else None
     owned: dict = {
         "name": "You (owned)",
         "is_owned": True,
@@ -125,7 +128,8 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
         owned.update(stats)
     owned.update({
         "similarity_to_us": 1.0,
-        "reactions": None, "forwards": None, "reach": None, "engagement_rate": None,
+        "reactions": owned_avg_reactions, "forwards": owned_avg_forwards,
+        "reach": None, "engagement_rate": None,
     })
 
     # style profile (full-window, always)

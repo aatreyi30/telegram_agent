@@ -162,6 +162,7 @@ def _normalise_username(name: str) -> str:
 
 async def _search(settings, exclude: set[str], limit_per_query: int = 20) -> list[dict]:
     from telethon import TelegramClient
+    from telethon.errors import FloodWaitError
     from telethon.tl.functions.contacts import SearchRequest
 
     client = TelegramClient(
@@ -177,9 +178,13 @@ async def _search(settings, exclude: set[str], limit_per_query: int = 20) -> lis
         for q in _QUERIES:
             try:
                 res = await client(SearchRequest(q=q, limit=limit_per_query))
+            except FloodWaitError as e:
+                logger.warning("[discovery] query %r flood-wait %ss — aborting search", q, e.seconds)
+                return list(found.values())
             except Exception as e:
                 logger.warning("[discovery] query %r failed: %s", q, e)
                 continue
+            await asyncio.sleep(1.5)
             for chat in getattr(res, "chats", []):
                 uname = getattr(chat, "username", None)
                 is_channel = getattr(chat, "broadcast", False)
@@ -203,6 +208,7 @@ async def _search_name_variations(
 ) -> list[dict]:
     """Search Telegram for a specific name and all its variations."""
     from telethon import TelegramClient
+    from telethon.errors import FloodWaitError
     from telethon.tl.functions.contacts import SearchRequest
 
     client = TelegramClient(
@@ -219,9 +225,13 @@ async def _search_name_variations(
         for q in queries:
             try:
                 res = await client(SearchRequest(q=q, limit=limit_per_query))
+            except FloodWaitError as e:
+                logger.warning("[discovery:resolve] query %r flood-wait %ss — aborting search", q, e.seconds)
+                return list(found.values())
             except Exception as e:
                 logger.debug("[discovery:resolve] query %r failed: %s", q, e)
                 continue
+            await asyncio.sleep(1.5)
             for chat in getattr(res, "chats", []):
                 uname = _normalise_username(getattr(chat, "username", None) or "")
                 is_channel = getattr(chat, "broadcast", False)
@@ -271,6 +281,7 @@ def discover_competitors(max_add: int = 5) -> dict:
     candidates.sort(key=lambda c: c["score"], reverse=True)
 
     added = 0
+    newly_added_usernames = []
     with session_scope() as sess:
         for c in candidates:
             if added >= max_add:
@@ -284,9 +295,30 @@ def discover_competitors(max_add: int = 5) -> dict:
                 access_status=SourceAccessStatus.AVAILABLE,
                 discovered_via="telegram_search",
                 category=category,
+                last_collected_at=None,  # Never collected yet
             ))
+            newly_added_usernames.append(c["username"])
             added += 1
     logger.info("[discovery] %d candidates, +%d new", len(candidates), added)
+    
+    # Trigger initial backfill for newly discovered competitors
+    if newly_added_usernames:
+        logger.info("[discovery] triggering initial backfill for %d new competitors", len(newly_added_usernames))
+        from src.services.collection.telegram_competitor import CompetitorCollector
+        from src.services.collection.base import JobRunner
+        from src.db.models import CollectionType
+        runner = JobRunner()
+        for username in newly_added_usernames:
+            try:
+                job = runner.run_collector(
+                    CompetitorCollector(username, max_pages=5, initial_backfill=True),
+                    collection_type=CollectionType.MANUAL,
+                    target=f"backfill_{username}"
+                )
+                logger.info("[discovery] backfill completed for %s: added=%d", username, job.records_added)
+            except Exception as e:
+                logger.error("[discovery] backfill failed for %s: %s", username, e)
+    
     return {"candidates": len(candidates), "added": added,
             "top": [c["username"] for c in candidates[:max_add]]}
 

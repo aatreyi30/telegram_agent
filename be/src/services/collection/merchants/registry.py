@@ -70,7 +70,7 @@ MERCHANT_SEED: list[dict] = [
     {
         "key": "ajio",
         "display_name": "AJIO",
-        "domains": ["ajio.com", "myntr.it"],
+        "domains": ["ajio.com"],
         "collector": None,
         "access_status": SourceAccessStatus.BLOCKED,
         "access_notes": "Akamai CDN — Access Denied. No public product API. Operator manual input only.",

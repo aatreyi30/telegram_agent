@@ -35,17 +35,18 @@ BASE_URL = "https://t.me/s/{username}"
 # In-process cache: original_configured_name -> resolved_actual_handle
 _resolved_handle: dict[str, str] = {}
 
-# Max messages to fetch per Telethon run (matches ~1 t.me/s page worth)
-_TELETHON_LIMIT = 50
+# Max messages to fetch per Telethon run (increased for better coverage)
+_TELETHON_LIMIT = 200
 
 
 class CompetitorCollector(BaseCollector):
     name = "telegram_competitor"
 
-    def __init__(self, username: str, max_pages: int = 1):
+    def __init__(self, username: str, max_pages: int = 1, initial_backfill: bool = False):
         self.original_name = username.lstrip("@")
         self.username = _resolved_handle.get(self.original_name, self.original_name)
         self.max_pages = max_pages
+        self.initial_backfill = initial_backfill  # If True, fetch full month of data
         self.settings = get_settings()
         self.bus = get_event_bus()
 
@@ -93,7 +94,10 @@ class CompetitorCollector(BaseCollector):
                 return None
 
             result = CollectorResult()
-            async for msg in client.iter_messages(entity, limit=_TELETHON_LIMIT):
+            # For initial backfill, fetch more messages (approx 1 month worth)
+            limit = _TELETHON_LIMIT * 10 if self.initial_backfill else _TELETHON_LIMIT
+            logger.info("[competitor:telethon] fetching with limit=%d (initial_backfill=%s)", limit, self.initial_backfill)
+            async for msg in client.iter_messages(entity, limit=limit):
                 if msg.message is None and not msg.media:
                     continue
                 added, updated = await self._store_telethon_post(comp_id, msg, job_id)
@@ -198,6 +202,7 @@ class CompetitorCollector(BaseCollector):
                 s.add(cp)
                 s.flush()
                 added = 1
+                logger.info("[competitor:collector] post saved: competitor_id=%d post_id=%d tg_message_id=%d", comp_id, cp.id, msg.id)
             else:
                 changed = existing.content_sha256 != digest
                 existing.views = getattr(msg, "views", None)
@@ -231,13 +236,16 @@ class CompetitorCollector(BaseCollector):
         result = CollectorResult()
         before: int | None = None
         pages_done = 0
+        # For initial backfill, fetch more pages (approx 1 month worth)
+        max_pages = self.max_pages * 10 if self.initial_backfill else self.max_pages
+        logger.info("[competitor:httpx] fetching with max_pages=%d (initial_backfill=%s)", max_pages, self.initial_backfill)
 
         with httpx.Client(
             headers={"User-Agent": self.settings.tme_user_agent},
             timeout=30.0,
             follow_redirects=True,
         ) as client:
-            while pages_done < self.max_pages:
+            while pages_done < max_pages:
                 url = BASE_URL.format(username=self.username)
                 params = {"before": before} if before else None
                 resp = client.get(url, params=params)
@@ -373,6 +381,7 @@ class CompetitorCollector(BaseCollector):
                 s.add(cp)
                 s.flush()
                 added = 1
+                logger.info("[competitor:collector] post saved: competitor_id=%d post_id=%d tg_message_id=%d", comp_id, cp.id, p["msg_id"])
             else:
                 changed = existing.content_sha256 != digest
                 existing.views_text = p["views_text"]

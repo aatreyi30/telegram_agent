@@ -116,7 +116,7 @@ function CompCard({ e, isBest }: { e: CompetitorEntity; isBest: Record<string, b
                   : "bg-muted text-muted-foreground",
               )}
             >
-              {b.dimension}: {b.delta != null ? `${b.delta >= 0 ? "+" : ""}${(b.delta * 100).toFixed(0)}%` : "—"}
+              {b.dimension}: {b.delta != null ? `${b.delta >= 0 ? "+" : ""}${(b.owned_value ? (b.delta / b.owned_value * 100).toFixed(0) : "—")}%` : "—"}
             </span>
           ))}
           {e.tenure_label && (
@@ -146,7 +146,7 @@ function CompCard({ e, isBest }: { e: CompetitorEntity; isBest: Record<string, b
                     <Badge key={b.dimension}
                       variant={b.delta != null && b.delta > 0 ? "warning" : "default"}
                       className="text-xs">
-                      {b.dimension}: {b.delta != null ? `${b.delta >= 0 ? "+" : ""}${(b.delta * 100).toFixed(0)}%` : "—"}
+              {b.dimension}: {b.delta != null ? `${b.delta >= 0 ? "+" : ""}${(b.owned_value ? (b.delta / b.owned_value * 100).toFixed(0) : "—")}%` : "—"}
                     </Badge>
                   ))}
                 </div>
@@ -524,12 +524,6 @@ export default function CompetitorDashboardPage() {
                   <StatCard label="Indirect (Telegram)" value={fmtNum(d.summary?.channel ?? 0)} />
                   <StatCard label="Signals" value={fmtNum(d.summary?.signals ?? 0)} />
                 </div>
-
-                {d.unavailable?.length > 0 && (
-                  <div className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-                    <b>Unavailable:</b> {d.unavailable.join(", ")}. {d.note}
-                  </div>
-                )}
 
                 <div className="space-y-2">
                   <h2 className="text-lg font-semibold">
