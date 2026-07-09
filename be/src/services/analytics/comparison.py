@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.services.analytics.periods import IST
+from src.services.analytics.periods import to_ist
 from src.db.models import Competitor, CompetitorPost, Post
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.models_learning import ChannelStyleProfile, PostTypePerformance, LEARNING_VERSION
@@ -40,15 +40,15 @@ STYLE_METRICS = [
 
 
 def _fmt_date(dt: datetime | None) -> str | None:
-    return dt.astimezone(IST).isoformat() if dt else None
+    return to_ist(dt).isoformat() if dt else None
 
 
 def _tenure_label(first: datetime | None, last: datetime | None, n: int, window_filter: int | None = None) -> str | None:
     if not first or not last or not n:
         return None
     span = max((last - first).days, 0) + 1
-    f = first.astimezone(IST).strftime("%b %d")
-    l = last.astimezone(IST).strftime("%b %d, %Y")
+    f = to_ist(first).strftime("%b %d")
+    l = to_ist(last).strftime("%b %d, %Y")
     if window_filter:
         return f"Last {window_filter}d ({f}\u2192{l}) \u00b7 {n:,} posts"
     return f"{span}d window ({f}\u2192{l}) \u00b7 n={n:,} posts"
@@ -62,8 +62,8 @@ def _basic_stats(dated_views: list[tuple[datetime, int | None]]) -> dict | None:
         return None
     views = [v for _, v in dated_views if v is not None]
     span_days = max((max(dates) - min(dates)).days, 0) + 1
-    hours = Counter(d.astimezone(IST).hour for d in dates)
-    wd_counter = Counter(d.weekday() for d in dates)
+    hours = Counter(to_ist(d).hour for d in dates)
+    wd_counter = Counter(to_ist(d).weekday() for d in dates)
     return {
         "posts": len(dates),
         "window_days": span_days,

@@ -42,7 +42,9 @@ def _isolated_db():
                                  normalized_at=base, primary_merchant_key="amazon"))
 
         # 7 days of owned posts + a WEEKLY blueprint + subscriber stats for weekly_brief.
-        wk_base = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
+        # weekly_brief now resolves "end=2026-07-08" (a Wednesday) to the real IST
+        # calendar week containing it: Mon 2026-07-06 -> Sun 2026-07-12.
+        wk_base = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
         for i in range(7):
             p = Post(channel_id=ch.id, tg_message_id=1000 + i, posted_at=wk_base - timedelta(days=i),
                      collected_at=wk_base, views=80)
@@ -52,16 +54,16 @@ def _isolated_db():
                                  normalized_at=wk_base, primary_merchant_key="amazon"))
 
         s.add(CampaignPlan(
-            plan_type=PlanType.WEEKLY, title="Week of 2026-07-02",
-            target_date=date(2026, 7, 2), end_date=date(2026, 7, 8),
+            plan_type=PlanType.WEEKLY, title="Week of 2026-07-06",
+            target_date=date(2026, 7, 6), end_date=date(2026, 7, 12),
             blueprint={"daily_themes": {}}, confidence=0.5,
             generated_at=datetime.now(timezone.utc), is_ai_generated=False))
 
         s.add(DailySubscriberStat(
-            channel_id=ch.id, stat_date=date(2026, 7, 2),
+            channel_id=ch.id, stat_date=date(2026, 7, 6),
             subs_start=1000, subs_end=1010, subs_joined=10, subs_left=2, subs_net=8))
         s.add(DailySubscriberStat(
-            channel_id=ch.id, stat_date=date(2026, 7, 5),
+            channel_id=ch.id, stat_date=date(2026, 7, 9),
             subs_start=1010, subs_end=1010, subs_joined=5, subs_left=5, subs_net=0))
         s.flush()
     yield
@@ -132,15 +134,18 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
     assert r["ai_available"] is True
     assert r["digest"] == "Weekly digest text."
 
+    assert r["week_start"] == "2026-07-06"
+    assert r["week_end"] == "2026-07-12"
+
     by_date = {d["date"]: d for d in r["days"]}
-    assert by_date["2026-07-02"]["joined"] == 10
-    assert by_date["2026-07-02"]["left"] == 2
-    assert by_date["2026-07-02"]["net"] == 8
-    assert by_date["2026-07-05"]["net"] == 0
+    assert by_date["2026-07-06"]["joined"] == 10
+    assert by_date["2026-07-06"]["left"] == 2
+    assert by_date["2026-07-06"]["net"] == 8
+    assert by_date["2026-07-09"]["net"] == 0
     # A day with no DailySubscriberStat row gap-fills to zero, not a KeyError/None.
-    assert by_date["2026-07-03"] == {"date": "2026-07-03", "weekday": "Fri",
-                                      "posts": by_date["2026-07-03"]["posts"],
-                                      "views_avg": by_date["2026-07-03"]["views_avg"],
+    assert by_date["2026-07-07"] == {"date": "2026-07-07", "weekday": "Tue",
+                                      "posts": by_date["2026-07-07"]["posts"],
+                                      "views_avg": by_date["2026-07-07"]["views_avg"],
                                       "joined": 0, "left": 0, "net": 0}
 
     with session_scope() as s:
@@ -149,3 +154,37 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
             CampaignPlan.plan_type == PlanType.WEEKLY))
         assert wk.ai_digest == "Weekly digest text."
         assert wk.is_ai_generated is True
+
+
+def test_weekly_brief_reuses_cached_digest_on_second_call(monkeypatch):
+    """Regression test: weekly_brief() must call the AI at most once per calendar
+    week. Before this fix, weekly_brief() had no create-path for a missing WEEKLY
+    CampaignPlan row (unlike daily_brief()'s persist_ai_plan) — every single call
+    fell through to a fresh, non-deterministic Groq call. This reproduces exactly
+    the reported symptom: open the weekly plan twice, get two different digests."""
+    from src.controllers import service
+
+    calls = {"n": 0}
+
+    def _fake_generate(self, weekly=False):
+        calls["n"] += 1
+        return f"Digest attempt #{calls['n']}"
+
+    monkeypatch.setattr("src.ai.briefing.BriefingGenerator.generate", _fake_generate)
+
+    # A week with no pre-existing CampaignPlan row or seeded data (the earlier test
+    # in this module already cached 2026-07-06..07-12) — exercises the create-path
+    # that was missing: weekly_brief() previously could only UPDATE an existing
+    # row, never INSERT one, so it called the AI fresh on every single request.
+    first = service.weekly_brief(end="2026-09-02")
+    second = service.weekly_brief(end="2026-09-02")
+
+    assert calls["n"] == 1, "AI must only be called once for the same calendar week"
+    assert first["digest"] == "Digest attempt #1"
+    assert second["digest"] == "Digest attempt #1"  # reused, not "attempt #2"
+
+    # A different date INSIDE THE SAME calendar week must also hit the same cache.
+    third = service.weekly_brief(end=first["week_start"])
+    assert calls["n"] == 1
+    assert third["digest"] == "Digest attempt #1"
+    assert third["week_start"] == first["week_start"]

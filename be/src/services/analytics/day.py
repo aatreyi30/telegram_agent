@@ -10,26 +10,14 @@ from __future__ import annotations
 
 import statistics
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.services.analytics.periods import IST
+from src.services.analytics.periods import ist_day_bounds_utc, ist_range_bounds_utc, to_ist
 from src.db.models import Post, Merchant
 from src.db.models_normalization import NormalizedPost, SourceType
-
-
-def _ist_bounds(day: date):
-    start = datetime(day.year, day.month, day.day, tzinfo=IST)
-    return start, start + timedelta(days=1)
-
-
-def _ist_range_bounds(day: date, end: date):
-    """IST bounds for the inclusive [day, end] calendar-date range."""
-    start = datetime(day.year, day.month, day.day, tzinfo=IST)
-    stop = datetime(end.year, end.month, end.day, tzinfo=IST) + timedelta(days=1)
-    return start, stop
 
 
 def _post_type(is_multi_deal: bool) -> str:
@@ -75,7 +63,7 @@ def latest_owned_date(s: Session) -> date | None:
         select(func.max(Post.posted_at))
         .join(NormalizedPost, NormalizedPost.source_id == Post.id)
         .where(NormalizedPost.source_type == SourceType.OWNED))
-    return mx.astimezone(IST).date() if mx else None
+    return to_ist(mx).date() if mx else None
 
 
 def summarize(s: Session, day: date | None = None, end: date | None = None) -> dict:
@@ -94,7 +82,7 @@ def summarize(s: Session, day: date | None = None, end: date | None = None) -> d
         if day is None:
             return {"date": None, "available": False, "note": "No owned posts collected yet."}
     is_range = end is not None and end != day
-    start, stop = _ist_range_bounds(day, end) if is_range else _ist_bounds(day)
+    start, stop = ist_range_bounds_utc(day, end) if is_range else ist_day_bounds_utc(day)
     rows = list(_rows_between(s, start, stop))
     if not rows:
         if is_range:

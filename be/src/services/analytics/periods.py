@@ -8,7 +8,7 @@ consistent phrasing used across strategy rationale, insights, and charts.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -17,6 +17,38 @@ from src.db.models import Post
 from src.db.models_normalization import NormalizedPost, SourceType
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def to_ist(dt: datetime) -> datetime:
+    """Safely convert any datetime — naive (assumed UTC, this project's storage
+    convention) or aware — to a correct IST-aware datetime.
+
+    This is the ONE place any ``.astimezone(IST)`` conversion should go through.
+    Calling ``.astimezone(IST)`` directly on a value just read back from SQLite is
+    a trap: SQLAlchemy's SQLite driver returns naive datetimes even for columns
+    declared ``DateTime(timezone=True)`` (SQLite has no real tz-aware storage), and
+    Python's ``naive_dt.astimezone()`` silently assumes the *system's* local
+    timezone as the source — not UTC. On a machine whose local tz happens to be
+    IST, that assumption makes the bug invisible: it doesn't raise, it just quietly
+    returns the wrong calendar day.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
+
+
+def ist_day_bounds_utc(day: date) -> tuple[datetime, datetime]:
+    """UTC datetime half-open range [start, end) covering one IST calendar day."""
+    start = datetime(day.year, day.month, day.day, tzinfo=IST).astimezone(timezone.utc)
+    return start, start + timedelta(days=1)
+
+
+def ist_range_bounds_utc(start_day: date, end_day: date) -> tuple[datetime, datetime]:
+    """UTC datetime half-open range covering the inclusive IST date range [start_day, end_day]."""
+    start = datetime(start_day.year, start_day.month, start_day.day, tzinfo=IST).astimezone(timezone.utc)
+    stop = (datetime(end_day.year, end_day.month, end_day.day, tzinfo=IST)
+            .astimezone(timezone.utc) + timedelta(days=1))
+    return start, stop
 
 
 def _months(days: float) -> float:
@@ -50,7 +82,7 @@ def competitor_window(s: Session, username: str | None = None) -> dict:
 
 
 def _fmt_date(d) -> str:
-    return d.astimezone(IST).strftime("%Y-%m-%d") if d else "?"
+    return to_ist(d).strftime("%Y-%m-%d") if d else "?"
 
 
 def period_label(window: dict) -> str:

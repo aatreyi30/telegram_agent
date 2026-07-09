@@ -368,13 +368,14 @@ def scheduled_count_today(s: Session, day=None) -> int:
     cadence.
     """
     from src.db.models_automation import ScheduledPost, ScheduleStatus
-    from src.services.analytics.day import _ist_bounds, latest_owned_date
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_day_bounds_utc
 
     if day is None:
         day = latest_owned_date(s)
     if day is None:
         return 0
-    start, end = _ist_bounds(day)
+    start, end = ist_day_bounds_utc(day)
     return s.scalar(
         select(func.count()).select_from(ScheduledPost)
         .where(ScheduledPost.scheduled_at >= start, ScheduledPost.scheduled_at < end,
@@ -387,13 +388,13 @@ def posting_trajectory(s: Session, days: int = 14, end_day=None) -> dict:
     or the latest owned day). Returns the day series plus ``recent_cadence`` (median
     posts/day over ACTIVE days — the honest 'what you actually post') and the stale
     ``lifetime_baseline`` from the growth blueprint, for contrast."""
-    from datetime import timedelta, timezone
+    from datetime import timedelta
     from statistics import median
 
     from src.db.models import Post
     from src.services.analytics.day import latest_owned_date
-    from src.services.analytics.daily_report import _ist_bounds, _owned_channel
-    from src.services.analytics.periods import IST
+    from src.services.analytics.daily_report import _owned_channel
+    from src.services.analytics.periods import ist_day_bounds_utc, to_ist
 
     if end_day is None:
         end_day = latest_owned_date(s)
@@ -401,8 +402,8 @@ def posting_trajectory(s: Session, days: int = 14, end_day=None) -> dict:
         return {"days": [], "recent_cadence": 0, "lifetime_baseline": None}
 
     first_day = end_day - timedelta(days=days - 1)
-    start_utc, _ = _ist_bounds(first_day)
-    _, end_utc = _ist_bounds(end_day)
+    start_utc, _ = ist_day_bounds_utc(first_day)
+    _, end_utc = ist_day_bounds_utc(end_day)
     ch = _owned_channel(s)
     q = select(Post.posted_at, Post.views).where(
         Post.posted_at >= start_utc, Post.posted_at < end_utc)
@@ -415,9 +416,7 @@ def posting_trajectory(s: Session, days: int = 14, end_day=None) -> dict:
     for posted_at, views in s.execute(q).all():
         if posted_at is None:
             continue
-        if posted_at.tzinfo is None:
-            posted_at = posted_at.replace(tzinfo=timezone.utc)
-        d = posted_at.astimezone(IST).date()
+        d = to_ist(posted_at).date()
         counts[d] += 1
         view_sums[d] += (views or 0)
 

@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
-from datetime import datetime, timezone
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.services.analytics.periods import IST
+from src.services.analytics.periods import to_ist
 from src.services.analytics.growth import get_growth
 from src.db.models import Post
 from src.db.models_normalization import NormalizedPost, SourceType
@@ -80,13 +78,7 @@ def compute(s: Session, start=None, end=None) -> dict:
     I_CTA = 7
 
     for r in rows:
-        # posted_at is stored naive-UTC (SQLite drops tzinfo). Treat naive values as
-        # UTC before converting to IST — otherwise astimezone() assumes system-local
-        # time and the whole hour/weekday split silently shifts by the host's offset.
-        pa = r[0]
-        if pa.tzinfo is None:
-            pa = pa.replace(tzinfo=timezone.utc)
-        ist = pa.astimezone(IST)
+        ist = to_ist(r[0])
         day_key = ist.strftime("%Y-%m-%d")
         views = r[I_VIEWS] or 0
         reactions = r[I_REACTIONS] or 0

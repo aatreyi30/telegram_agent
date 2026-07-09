@@ -7,7 +7,7 @@ type/merchant mixes are always consistent with the day-view API.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from statistics import fmean, median
 
 from sqlalchemy import select
@@ -16,12 +16,7 @@ from sqlalchemy.orm import Session
 from src.db.models import Channel, Post
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.models_report import DailyChannelReport, REPORT_VERSION, ReportSourceType
-from src.services.analytics.periods import IST
-
-
-def _ist_bounds(day: date) -> tuple[datetime, datetime]:
-    start = datetime(day.year, day.month, day.day, tzinfo=IST)
-    return start, start + timedelta(days=1)
+from src.services.analytics.periods import ist_day_bounds_utc, to_ist
 
 
 def _owned_channel(s: Session) -> Channel | None:
@@ -33,7 +28,7 @@ def _owned_channel(s: Session) -> Channel | None:
 def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> DailyChannelReport:
     from src.services.analytics.day import _rows_between, _post_type
 
-    start, end = _ist_bounds(day)
+    start, end = ist_day_bounds_utc(day)
     rows = list(_rows_between(s, start, end))
 
     ch = None
@@ -47,10 +42,7 @@ def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> 
     views_total = sum(views)
     top = max(rows, key=lambda r: r[2] or 0, default=None)
     bottom = min(rows, key=lambda r: r[2] or 0, default=None)
-    hours = Counter(
-        str(((r[1] if r[1].tzinfo else r[1].replace(tzinfo=timezone.utc))
-             .astimezone(IST).hour))
-        for r in rows if r[1])
+    hours = Counter(str(to_ist(r[1]).hour) for r in rows if r[1])
 
     type_mix = Counter(_post_type(r[8]) for r in rows)
     merchant_mix = Counter(r[6] for r in rows if r[6])
@@ -100,7 +92,7 @@ def _fill_subs(s: Session, rep: DailyChannelReport, channel_id: int | None, day:
     """
     try:
         from src.db.models_growth_snapshot import ParticipantSnapshot
-        start, end = _ist_bounds(day)
+        start, end = ist_day_bounds_utc(day)
         snaps = list(s.scalars(
             select(ParticipantSnapshot)
             .where(ParticipantSnapshot.channel_id == channel_id,
@@ -155,7 +147,7 @@ def _build_competitor_reports(s: Session, day: date) -> int:
     """Per-competitor daily reports from CompetitorPost cumulative views.
     Shallower than owned (no forwards/reactions guaranteed); data_completeness < 1."""
     from src.db.models import Competitor, CompetitorPost
-    start, end = _ist_bounds(day)
+    start, end = ist_day_bounds_utc(day)
     n = 0
     for c in s.scalars(select(Competitor)):
         posts = list(s.scalars(

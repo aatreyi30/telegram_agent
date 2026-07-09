@@ -431,9 +431,9 @@ def posts(page: int = 1, page_size: int = 20) -> dict:
 
 def _ist_range_to_utc(start_date, end_date):
     """IST calendar dates (ISO strings/dates) -> [start_utc, end_utc) datetimes."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
-    from src.services.analytics.periods import IST
+    from src.services.analytics.periods import ist_day_bounds_utc
 
     def _d(v):
         if not v:
@@ -441,8 +441,8 @@ def _ist_range_to_utc(start_date, end_date):
         return v if hasattr(v, "year") else datetime.fromisoformat(v).date()
 
     sd, ed = _d(start_date), _d(end_date)
-    start = datetime(sd.year, sd.month, sd.day, tzinfo=IST) if sd else None
-    end = (datetime(ed.year, ed.month, ed.day, tzinfo=IST) + timedelta(days=1)) if ed else None
+    start = ist_day_bounds_utc(sd)[0] if sd else None
+    end = ist_day_bounds_utc(ed)[1] if ed else None
     return start, end
 
 
@@ -456,13 +456,13 @@ def analytics(start=None, end=None) -> dict:
 
 def data_range() -> dict:
     """Min/max IST post dates so the UI can bound its date pickers."""
-    from src.services.analytics.periods import IST, owned_window
+    from src.services.analytics.periods import owned_window, to_ist
 
     with session_scope() as s:
         w = owned_window(s)
     return {
-        "min": w["start"].astimezone(IST).date().isoformat() if w.get("start") else None,
-        "max": w["end"].astimezone(IST).date().isoformat() if w.get("end") else None,
+        "min": to_ist(w["start"]).date().isoformat() if w.get("start") else None,
+        "max": to_ist(w["end"]).date().isoformat() if w.get("end") else None,
     }
 
 
@@ -516,10 +516,10 @@ def weekly_report(include_ai: bool = True) -> dict:
 
 
 def _plan_date_bounds(s):
-    from src.services.analytics.periods import IST, owned_window
+    from src.services.analytics.periods import owned_window, to_ist
     w = owned_window(s)
-    mn = w["start"].astimezone(IST).date() if w.get("start") else None
-    mx = w["end"].astimezone(IST).date() if w.get("end") else None
+    mn = to_ist(w["start"]).date() if w.get("start") else None
+    mx = to_ist(w["end"]).date() if w.get("end") else None
     return mn, mx
 
 
@@ -693,29 +693,44 @@ def daily_brief(date: str | None = None) -> dict:
 
 def weekly_brief(end: str | None = None) -> dict:
     """The weekly view: last 7 days of actual posting + this week's themes + an AI
-    weekly narrative (best-effort)."""
-    from datetime import date as date_cls
+    weekly narrative (best-effort).
+
+    The week is a real IST calendar week (Monday->Sunday) containing whichever
+    date is requested (or today, if none) — NOT a trailing 7-day window ending at
+    an arbitrary date. This gives the week a stable identity: viewing any day
+    inside the same week always resolves to the same `CampaignPlan` row, so the
+    AI-authored digest is generated once per calendar week and reused, the same
+    caching contract `daily_brief()` already has. A row's `is_ai_generated`/
+    `ai_digest` being unset is literally the "no digest yet, call the AI" tag —
+    once set, every later request for that week reuses it, no matter how many
+    times the page is reopened."""
+    from datetime import date as date_cls, timedelta
     from src.services.analytics.day import latest_owned_date
     from src.services.analytics.daily_report import _owned_channel
     from src.services.planning.calendar import upcoming_events
+    from src.services.planning.campaign import CampaignPlanningEngine
+    from src.services.generation.ai_execution import persist_weekly_plan
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
 
     with session_scope() as s:
-        end_day = None
+        anchor = None
         if end:
             try:
-                end_day = date_cls.fromisoformat(end)
+                anchor = date_cls.fromisoformat(end)
             except ValueError:
-                end_day = None
-        if end_day is None:
-            end_day = latest_owned_date(s)
-        if end_day is None:
+                anchor = None
+        if anchor is None:
+            anchor = latest_owned_date(s)
+        if anchor is None:
             return {"available": False, "reason": "No owned posts yet."}
 
-        traj = ctx.posting_trajectory(s, days=7, end_day=end_day)
+        # Monday->Sunday IST calendar week containing `anchor`.
+        week_start = anchor - timedelta(days=anchor.weekday())
+        week_end = week_start + timedelta(days=6)
+
+        traj = ctx.posting_trajectory(s, days=7, end_day=week_end)
         ch = _owned_channel(s)
-        week_start_date = date_cls.fromisoformat(traj["days"][0]["date"]) if traj["days"] else end_day
-        deltas = ctx.follower_deltas_by_day(s, ch.id if ch else None, week_start_date, end_day)
+        deltas = ctx.follower_deltas_by_day(s, ch.id if ch else None, week_start, week_end)
         days = [{"date": d["date"],
                  "weekday": date_cls.fromisoformat(d["date"]).strftime("%a"),
                  "posts": d["posts"], "views_avg": d["views_avg"],
@@ -728,27 +743,45 @@ def weekly_brief(end: str | None = None) -> dict:
 
         wk = s.scalar(select(CampaignPlan)
                       .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
-                             CampaignPlan.plan_type == PlanType.WEEKLY)
+                             CampaignPlan.plan_type == PlanType.WEEKLY,
+                             CampaignPlan.target_date == week_start)
                       .order_by(CampaignPlan.generated_at.desc()))
-        themes = ((wk.blueprint or {}).get("daily_themes") if wk else None) or []
 
         evs_out = []
         try:
-            for e in upcoming_events(s, end_day, within_days=30)[:3]:
+            for e in upcoming_events(s, week_end, within_days=30)[:3]:
                 evs_out.append({"name": e.name, "date": e.next_date.isoformat(),
-                                "days_away": (e.next_date - end_day).days,
+                                "days_away": (e.next_date - week_end).days,
                                 "date_confidence": e.date_confidence})
         except Exception:
             pass
 
-        ai_summary, ai_ok = "", False
         if wk is not None and wk.is_ai_generated and wk.ai_digest:
-            # Already generated + persisted for this weekly plan row — reuse it
+            # Already generated + persisted for this calendar week — reuse it
             # instead of burning a Groq call on every page view (same idea as the
             # daily cache in daily_brief()).
-            ai_summary = wk.ai_digest
-            ai_ok = True
+            ai_summary, ai_ok = wk.ai_digest, True
+            themes = (wk.blueprint or {}).get("daily_themes") or []
         else:
+            # No cached digest for this exact week (either never generated, or a
+            # prior attempt didn't get a usable AI response) — compute the
+            # deterministic blueprint fresh (cheap, and doesn't depend on
+            # CampaignPlanningEngine's Monday cron ever having run) and try AI once.
+            bp_growth = (ctx.growth_blueprint(s).get("blueprint") or {})
+            perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
+                    for p in ctx.post_type_performance(s)}
+            try:
+                events = upcoming_events(s, week_start, within_days=30)
+            except Exception:
+                events = []
+            event_data = [{"name": e.name, "next_date": e.next_date,
+                           "days_away": (e.next_date - week_start).days,
+                           "date_confidence": e.date_confidence} for e in events]
+            blueprint = CampaignPlanningEngine()._weekly_plan(
+                bp_growth, perf, week_start, event_data)["blueprint"]
+            themes = blueprint.get("daily_themes") or []
+
+            ai_summary, ai_ok = "", False
             try:
                 from src.ai.briefing import BriefingGenerator
                 from src.ai.client import AIUnavailable
@@ -760,13 +793,21 @@ def weekly_brief(end: str | None = None) -> dict:
             except Exception:
                 ai_summary = ""
 
-            if ai_ok and wk is not None:
-                wk.ai_digest = ai_summary
-                wk.is_ai_generated = True
+            if wk is not None:
+                # Row already exists for this week (e.g. blueprint-only from a
+                # legitimate CampaignPlanningEngine run) — update it in place, no
+                # new insert, no race risk.
+                wk.blueprint = blueprint
+                if ai_ok:
+                    wk.ai_digest = ai_summary
+                    wk.is_ai_generated = True
+            else:
+                persist_weekly_plan(s, week_start, week_end, blueprint,
+                                     digest=ai_summary, is_ai_generated=ai_ok)
 
         return {"available": True,
-                "week_start": traj["days"][0]["date"] if traj["days"] else end_day.isoformat(),
-                "week_end": end_day.isoformat(),
+                "week_start": week_start.isoformat(),
+                "week_end": week_end.isoformat(),
                 "days": days, "totals": totals, "themes": themes,
                 "recommended_posts_per_day": traj["recent_cadence"],
                 "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok}

@@ -70,6 +70,47 @@ def persist_ai_plan(s: Session, result: dict) -> CampaignPlan | None:
         return existing
 
 
+def persist_weekly_plan(
+    s: Session, week_start: date, week_end: date, blueprint: dict,
+    digest: str = "", is_ai_generated: bool = False,
+) -> CampaignPlan | None:
+    """Insert a fresh WEEKLY ``CampaignPlan`` row keyed by calendar week (Monday
+    ``week_start``) — the create-path ``weekly_brief()`` was missing (it could
+    only ever UPDATE a row that already existed, never make one)."""
+    row = CampaignPlan(
+        plan_type=PlanType.WEEKLY,
+        title=f"Weekly plan — week of {week_start.isoformat()}",
+        target_date=week_start,
+        end_date=week_end,
+        blueprint=blueprint,
+        confidence=0.6,
+        generated_at=datetime.now(timezone.utc),
+        is_ai_generated=is_ai_generated,
+        ai_digest=digest or None,
+    )
+    try:
+        # Same SAVEPOINT pattern as persist_ai_plan: a losing insert only unwinds
+        # itself, not the caller's outer (mostly read-only) transaction.
+        with s.begin_nested():
+            s.add(row)
+            s.flush()
+        return row
+    except IntegrityError:
+        logger.info(
+            "[ai_execution] concurrent weekly plan insert lost the race for "
+            "week_start=%s — reusing the row the other request just persisted", week_start,
+        )
+        existing = s.scalars(
+            select(CampaignPlan)
+            .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                   CampaignPlan.plan_type == PlanType.WEEKLY,
+                   CampaignPlan.target_date == week_start,
+                   CampaignPlan.is_ai_generated == is_ai_generated)
+            .order_by(CampaignPlan.generated_at.desc())
+        ).first()
+        return existing
+
+
 def run_ai_daily(s: Session) -> dict:
     from src.ai.planner import generate_day_plan
     from src.ai.factcheck import check_cited_numbers
