@@ -20,9 +20,9 @@ class BriefingGenerator:
 
     def generate(self, weekly: bool = False) -> str:
         with session_scope() as s:
-            ctx = full_briefing_context(s)
+            ctx = full_briefing_context(s, weekly=weekly)
         if not ctx["channel"].get("available"):
             return "No channel data yet — run collection and the intelligence engines first."
         instructions = _WEEKLY_INSTRUCTIONS if weekly else _DAILY_INSTRUCTIONS
-        user = f"{instructions}\n\nDATA:\n{to_json(ctx)}"
-        return self.ai.complete(user, max_tokens=1500, effort="medium")
+        user = f"DATA:\n{to_json(ctx)}"
+        return self.ai.complete(user, system_extra=instructions, max_tokens=1500, effort="medium")
