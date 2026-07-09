@@ -294,6 +294,30 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
         }
 
 
+_COMPETITOR_CATEGORIES = ("platform", "channel")
+
+
+def create_competitor_record(username: str, category: str) -> dict:
+    """Fast half of manually adding a competitor: validate + insert only, so the
+    HTTP response doesn't block on the slow pipeline (see run_onboarding_pipeline).
+    Idempotent on a duplicate username — returns the existing row instead of
+    raising (see onboarding.insert_competitor)."""
+    from src.services.collection.onboarding import insert_competitor
+
+    if category not in _COMPETITOR_CATEGORIES:
+        raise ValueError(f"category must be one of {_COMPETITOR_CATEGORIES}")
+    return insert_competitor(username, category)
+
+
+def run_onboarding_pipeline(username: str) -> None:
+    """Slow half: run an already-inserted competitor through the existing
+    collection -> link resolution -> normalization -> intelligence pipeline.
+    Meant to be scheduled as a FastAPI BackgroundTask after create_competitor_record."""
+    from src.services.collection.onboarding import run_pipeline
+
+    run_pipeline(username)
+
+
 def plans() -> list[dict]:
     with session_scope() as s:
         rows = s.scalars(select(CampaignPlan)
