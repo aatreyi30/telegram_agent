@@ -376,6 +376,60 @@ def drafts(page: int = 1, page_size: int = 12) -> dict:
         return {"items": items, **_page_meta(total, page, page_size)}
 
 
+def create_draft(*, text: str, post_type: str = "manual",
+                 selection_bucket: str | None = None,
+                 channel_ref: str | None = None) -> dict:
+    from datetime import datetime, timezone
+    with session_scope() as s:
+        post = GeneratedPost(
+            generated_at=datetime.now(timezone.utc),
+            post_type=post_type,
+            selection_bucket=selection_bucket,
+            deal_ids=[],
+            rendered_text=text,
+            channel_ref=channel_ref,
+            status=PostStatus.DRAFT,
+        )
+        s.add(post)
+        s.flush()
+        return {"id": post.id, "status": post.status}
+
+
+def update_draft(draft_id: int, *, text: str | None = None,
+                 post_type: str | None = None,
+                 status: str | None = None,
+                 selection_bucket: str | None = None,
+                 channel_ref: str | None = None) -> dict:
+    with session_scope() as s:
+        post = s.get(GeneratedPost, draft_id)
+        if not post:
+            return {"ok": False, "error": "Draft not found"}
+        if text is not None:
+            post.rendered_text = text
+        if post_type is not None:
+            post.post_type = post_type
+        if status is not None:
+            post.status = status
+        if selection_bucket is not None:
+            post.selection_bucket = selection_bucket
+        if channel_ref is not None:
+            post.channel_ref = channel_ref
+        s.flush()
+        return {"ok": True, "id": post.id, "post_type": post.post_type,
+                "selection_bucket": post.selection_bucket, "status": post.status,
+                "channel_ref": post.channel_ref, "text": post.rendered_text}
+
+
+def delete_draft(draft_id: int) -> dict:
+    with session_scope() as s:
+        post = s.get(GeneratedPost, draft_id)
+        if not post:
+            return {"ok": False, "error": "Draft not found"}
+        s.delete(post)
+        s.flush()
+        return {"ok": True, "deleted_id": draft_id}
+
+
 def posts(page: int = 1, page_size: int = 20) -> dict:
     """Paginated raw post feed (most recent first) with views + preview."""
     page, page_size, offset = _clamp_page(page, page_size)
