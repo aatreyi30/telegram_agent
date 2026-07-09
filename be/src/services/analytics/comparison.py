@@ -238,6 +238,7 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
                 continue
             cp = all_profiles.get(cid)
             ent: dict = {
+                "id": cid,
                 "name": cp.username if cp else next(
                     (c.username for c in s.scalars(select(Competitor).where(Competitor.id == cid)).all() if c.username),
                     f"comp{cid}",
@@ -283,6 +284,7 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
 
         for cp in profiles[:max_competitors]:
             ent: dict = {
+                "id": cp.competitor_id,
                 "name": cp.username, "is_owned": False, "is_window_filtered": False,
                 "subscribers": subscribers_by_comp.get(cp.competitor_id),
                 "posts": cp.post_count, "window_days": cp.span_days,
