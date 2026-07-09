@@ -757,20 +757,27 @@ def weekly_brief(end: str | None = None) -> dict:
             pass
 
         ai_summary, ai_ok = "", False
-        try:
-            from src.ai.briefing import BriefingGenerator
-            from src.ai.client import AIUnavailable
+        if wk is not None and wk.is_ai_generated and wk.ai_digest:
+            # Already generated + persisted for this weekly plan row — reuse it
+            # instead of burning a Groq call on every page view (same idea as the
+            # daily cache in daily_brief()).
+            ai_summary = wk.ai_digest
+            ai_ok = True
+        else:
             try:
-                ai_summary = BriefingGenerator().generate(weekly=True) or ""
-                ai_ok = bool(ai_summary)
-            except AIUnavailable:
+                from src.ai.briefing import BriefingGenerator
+                from src.ai.client import AIUnavailable
+                try:
+                    ai_summary = BriefingGenerator().generate(weekly=True) or ""
+                    ai_ok = bool(ai_summary)
+                except AIUnavailable:
+                    ai_summary = ""
+            except Exception:
                 ai_summary = ""
-        except Exception:
-            ai_summary = ""
 
-        if ai_ok and wk is not None:
-            wk.ai_digest = ai_summary
-            wk.is_ai_generated = True
+            if ai_ok and wk is not None:
+                wk.ai_digest = ai_summary
+                wk.is_ai_generated = True
 
         return {"available": True,
                 "week_start": traj["days"][0]["date"] if traj["days"] else end_day.isoformat(),

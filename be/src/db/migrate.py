@@ -150,3 +150,55 @@ def backfill_channel_id(engine: Engine) -> None:
                                  {"c": primary}).rowcount
                 if n:
                     logger.info("[migrate] backfilled %s.channel_id -> %s (%s rows)", t, primary, n)
+
+
+def dedupe_and_index_campaign_plans(engine: Engine) -> None:
+    """Guard the daily/weekly AI-plan cache against the race where two
+    near-simultaneous requests both miss the cache and both persist a plan for the
+    same (campaign_version, plan_type, target_date, is_ai_generated) — that used to
+    silently create duplicate rows (and burn two AI calls) since the only index was
+    the non-unique ``ix_plan_type_date``.
+
+    Before adding the unique index, dedupe any rows that already violate it (keeping
+    the most-recently-generated row per group) — SQLite refuses to create a unique
+    index over data that isn't unique yet.
+    """
+    if not engine.url.get_backend_name().startswith("sqlite"):
+        return  # this helper targets the project's SQLite store only
+    with engine.begin() as conn:
+        existing_tables = {
+            r[0] for r in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+        }
+        if "campaign_plans" not in existing_tables:
+            return  # create_all will make it with the index already, nothing to dedupe
+
+        dupes = conn.execute(text(
+            "SELECT campaign_version, plan_type, target_date, is_ai_generated, COUNT(*) c "
+            "FROM campaign_plans "
+            "GROUP BY campaign_version, plan_type, target_date, is_ai_generated "
+            "HAVING c > 1"
+        )).fetchall()
+        deleted = 0
+        for cv, ptype, tdate, is_ai, _c in dupes:
+            # Keep the newest row (by generated_at) in each dupe group, delete the rest.
+            # target_date can be NULL; SQLite's IS/IS NOT handles that correctly, unlike =/!=.
+            keep = conn.execute(text(
+                "SELECT id FROM campaign_plans "
+                "WHERE campaign_version = :cv AND plan_type = :pt "
+                "AND target_date IS :td AND is_ai_generated IS :ai "
+                "ORDER BY generated_at DESC, id DESC LIMIT 1"
+            ), {"cv": cv, "pt": ptype, "td": tdate, "ai": is_ai}).scalar()
+            n = conn.execute(text(
+                "DELETE FROM campaign_plans "
+                "WHERE campaign_version = :cv AND plan_type = :pt "
+                "AND target_date IS :td AND is_ai_generated IS :ai AND id != :keep"
+            ), {"cv": cv, "pt": ptype, "td": tdate, "ai": is_ai, "keep": keep}).rowcount
+            deleted += n
+        if deleted:
+            logger.info("[migrate] deduped campaign_plans: deleted %s duplicate row(s)", deleted)
+
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_version_type_date_ai "
+            "ON campaign_plans (campaign_version, plan_type, target_date, is_ai_generated)"
+        ))
