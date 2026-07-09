@@ -11,10 +11,19 @@ export interface OverviewResponse {
 
 export interface GrowthDailyPoint { date: string; subs_end: number | null; joined: number; left: number; net: number; }
 
+// Telegram's admin-only "views by source" / "joins by source" breakdown (requires
+// Channel.can_view_stats). Absent (undefined/null) when the channel doesn't qualify.
+export interface SourceBreakdown {
+  totals: Record<string, number>;
+  daily: Record<string, Record<string, number>>;
+}
+
 export type GrowthResponse =
   | { available: true; current: number | null; joined: number; left: number; net: number; days: number;
-      first_date: string; last_date: string; daily: GrowthDailyPoint[]; }
-  | { available: false; reason: string; current: number | null; days: number; };
+      first_date: string; last_date: string; daily: GrowthDailyPoint[];
+      view_sources?: SourceBreakdown | null; follower_sources?: SourceBreakdown | null; }
+  | { available: false; reason: string; current: number | null; days: number;
+      view_sources?: SourceBreakdown | null; follower_sources?: SourceBreakdown | null; };
 
 export interface GrowthRecommendation {
   priority: number; category: string; recommendation: string; reasoning: string;
@@ -287,6 +296,9 @@ export interface DailyPlanToday {
   emphasis: string | null; watch: string | null;
   risks: PlanRisk[] | null;
   confidence: number;
+  scheduled_count: number;
+  gap: number;
+  plan_clamped: boolean;
 }
 
 export interface UpcomingEventBrief { name: string; days_away: number; date_confidence: string; }
@@ -306,7 +318,10 @@ export interface DailyBrief {
   upcoming_event: UpcomingEventBrief | null;
 }
 
-export interface WeeklyBriefDay { date: string; weekday: string; posts: number; views_avg: number; }
+export interface WeeklyBriefDay {
+  date: string; weekday: string; posts: number; views_avg: number;
+  joined: number; left: number; net: number;
+}
 
 export interface WeeklyBriefTheme { day: string; date: string; theme_focus: string; posts_planned: number; }
 

@@ -153,6 +153,19 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             <span className="text-4xl font-bold tracking-tight">{t.recommended_posts}</span>
             <span className="text-sm text-muted-foreground">posts recommended today</span>
           </div>
+          {t.plan_clamped && (
+            <p className="mt-1 text-xs text-muted-foreground" title="The AI's suggested count fell outside the safe range and was adjusted.">
+              Adjusted for sanity from the AI's suggestion.
+            </p>
+          )}
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <Badge variant="outline">{t.scheduled_count} scheduled today</Badge>
+            {t.gap > 0 ? (
+              <Badge variant="warning">{t.gap} more needed</Badge>
+            ) : (
+              <Badge variant="success">Fully scheduled</Badge>
+            )}
+          </div>
           {t.cadence_why && <p className="mt-1.5 text-sm text-foreground">{t.cadence_why}</p>}
         </div>
 
@@ -302,7 +315,10 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
   return (
     <Table>
       <TableHeader>
-        <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Posts</TableHead><TableHead>Avg views</TableHead></TableRow>
+        <TableRow>
+          <TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Posts</TableHead><TableHead>Avg views</TableHead>
+          <TableHead>Joined</TableHead><TableHead>Left</TableHead><TableHead>Net</TableHead>
+        </TableRow>
       </TableHeader>
       <TableBody>
         {days.map((d) => (
@@ -311,6 +327,11 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
             <TableCell className="text-muted-foreground">{d.date}</TableCell>
             <TableCell>{d.posts}</TableCell>
             <TableCell>{Math.round(d.views_avg).toLocaleString()}</TableCell>
+            <TableCell className="text-emerald-600 dark:text-emerald-400">+{d.joined}</TableCell>
+            <TableCell className="text-red-600 dark:text-red-400">-{d.left}</TableCell>
+            <TableCell className={d.net < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}>
+              {d.net > 0 ? "+" : ""}{d.net}
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>

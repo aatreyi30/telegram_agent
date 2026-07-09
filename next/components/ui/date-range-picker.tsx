@@ -246,8 +246,8 @@ export function DateFilter(props: DateFilterProps) {
                   setCalendarOpen(false);
                 }}
                 disabled={(date: Date) => {
-                  const m = min ? new Date(min + "T00:00:00Z") : undefined;
-                  const x = max ? new Date(max + "T00:00:00Z") : undefined;
+                  const m = min ? new Date(min + "T00:00:00") : undefined;
+                  const x = max ? new Date(max + "T00:00:00") : undefined;
                   return (!!m && date < m) || (!!x && date > x);
                 }}
                 autoFocus
@@ -264,8 +264,8 @@ export function DateFilter(props: DateFilterProps) {
                     setDraftTo(r.to);
                   }}
                   disabled={(date: Date) => {
-                    const m = min ? new Date(min + "T00:00:00Z") : undefined;
-                    const x = max ? new Date(max + "T00:00:00Z") : undefined;
+                    const m = min ? new Date(min + "T00:00:00") : undefined;
+                    const x = max ? new Date(max + "T00:00:00") : undefined;
                     return (!!m && date < m) || (!!x && date > x);
                   }}
                   autoFocus
