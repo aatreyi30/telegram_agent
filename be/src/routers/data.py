@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query
 
 from src.controllers import service
 from src.shared.deps import current_user, require_role
@@ -113,6 +113,19 @@ def competitors():
 @router.get("/competitor-dashboard")
 def competitor_dashboard(window: int | None = Query(default=None, description="Window in days (7/30/90). Omit for all data.")):
     return ok(service.competitor_dashboard(window_days=window))
+
+
+@router.post("/competitors")
+def add_competitor(background_tasks: BackgroundTasks,
+                   user: dict = Depends(require_role("editor")),
+                   username: str = Body(..., embed=True),
+                   category: str = Body(..., embed=True)):
+    try:
+        record = service.create_competitor_record(username, category)
+    except ValueError as e:
+        return fail(str(e), 400)
+    background_tasks.add_task(service.run_onboarding_pipeline, record["username"])
+    return ok({**record, "pipeline_started": True})
 
 
 @router.get("/plans")
