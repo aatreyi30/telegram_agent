@@ -5,6 +5,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { InformationCircleIcon } from "@hugeicons/core-free-icons";
 import { differenceInCalendarDays } from "date-fns";
 import { Async, Empty } from "@/components/Async";
+import { CategoryBadge } from "@/components/CategoryBadge";
 import { MultiLineChart, StackedBarsChart } from "@/components/charts";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,10 +40,16 @@ function fmtCompact(n: number | null | undefined): string {
   return n.toLocaleString();
 }
 
-function CategoryBadge({ category }: { category?: CompetitorEntity["category"] }) {
-  if (category === "platform") return <Badge variant="primary" className="text-[10px] font-normal">Direct</Badge>;
-  if (category === "channel") return <Badge variant="outline" className="text-[10px] font-normal">Indirect</Badge>;
-  return null;
+/**
+ * A just-added competitor has no `last_collected_at`-style field on this response yet (the
+ * comparison entities below never expose it), so we treat "no posts observed" as a proxy for
+ * "collection hasn't run yet". TODO(backend): expose a real `last_collected_at` on
+ * CompetitorEntity so this can be exact instead of inferred from posts/posts_per_day.
+ */
+function ProcessingBadge({ e }: { e: CompetitorEntity }) {
+  const hasData = (e.posts ?? 0) > 0 || (e.posts_per_day ?? 0) > 0;
+  if (hasData) return null;
+  return <Badge variant="warning" className="text-[10px] font-normal">Processing</Badge>;
 }
 
 /**
@@ -110,6 +117,7 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
                 <div className="flex items-center gap-2">
                   <span className="truncate">{e.name}</span>
                   <CategoryBadge category={e.category} />
+                  <ProcessingBadge e={e} />
                 </div>
               </TableCell>
               <TableCell>{fmtCompact(e.subscribers)}</TableCell>

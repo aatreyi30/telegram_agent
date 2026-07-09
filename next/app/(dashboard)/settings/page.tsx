@@ -6,6 +6,7 @@ import {
   Building01Icon, Delete02Icon, Satellite01Icon, UserAdd01Icon, UserGroupIcon, UserIcon,
 } from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
+import { CategoryBadge } from "@/components/CategoryBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
@@ -16,11 +17,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/auth";
-import { useChannels, useOrg, useUsers } from "@/queries/queries";
+import { useChannels, useCompetitors, useOrg, useUsers } from "@/queries/queries";
 import {
-  useAddChannel, useChangePassword, useCreateUser, useDeleteChannel,
+  useAddChannel, useChangePassword, useCreateCompetitor, useCreateUser, useDeleteChannel,
   useDeleteUser, useUpdateOrg, useUpdateUserRole,
 } from "@/queries/mutations";
 import type { OrgSettings } from "@/types/api";
@@ -351,11 +353,96 @@ function ChannelsTab() {
   );
 }
 
+function CompetitorsTab() {
+  const q = useCompetitors();
+  const createCompetitor = useCreateCompetitor();
+  const [open, setOpen] = useState(false);
+  const [username, setUsername] = useState("");
+  const [category, setCategory] = useState<"platform" | "channel">("platform");
+  const [note, setNote] = useState<string | null>(null);
+
+  function closeDialog() {
+    setOpen(false);
+    setNote(null);
+    setUsername("");
+    setCategory("platform");
+  }
+
+  async function add() {
+    setNote(null);
+    try {
+      await createCompetitor.mutateAsync({ username: username.trim(), category });
+      closeDialog();
+    } catch (e) {
+      setNote((e as Error)?.message || "Failed to add competitor.");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-end">
+        <Button size="sm" onClick={() => setOpen(true)}><HugeiconsIcon icon={UserGroupIcon} size={16} /> Add competitor</Button>
+      </CardHeader>
+      <CardContent className="p-0">
+        <Async q={q} rows={2}>
+          {(data) => {
+            const profiles = data.profiles ?? [];
+            return profiles.length === 0 ? (
+              <p className="p-4 text-sm text-muted-foreground">No competitors yet — add one above.</p>
+            ) : (
+              <Table>
+                <TableHeader><TableRow><TableHead>Competitor</TableHead><TableHead>Title</TableHead><TableHead>Category</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {profiles.map((c, i) => (
+                    <TableRow key={c.username ?? c.name ?? i}>
+                      <TableCell className="font-medium">{c.username ? `@${c.username}` : c.name}</TableCell>
+                      <TableCell className="text-muted-foreground">{c.title || "—"}</TableCell>
+                      <TableCell><CategoryBadge category={c.category} /></TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            );
+          }}
+        </Async>
+      </CardContent>
+
+      <Dialog open={open} onClose={closeDialog} title="Add competitor">
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>Telegram @username</Label>
+            <Input
+              placeholder="@RivalDealsChannel"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && username.trim() && add()}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Classification</Label>
+            <Tabs value={category} onValueChange={(v) => setCategory(v as "platform" | "channel")}>
+              <TabsList>
+                <TabsTrigger value="platform">Direct</TabsTrigger>
+                <TabsTrigger value="channel">Indirect</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+          {note && <p className="text-sm text-destructive">{note}</p>}
+          <Button className="w-full" onClick={add} disabled={!username.trim() || createCompetitor.isPending}>
+            {createCompetitor.isPending ? "Adding…" : "Add competitor"}
+          </Button>
+        </div>
+      </Dialog>
+    </Card>
+  );
+}
+
 const SETTINGS_NAV = [
   { key: "profile", label: "Profile", icon: UserIcon, description: "Your account and password.", ownerOnly: false },
   { key: "channels", label: "Channels", icon: Satellite01Icon, description: "The Telegram channels you own and track.", ownerOnly: true },
   { key: "org", label: "Organization", icon: Building01Icon, description: "Company details and affiliate link settings.", ownerOnly: true },
   { key: "users", label: "Users", icon: UserGroupIcon, description: "Teammates and their access level.", ownerOnly: true },
+  { key: "competitors", label: "Competitors", icon: UserGroupIcon, description: "Manually track direct and indirect competitors.", ownerOnly: true },
 ] as const;
 
 export default function SettingsPage() {
@@ -369,7 +456,7 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground">Your profile, channels, the organization, and users.</p>
+        <p className="text-sm text-muted-foreground">Your profile, channels, the organization, users, and competitors.</p>
       </div>
       <div className="flex flex-col gap-8 md:flex-row">
         <nav className="flex shrink-0 gap-1 overflow-x-auto pb-1 md:w-52 md:flex-col md:overflow-visible md:pb-0">
@@ -399,6 +486,7 @@ export default function SettingsPage() {
           {active.key === "channels" && isOwner && <ChannelsTab />}
           {active.key === "org" && isOwner && <OrgTab />}
           {active.key === "users" && isOwner && <UsersTab />}
+          {active.key === "competitors" && isOwner && <CompetitorsTab />}
         </div>
       </div>
     </div>
