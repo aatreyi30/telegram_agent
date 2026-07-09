@@ -28,6 +28,16 @@ export function useDeleteChannel() {
     onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.channels() }),
   });
 }
+export function useCreateCompetitor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { username: string; category: string }) => api.post("/competitors", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.competitors() });
+      qc.invalidateQueries({ queryKey: queryKeys.competitorDashboard() });
+    },
+  });
+}
 export function useCreateUser() {
   const qc = useQueryClient();
   return useMutation({
