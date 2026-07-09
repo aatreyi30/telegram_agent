@@ -1,9 +1,8 @@
 # be/src/services/analytics/daily_report.py
 """Deterministic day-wise aggregator — persists DailyChannelReport rows.
 
-Owned reports are computed directly from Post rows for the IST day. day.py's
-summarize() is reused for composition context, but the numeric spine here is
-independent and exact so it is testable and stable.
+Owned reports reuse day.py's _rows_between so post counts, deal counts, and
+type/merchant mixes are always consistent with the day-view API.
 """
 from __future__ import annotations
 
@@ -15,13 +14,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.db.models import Channel, Post
+from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.models_report import DailyChannelReport, REPORT_VERSION, ReportSourceType
 from src.services.analytics.periods import IST
 
 
 def _ist_bounds(day: date) -> tuple[datetime, datetime]:
     start = datetime(day.year, day.month, day.day, tzinfo=IST)
-    return start.astimezone(timezone.utc), (start + timedelta(days=1)).astimezone(timezone.utc)
+    return start, start + timedelta(days=1)
 
 
 def _owned_channel(s: Session) -> Channel | None:
@@ -31,60 +31,63 @@ def _owned_channel(s: Session) -> Channel | None:
 
 
 def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> DailyChannelReport:
+    from src.services.analytics.day import _rows_between, _post_type
+
     start, end = _ist_bounds(day)
+    rows = list(_rows_between(s, start, end))
+
     ch = None
     if channel_id is None:
         ch = _owned_channel(s)
         channel_id = ch.id if ch else None
-    q = select(Post).where(Post.posted_at >= start, Post.posted_at < end)
-    if channel_id is not None:
-        q = q.where(Post.channel_id == channel_id)
-    posts = list(s.scalars(q))
 
-    views = [p.views or 0 for p in posts]
-    reactions = sum(p.reactions_total or 0 for p in posts)
-    forwards = sum(p.forwards or 0 for p in posts)
+    views = [r[2] for r in rows if r[2] is not None]
+    reactions = sum(r[4] or 0 for r in rows)
+    forwards = sum(r[5] or 0 for r in rows)
     views_total = sum(views)
-    top = max(posts, key=lambda p: p.views or 0, default=None)
-    bottom = min(posts, key=lambda p: p.views or 0, default=None)
+    top = max(rows, key=lambda r: r[2] or 0, default=None)
+    bottom = min(rows, key=lambda r: r[2] or 0, default=None)
     hours = Counter(
-        str((p.posted_at if p.posted_at.tzinfo else p.posted_at.replace(tzinfo=timezone.utc))
-            .astimezone(IST).hour)
-        for p in posts if p.posted_at)
+        str(((r[1] if r[1].tzinfo else r[1].replace(tzinfo=timezone.utc))
+             .astimezone(IST).hour))
+        for r in rows if r[1])
+
+    type_mix = Counter(_post_type(r[8]) for r in rows)
+    merchant_mix = Counter(r[6] for r in rows if r[6])
+    deal_count = sum(1 for r in rows if r[7] or r[8])  # has_coupon or is_multi_deal
 
     rep = DailyChannelReport(
         channel_id=channel_id, source_type=ReportSourceType.OWNED,
         report_date=day, report_version=REPORT_VERSION,
-        posts_count=len(posts),
-        deals_posted=sum(1 for p in posts if (p.text or "").strip()),
-        merchants_featured=0,  # refined below from summarize() when available
+        posts_count=len(rows),
+        deals_posted=deal_count,
+        type_mix=dict(type_mix.most_common()),
+        category_mix={m: c for m, c in merchant_mix.most_common()},
+        merchants_featured=len(merchant_mix),
         views_total=views_total,
         views_avg=round(fmean(views), 2) if views else 0.0,
         views_median=round(median(views), 2) if views else 0.0,
         views_max=max(views) if views else 0,
         views_min=min(views) if views else 0,
-        top_post_id=(top.tg_message_id if top else None),
-        bottom_post_id=(bottom.tg_message_id if bottom else None),
+        top_post_id=top[0] if top else None,
+        bottom_post_id=bottom[0] if bottom else None,
         reactions_total=reactions, forwards_total=forwards,
         engagement_rate=round((reactions + forwards) / views_total, 4) if views_total else 0.0,
         posting_hours=dict(hours),
         computed_at=datetime.now(timezone.utc),
         data_completeness=1.0,
     )
-    # enrich composition + subs + merchants from summarize()/snapshots (best-effort)
-    try:
-        from src.services.analytics.day import summarize
-        summ = summarize(s, day)
-        if summ.get("available"):
-            rep.type_mix = {t: c for t, c in summ.get("type_mix", [])}
-            rep.category_mix = {m: c for m, c in summ.get("merchant_mix", [])}
-            rep.merchants_featured = len(summ.get("merchants", []))
-            merchants = summ.get("merchants", [])
-            if merchants:
-                rep.best_category = max(merchants, key=lambda m: m.get("total_views", 0))["key"]
-                rep.worst_category = min(merchants, key=lambda m: m.get("total_views", 0))["key"]
-    except Exception:
-        pass
+    # best/worst category (by views)
+    if rows:
+        merchants = [
+            {"key": r[6] or "__unknown__", "total_views": r[2] or 0}
+            for r in rows
+        ]
+        if merchants:
+            best = max(merchants, key=lambda m: m["total_views"])
+            worst = min(merchants, key=lambda m: m["total_views"])
+            rep.best_category = best["key"]
+            rep.worst_category = worst["key"]
     _fill_subs(s, rep, channel_id, day)
     return rep
 

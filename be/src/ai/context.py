@@ -343,20 +343,8 @@ def planning_context(s: Session) -> dict:
 
 
 def daily_report_or_live(s: Session, day) -> dict:
-    """Owned day-facts for ``day``: the persisted DailyChannelReport if one exists,
-    otherwise computed live from that day's posts (never persisted). Always returns
-    a dict; ``source`` is 'report', 'live', or 'none' (no activity that day)."""
-    from src.db.models_report import DailyChannelReport, ReportSourceType
-    r = s.scalars(
-        select(DailyChannelReport).where(
-            DailyChannelReport.source_type == ReportSourceType.OWNED,
-            DailyChannelReport.report_date == day,
-        )
-    ).first()
-    if r is not None:
-        d = _report_to_dict(r)
-        d["source"] = "report"
-        return d
+    """Owned day-facts for ``day``: always computed live (avoids stale cached
+    reports). Always returns a dict; ``source`` is 'live' or 'none'."""
     from src.services.analytics.daily_report import build_owned_report
     live = build_owned_report(s, day)
     d = _report_to_dict(live)
