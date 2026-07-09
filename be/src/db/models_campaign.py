@@ -63,7 +63,18 @@ class SaleEvent(Base, TimestampMixin):
 
 class CampaignPlan(Base, TimestampMixin):
     __tablename__ = "campaign_plans"
-    __table_args__ = (Index("ix_plan_type_date", "plan_type", "target_date"),)
+    __table_args__ = (
+        Index("ix_plan_type_date", "plan_type", "target_date"),
+        # Guards the daily/weekly AI-plan cache against a race: two near-simultaneous
+        # requests for the same day both missing the cache and both persisting an
+        # AI-generated plan. SQLite treats each NULL as distinct, so this only
+        # constrains rows that actually have a target_date (all daily/weekly rows do).
+        Index(
+            "uq_plan_version_type_date_ai",
+            "campaign_version", "plan_type", "target_date", "is_ai_generated",
+            unique=True,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)

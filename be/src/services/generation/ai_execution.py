@@ -5,9 +5,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.models_campaign import CampaignPlan, PlanType
+from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _parse_date(s: str | None) -> date | None:
@@ -22,10 +27,11 @@ def persist_ai_plan(s: Session, result: dict) -> CampaignPlan | None:
         return None
     plan = result["plan"]
     fc = result.get("factcheck", {"status": "skipped"})
+    target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
         plan_type=PlanType.DAILY,
         title=f"AI day plan {plan.get('date') or ''}".strip(),
-        target_date=_parse_date(plan.get("date")),
+        target_date=target_date,
         blueprint=plan,
         expected_outcome={"emphasis": plan.get("emphasis"), "watch": plan.get("watch")},
         confidence=0.6 if fc.get("status") == "passed" else 0.3,
@@ -36,9 +42,32 @@ def persist_ai_plan(s: Session, result: dict) -> CampaignPlan | None:
         factcheck_status=fc.get("status", "skipped"),
         report_ids=result.get("report_ids", []),
     )
-    s.add(row)
-    s.flush()
-    return row
+    try:
+        # SAVEPOINT: on a unique-constraint violation we only need to unwind this
+        # insert, not the whole (mostly read-only) outer transaction the caller may
+        # still be using (e.g. daily_brief() building the rest of its response).
+        with s.begin_nested():
+            s.add(row)
+            s.flush()
+        return row
+    except IntegrityError:
+        # Two near-simultaneous requests for the same day both missed the cache and
+        # both tried to persist an AI plan — the unique index on (campaign_version,
+        # plan_type, target_date, is_ai_generated) rejects the loser. Don't 500:
+        # the winner's row already has everything we need, so use it instead.
+        logger.info(
+            "[ai_execution] concurrent AI plan insert lost the race for target_date=%s "
+            "— reusing the row the other request just persisted", target_date,
+        )
+        existing = s.scalars(
+            select(CampaignPlan)
+            .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                   CampaignPlan.plan_type == PlanType.DAILY,
+                   CampaignPlan.target_date == target_date,
+                   CampaignPlan.is_ai_generated == True)  # noqa: E712
+            .order_by(CampaignPlan.generated_at.desc())
+        ).first()
+        return existing
 
 
 def run_ai_daily(s: Session) -> dict:
