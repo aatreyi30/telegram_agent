@@ -419,6 +419,36 @@ def resolve_username(name: str) -> dict | None:
         logger.warning("[discovery:resolve] Telegram MTProto not configured.")
         return None
 
+    # Category-gated search order (product requirement): a competitor already
+    # classified "channel" (indirect, Telegram-only) skips the web-search step
+    # entirely and goes straight to Telegram search. A competitor already
+    # classified "platform" (direct) — or not yet classified — gets a web search
+    # first (via the same platform_detector pipeline used everywhere else in this
+    # codebase to set the category field: known-platform list, HTTP domain probe,
+    # then DuckDuckGo search), then the Telegram search below. Telegram search
+    # always runs regardless of category — every competitor still needs a
+    # resolved Telegram handle to be collected.
+    with session_scope() as sess:
+        existing_comp = next(
+            (c for c in sess.scalars(select(Competitor))
+             if c.username and c.username.lower() == name.lower()),
+            None,
+        )
+    known_category = existing_comp.category if existing_comp else None
+
+    if known_category == "channel":
+        category_hint = "channel"
+        logger.info(
+            "[discovery:resolve] %r already classified 'channel' (indirect) — "
+            "skipping web search, going straight to Telegram search", name,
+        )
+    else:
+        category_hint = _detect_category(name, name)
+        logger.info(
+            "[discovery:resolve] web search for %r (was %r) -> category_hint=%r, "
+            "now running Telegram search", name, known_category, category_hint,
+        )
+
     with session_scope() as sess:
         existing = {c.username.lower() for c in sess.scalars(select(Competitor)) if c.username}
     from src.services.collection.channels import owned_handles
@@ -453,6 +483,10 @@ def resolve_username(name: str) -> dict | None:
     )
 
     # Persist resolution provenance on the existing Competitor row for this name, if any.
+    # category_hint (from the web-search step above, or the pre-existing 'channel'
+    # classification that made us skip it) is only written when the row doesn't
+    # already carry a category, so a confirmed classification is never overwritten
+    # by a later, possibly weaker, hint.
     with session_scope() as sess:
         comp = next(
             (c for c in sess.scalars(select(Competitor)) if c.username and c.username.lower() == name.lower()),
@@ -461,7 +495,10 @@ def resolve_username(name: str) -> dict | None:
         if comp is not None:
             comp.resolution_confidence = confidence
             comp.verified_by = method
+            if category_hint and not comp.category:
+                comp.category = category_hint
 
     best["resolution_confidence"] = confidence
     best["verified_by"] = method
+    best["category_hint"] = category_hint
     return best
