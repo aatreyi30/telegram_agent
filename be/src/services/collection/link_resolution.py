@@ -1,9 +1,9 @@
 """Shortlink / unclassified-link resolution — follow redirects to the real
 merchant, concurrently, with caching and a generic domain-capture fallback.
 
-Clicking a grbn.in link (or any other unclassified link) may 302-redirect to
-the actual merchant page, so following the redirect reveals the merchant we
-could NOT know at normalization time. This backfills ExtractedLink.resolved_url
+Clicking any shortlink or unclassified link may 302-redirect to the actual
+merchant page, so following the redirect reveals the merchant we could NOT
+know at normalization time. This backfills ExtractedLink.resolved_url
 + merchant_key and re-derives each post's primary merchant, lifting merchant
 coverage across the whole system.
 
@@ -221,6 +221,7 @@ class LinkResolutionEngine(BaseCollector):
                     link.merchant_key = outcome.merchant_key
                     link.resolution_status = outcome.status
                     link.resolution_error = None
+                    logger.info("[link_resolution] link resolved: link_id=%d url=%s resolved_url=%s merchant_key=%s", link_id, outcome.url, outcome.resolved_url, outcome.merchant_key)
                     if outcome.merchant_key:
                         result.added += 1
                     else:

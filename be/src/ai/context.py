@@ -202,10 +202,12 @@ def merchant_mix(s: Session, owned_coverage_pct: float | None = None) -> dict:
     posts per merchant (shares sum to ~1.0 per channel)."""
     channels: list[dict] = []
 
-    owned_counts = {p.merchant_key: p.post_count_owned
-                    for p in s.scalars(select(MerchantProfile)
-                        .where(MerchantProfile.intel_version == MERCHANT_INTEL_VERSION))
-                    if p.post_count_owned}
+    owned_counts = dict(s.execute(
+        select(NormalizedPost.primary_merchant_key, func.count(NormalizedPost.id))
+        .where(NormalizedPost.source_type == SourceType.OWNED,
+               NormalizedPost.primary_merchant_key.isnot(None))
+        .group_by(NormalizedPost.primary_merchant_key)
+    ).all())
     owned_resolved = sum(owned_counts.values())
     if owned_resolved:
         channels.append({
@@ -228,7 +230,10 @@ def merchant_mix(s: Session, owned_coverage_pct: float | None = None) -> dict:
 
     owned_shares = next((c["shares"] for c in channels if c["is_owned"]), {})
     all_merchants = {m for c in channels for m in c["shares"]}
-    merchants_sorted = sorted(all_merchants, key=lambda m: -owned_shares.get(m, 0.0))
+    # Only keep merchants with >=1% share in at least one channel (filter out one-off links)
+    significant = {m for m in all_merchants
+                   if any(c["shares"].get(m, 0) >= 0.01 for c in channels)}
+    merchants_sorted = sorted(significant, key=lambda m: -owned_shares.get(m, 0.0))
 
     return {"merchants": merchants_sorted, "channels": channels}
 
@@ -353,15 +358,8 @@ def planning_context(s: Session) -> dict:
 
 
 def daily_report_or_live(s: Session, day) -> dict:
-    """Owned day-facts for ``day``, always computed live from that day's posts
-    (never persisted, never read from the cached DailyChannelReport). The cache
-    is written once/day by the `j_daily_report` cron, so reading it here could
-    return numbers that are already stale by the time this is called — views
-    and forwards keep accumulating after the cron runs. Live computation is a
-    cheap single-day query, and this function's two callers (the Plan page's
-    Yesterday card, and the AI digest context) both want fresh numbers, not a
-    snapshot. Always returns a dict; ``source`` is 'live' or 'none' (no
-    activity that day)."""
+    """Owned day-facts for ``day``: always computed live (avoids stale cached
+    reports). Always returns a dict; ``source`` is 'live' or 'none'."""
     from src.services.analytics.daily_report import build_owned_report
     live = build_owned_report(s, day)
     d = _report_to_dict(live)

@@ -27,7 +27,6 @@ from src.db.models_campaign import (
     PlanType,
     SaleEvent,
 )
-from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_growth import GROWTH_VERSION, GrowthStrategy
 from src.db.models_learning import LEARNING_VERSION, PostTypePerformance
 from src.db.models_normalization import NormalizedPost, SourceType
@@ -111,22 +110,20 @@ class CampaignPlanningEngine(BaseCollector):
     def _recent_distribution(self, s: Session, now: datetime) -> dict:
         cutoff = now - timedelta(days=45)
         merch = Counter()
-        clusters = Counter()
+        post_types = Counter()
         rows = s.execute(
-            select(NormalizedPost.primary_merchant_key, PostTypeCluster.descriptor)
+            select(NormalizedPost.primary_merchant_key, NormalizedPost.is_multi_deal)
             .join(Post, Post.id == NormalizedPost.source_id)
-            .join(PostClassification, PostClassification.normalized_post_id == NormalizedPost.id, isouter=True)
-            .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id, isouter=True)
             .where(NormalizedPost.source_type == SourceType.OWNED, Post.posted_at >= cutoff)
         ).all()
         total = 0
-        for mkey, cluster in rows:
+        for mkey, multi in rows:
             total += 1
             if mkey:
                 merch[mkey] += 1
-            if cluster:
-                clusters[cluster] += 1
-        return {"total": total, "merchants": merch, "clusters": clusters}
+            pt = "loot_deal" if multi else "single_deal"
+            post_types[pt] += 1
+        return {"total": total, "merchants": merch, "post_types": post_types}
 
     def _allocate_posts(self, blueprint: dict, posts: int) -> list[dict]:
         """Distribute the daily post budget across deal-types, nudged by the Growth
@@ -222,13 +219,14 @@ class CampaignPlanningEngine(BaseCollector):
                 risks.append({"kind": "merchant_overuse",
                               "detail": f"{top_m} is {round(100*top_c/known)}% of recent "
                                         "merchant-attributed posts — diversify to avoid over-reliance."})
-        clusters = recent["clusters"]
-        ctotal = sum(clusters.values())
-        if ctotal >= 10:
-            top_cl, top_cc = clusters.most_common(1)[0]
-            if top_cc / ctotal > 0.6:
+        post_types = recent["post_types"]
+        ptotal = sum(post_types.values())
+        if ptotal >= 10:
+            top_pt, top_pc = post_types.most_common(1)[0]
+            if top_pc / ptotal > 0.6:
+                label = "loot / multi-deal posts" if top_pt == "loot_deal" else "single deal posts"
                 risks.append({"kind": "content_concentration",
-                              "detail": f"{plain_label(top_cl)} is {round(100*top_cc/ctotal)}% of "
+                              "detail": f"{label} is {round(100*top_pc/ptotal)}% of "
                                         "recent posts — add variety to reduce audience fatigue."})
         return risks
 

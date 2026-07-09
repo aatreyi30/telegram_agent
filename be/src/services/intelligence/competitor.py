@@ -99,11 +99,13 @@ class CompetitorIntelligenceEngine(BaseCollector):
                     model.intel_version == COMPETITOR_INTEL_VERSION
                 ).delete()
             s.flush()
+            logger.info("[competitor_intel] cleared old intel data for version %d", COMPETITOR_INTEL_VERSION)
 
             for cid, summ in comp_summaries.items():
                 n = summ["post_count"]
                 confidence = round(min(1.0, n / FULL_CONFIDENCE_N), 3)
                 similarity = _cosine(owned_style, _style_vector(summ))
+                logger.info("[competitor_intel] generating profile: competitor_id=%d username=%s post_count=%d merchant_coverage=%s merchant_mix=%s", cid, summ["label"], n, summ.get("merchant_coverage"), summ.get("merchant_mix"))
                 s.add(CompetitorProfile(
                     intel_version=COMPETITOR_INTEL_VERSION, competitor_id=cid,
                     username=summ["label"], post_count=n, span_days=summ["span_days"],

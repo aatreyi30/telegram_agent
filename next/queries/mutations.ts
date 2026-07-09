@@ -49,3 +49,30 @@ export function useUpdateUserRole() {
     onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.users() }),
   });
 }
+
+// Draft mutations
+export function useCreateDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { text: string; post_type?: string; selection_bucket?: string; channel_ref?: string }) => 
+      api.post("/drafts", body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.drafts() }),
+  });
+}
+
+export function useUpdateDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: number; text?: string; post_type?: string; status?: string; selection_bucket?: string; channel_ref?: string }) => 
+      api.put(`/drafts/${id}`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.drafts() }),
+  });
+}
+
+export function useDeleteDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.del(`/drafts/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.drafts() }),
+  });
+}

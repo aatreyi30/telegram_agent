@@ -52,14 +52,16 @@ MIN_DAYS_FOR_OPTIMIZATION = 7
 
 
 def plain_label(descriptor: str | None) -> str:
-    """Translate a learned-cluster feature signature into a human-readable post
-    type. Presentation only — describes the measured features in plain words; it
-    does not define or hardcode a category taxonomy."""
+    """Translate a post-type key into a human-readable label."""
     d = (descriptor or "").lower()
+    if d == "loot_deal":
+        return "loot / multi-deal"
+    if d == "single_deal":
+        return "single deal"
     if "coupon" in d:
         return "coupon-code deals"
     if "many-links" in d or "multi-deal" in d:
-        return "multi-product loot collections (several deal links in one post)"
+        return "loot / multi-deal"
     if "wide-price-range" in d or "many-prices" in d:
         return "mixed-price bundles"
     if "single-item" in d:
@@ -616,12 +618,12 @@ class GrowthEngine(BaseCollector):
     @staticmethod
     def _channel_type_from_descriptor(desc: str | None) -> str:
         d = (desc or "").lower()
+        if d == "loot_deal" or "multi-deal" in d or "many-links" in d:
+            return "loot-led"
+        if d == "single_deal" or "single-item" in d:
+            return "single-deal-led"
         if "coupon" in d:
             return "coupon-led"
-        if "multi-deal" in d or "many-links" in d:
-            return "loot-led"
-        if "single-item" in d:
-            return "single-deal-led"
         return "hybrid"
 
     def _channel_type_from_mix(self, mix: dict) -> str:

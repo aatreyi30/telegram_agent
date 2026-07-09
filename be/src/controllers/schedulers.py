@@ -102,27 +102,18 @@ def j_competitor_sync() -> dict:
     from src.config.settings import get_settings
     from src.db.models import CollectionType
     from src.services.collection.telegram_competitor import CompetitorCollector
-    added = 0
-    r = _job_runner()
-    for u in get_settings().competitor_channels:
-        job = r.run_collector(CompetitorCollector(u, max_pages=1),
-                              collection_type=CollectionType.INCREMENTAL, target=u)
-        added += job.records_added or 0
-    # also pull tracked (discovered) competitors from the DB
     from sqlalchemy import select
     from src.db.models import Competitor
     from src.db.session import session_scope
+    added = 0
+    r = _job_runner()
+    # Only use discovered competitors from database (no env var dependency)
     with session_scope() as s:
-        extra = [c.username for c in s.scalars(select(Competitor)) if c.username]
-    for u in extra:
-        if u in get_settings().competitor_channels:
-            continue
-        try:
-            job = r.run_collector(CompetitorCollector(u, max_pages=1),
-                                  collection_type=CollectionType.INCREMENTAL, target=u)
-            added += job.records_added or 0
-        except Exception:
-            pass
+        usernames = [c.username for c in s.scalars(select(Competitor)) if c.username]
+    for u in usernames:
+        job = r.run_collector(CompetitorCollector(u, max_pages=5),
+                              collection_type=CollectionType.INCREMENTAL, target=u)
+        added += job.records_added or 0
     return {"processed": added, "detail": f"+{added} competitor posts"}
 
 

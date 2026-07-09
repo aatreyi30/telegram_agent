@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.db.models import Post
-from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_learning import (
     LEARNING_VERSION,
     ChannelStyleProfile,
@@ -139,27 +138,18 @@ class ChannelLearningEngine(BaseCollector):
                        Post.reactions_total, func.length(Post.text), Post.has_media)
             ).all()
         }
-        npids = [r[8] for r in np_rows]
-        clusters = {}
-        if npids:
-            for npid, desc in s.execute(
-                select(PostClassification.normalized_post_id, PostTypeCluster.descriptor)
-                .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id)
-                .where(PostClassification.normalized_post_id.in_(npids))
-            ).all():
-                clusters[npid] = desc
-
         facts = []
         for src_id, num_links, has_coupon, multi, emojis, hashtags, cta, mkey, npid in np_rows:
             meta = post_meta.get(src_id)
             if not meta:
                 continue
             posted_at, views, forwards, reactions, tlen, media = meta
+            cluster = "loot_deal" if multi else "single_deal"
             facts.append(Fact(
                 posted_at=posted_at, views=views, forwards=forwards, reactions=reactions,
                 text_len=tlen or 0, num_links=num_links, has_coupon=has_coupon,
                 is_multi_deal=multi, has_cta=bool(cta), has_media=bool(media),
-                emojis=emojis or [], hashtags=hashtags or [], cluster=clusters.get(npid),
+                emojis=emojis or [], hashtags=hashtags or [], cluster=cluster,
                 merchant_key=mkey,
             ))
         return facts

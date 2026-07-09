@@ -1,11 +1,11 @@
-"""Read-only data endpoints (all require auth)."""
+"""Data + draft-management endpoints (all require auth)."""
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 
 from src.controllers import service
-from src.shared.deps import current_user
+from src.shared.deps import current_user, require_role
 from src.shared.response import fail, ok
 
 router = APIRouter(prefix="/api", tags=["data"], dependencies=[Depends(current_user)])
@@ -58,6 +58,41 @@ def day(date_str: str | None = Query(default=None, alias="date"),
 @router.get("/drafts")
 def drafts(page: int = 1, page_size: int = 12):
     return ok(service.drafts(page=page, page_size=page_size))
+
+
+@router.post("/drafts")
+def create_draft(user: dict = Depends(require_role("editor")),
+                 text: str = Body(..., embed=True),
+                 post_type: str = Body("manual", embed=True),
+                 selection_bucket: str | None = Body(None, embed=True),
+                 channel_ref: str | None = Body(None, embed=True)):
+    result = service.create_draft(text=text, post_type=post_type,
+                                  selection_bucket=selection_bucket,
+                                  channel_ref=channel_ref)
+    return ok(result)
+
+
+@router.put("/drafts/{draft_id}")
+def update_draft(draft_id: int, user: dict = Depends(require_role("editor")),
+                 text: str | None = Body(None, embed=True),
+                 post_type: str | None = Body(None, embed=True),
+                 status: str | None = Body(None, embed=True),
+                 selection_bucket: str | None = Body(None, embed=True),
+                 channel_ref: str | None = Body(None, embed=True)):
+    result = service.update_draft(draft_id, text=text, post_type=post_type,
+                                  status=status, selection_bucket=selection_bucket,
+                                  channel_ref=channel_ref)
+    if not result.get("ok"):
+        return fail(result.get("error", "Draft not found"), 404)
+    return ok(result)
+
+
+@router.delete("/drafts/{draft_id}")
+def delete_draft(draft_id: int, user: dict = Depends(require_role("editor"))):
+    result = service.delete_draft(draft_id)
+    if not result.get("ok"):
+        return fail(result.get("error", "Draft not found"), 404)
+    return ok(result)
 
 
 @router.get("/posts")

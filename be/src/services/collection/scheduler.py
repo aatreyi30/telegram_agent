@@ -50,16 +50,15 @@ class CollectionScheduler:
             )
 
     def _competitors(self) -> None:
-        usernames = list(self.settings.competitor_channels)
-        seen = {u.lstrip("@").lower() for u in usernames}
+        # Only use discovered competitors from database (no env var dependency)
+        usernames = []
         with session_scope() as s:
             for c in s.scalars(select(Competitor)):
-                if c.username and c.username.lstrip("@").lower() not in seen:
+                if c.username:
                     usernames.append(c.username)
-                    seen.add(c.username.lstrip("@").lower())
         for username in usernames:
             self.runner.run_collector(
-                CompetitorCollector(username, max_pages=1),
+                CompetitorCollector(username, max_pages=5),
                 collection_type=CollectionType.INCREMENTAL,
                 target=username,
             )
@@ -90,16 +89,15 @@ class CollectionScheduler:
         else:
             logger.warning("no OWNED_CHANNELS configured — owned collection disabled")
 
-        if s.competitor_channels:
-            self.scheduler.add_job(
-                self._competitors,
-                "interval",
-                minutes=s.competitor_interval_min,
-                id="competitors",
-            )
-            logger.info("scheduled competitor monitoring for %d channel(s)", len(s.competitor_channels))
-        else:
-            logger.warning("no COMPETITOR_CHANNELS configured — competitor monitoring disabled")
+        # Competitor collection now uses discovered competitors from database (no env var dependency)
+        # Always schedule - will collect from whatever competitors are in the Competitor table
+        self.scheduler.add_job(
+            self._competitors,
+            "interval",
+            minutes=s.competitor_interval_min,
+            id="competitors",
+        )
+        logger.info("scheduled competitor monitoring (uses discovered competitors from database) every %d min", s.competitor_interval_min)
 
         self.scheduler.add_job(
             self._resolve_links,

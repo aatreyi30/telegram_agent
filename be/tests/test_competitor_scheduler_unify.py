@@ -8,7 +8,7 @@ def _isolated_db():
     tmp = tempfile.mkdtemp()
     os.environ["DB_URL"] = f"sqlite:///{tmp}/test.db"
     os.environ["RAW_SNAPSHOT_DIR"] = f"{tmp}/raw"
-    os.environ["COMPETITOR_CHANNELS"] = "EnvComp"
+    # No COMPETITOR_CHANNELS env var needed anymore - competitors come from DB only
     from src.config.settings import get_settings
     from src.db import session as sess
     get_settings.cache_clear(); sess.get_engine.cache_clear(); sess.get_sessionmaker.cache_clear()
@@ -17,21 +17,15 @@ def _isolated_db():
     yield
 
 
-def test_competitors_tick_unions_db_and_env(monkeypatch):
-    """_competitors must iterate the union of env competitor_channels and
-    DB-discovered Competitor.username rows, not only the env list.
-
-    NOTE: a naive substring check for "Competitor" in the source (as sketched
-    in the plan) trivially passes because `_competitors` already references
-    `CompetitorCollector`, which contains the substring "Competitor". This
-    test instead drives real behavior: it seeds a DB-only competitor and
-    asserts the tick actually dispatches to it alongside the env-configured
-    one.
+def test_competitors_tick_uses_db_only(monkeypatch):
+    """_competitors must iterate only DB-discovered Competitor.username rows,
+    not env var competitors (env var dependency removed).
     """
     from src.db.session import session_scope
     from src.db.models import Competitor
     with session_scope() as s:
         s.add(Competitor(username="DbComp"))
+        s.add(Competitor(username="AnotherComp"))
 
     import src.services.collection.scheduler as mod
     sched = mod.CollectionScheduler()
@@ -39,5 +33,6 @@ def test_competitors_tick_unions_db_and_env(monkeypatch):
     monkeypatch.setattr(sched.runner, "run_collector", lambda collector, **kw: seen.append(kw.get("target")))
     sched._competitors()
 
-    assert "EnvComp" in seen, "env-configured competitor missing from tick"
-    assert "DbComp" in seen, "_competitors still ignores DB-discovered competitors"
+    assert "DbComp" in seen, "DB-discovered competitor missing from tick"
+    assert "AnotherComp" in seen, "Second DB-discovered competitor missing from tick"
+    assert len(seen) == 2, f"Expected 2 competitors, got {len(seen)}"

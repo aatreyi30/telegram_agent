@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from bs4 import BeautifulSoup
@@ -35,17 +35,28 @@ BASE_URL = "https://t.me/s/{username}"
 # In-process cache: original_configured_name -> resolved_actual_handle
 _resolved_handle: dict[str, str] = {}
 
-# Max messages to fetch per Telethon run (matches ~1 t.me/s page worth)
-_TELETHON_LIMIT = 50
+# Max messages to fetch per Telethon run (increased for better coverage)
+_TELETHON_LIMIT = 200
+
+# New-competitor initial collection window (product requirement): a
+# newly discovered/added competitor's FIRST collection run (initial_backfill=True,
+# set only by discovery.discover_competitors() for freshly-added competitors) is
+# bounded to the last N days of posts by date, not by a fixed message count —
+# mirroring the day-cutoff pattern telegram_owned.py already uses for owned
+# channels (HISTORY_WINDOW_DAYS). Every subsequent (incremental) run for an
+# already-known competitor is unaffected and stays bounded by _TELETHON_LIMIT /
+# max_pages as before.
+NEW_COMPETITOR_HISTORY_DAYS = 7
 
 
 class CompetitorCollector(BaseCollector):
     name = "telegram_competitor"
 
-    def __init__(self, username: str, max_pages: int = 1):
+    def __init__(self, username: str, max_pages: int = 1, initial_backfill: bool = False):
         self.original_name = username.lstrip("@")
         self.username = _resolved_handle.get(self.original_name, self.original_name)
         self.max_pages = max_pages
+        self.initial_backfill = initial_backfill  # If True, fetch full month of data
         self.settings = get_settings()
         self.bus = get_event_bus()
 
@@ -93,7 +104,23 @@ class CompetitorCollector(BaseCollector):
                 return None
 
             result = CollectorResult()
-            async for msg in client.iter_messages(entity, limit=_TELETHON_LIMIT):
+            # NEW competitor (initial_backfill=True): bound by the last
+            # NEW_COMPETITOR_HISTORY_DAYS days instead of a fixed message count —
+            # no artificial limit; iteration stops at the date cutoff below.
+            # OLD/already-known competitor (incremental): keep the existing
+            # message-count cap, unbounded by date.
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=NEW_COMPETITOR_HISTORY_DAYS)
+                if self.initial_backfill else None
+            )
+            limit = None if self.initial_backfill else _TELETHON_LIMIT
+            logger.info(
+                "[competitor:telethon] fetching (initial_backfill=%s, cutoff_days=%s, limit=%s)",
+                self.initial_backfill, NEW_COMPETITOR_HISTORY_DAYS if cutoff else None, limit,
+            )
+            async for msg in client.iter_messages(entity, limit=limit):
+                if cutoff and getattr(msg, "date", None) and to_utc(msg.date) < cutoff:
+                    break
                 if msg.message is None and not msg.media:
                     continue
                 added, updated = await self._store_telethon_post(comp_id, msg, job_id)
@@ -198,6 +225,7 @@ class CompetitorCollector(BaseCollector):
                 s.add(cp)
                 s.flush()
                 added = 1
+                logger.info("[competitor:collector] post saved: competitor_id=%d post_id=%d tg_message_id=%d", comp_id, cp.id, msg.id)
             else:
                 changed = existing.content_sha256 != digest
                 existing.views = getattr(msg, "views", None)
@@ -231,13 +259,26 @@ class CompetitorCollector(BaseCollector):
         result = CollectorResult()
         before: int | None = None
         pages_done = 0
+        # NEW competitor (initial_backfill=True): the real stopping condition is
+        # the NEW_COMPETITOR_HISTORY_DAYS date cutoff (checked per-post below);
+        # max_pages here is only a safety backstop against unbounded pagination.
+        # OLD/already-known competitor (incremental): unchanged, page-count bounded.
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=NEW_COMPETITOR_HISTORY_DAYS)
+            if self.initial_backfill else None
+        )
+        max_pages = self.max_pages * 20 if self.initial_backfill else self.max_pages
+        logger.info(
+            "[competitor:httpx] fetching (initial_backfill=%s, cutoff_days=%s, max_pages=%d)",
+            self.initial_backfill, NEW_COMPETITOR_HISTORY_DAYS if cutoff else None, max_pages,
+        )
 
         with httpx.Client(
             headers={"User-Agent": self.settings.tme_user_agent},
             timeout=30.0,
             follow_redirects=True,
         ) as client:
-            while pages_done < self.max_pages:
+            while pages_done < max_pages:
                 url = BASE_URL.format(username=self.username)
                 params = {"before": before} if before else None
                 resp = client.get(url, params=params)
@@ -278,7 +319,11 @@ class CompetitorCollector(BaseCollector):
                     break
 
                 oldest_id = None
+                hit_cutoff = False
                 for p in posts:
+                    if cutoff and p["posted_at"] and p["posted_at"] < cutoff:
+                        hit_cutoff = True
+                        continue
                     added, updated = self._store_httpx_post(comp_id, p, job.id)
                     result.processed += 1
                     result.added += added
@@ -286,6 +331,8 @@ class CompetitorCollector(BaseCollector):
                     oldest_id = p["msg_id"] if oldest_id is None else min(oldest_id, p["msg_id"])
 
                 pages_done += 1
+                if hit_cutoff:
+                    break
                 before = oldest_id
                 if before is None:
                     break
@@ -373,6 +420,7 @@ class CompetitorCollector(BaseCollector):
                 s.add(cp)
                 s.flush()
                 added = 1
+                logger.info("[competitor:collector] post saved: competitor_id=%d post_id=%d tg_message_id=%d", comp_id, cp.id, p["msg_id"])
             else:
                 changed = existing.content_sha256 != digest
                 existing.views_text = p["views_text"]
