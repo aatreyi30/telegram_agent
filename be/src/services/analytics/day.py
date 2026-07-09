@@ -36,21 +36,29 @@ def _post_type(is_multi_deal: bool) -> str:
     return "loot_deal" if is_multi_deal else "single_deal"
 
 
-def _rows_between(s: Session, start, end):
+def _rows_between(s: Session, start, end, channel_id: int | None = None):
     """Fetch all owned posts in [start, end) with merchant + type + deal flags.
 
     Returns rows: (id, posted_at, views, text, reactions_total, forwards,
-                    merchant_key, has_coupon, is_multi_deal)
+                    merchant_key, has_coupon, is_multi_deal, tg_message_id)
+
+    ``channel_id`` optionally restricts to a single owned channel; omitted
+    (default) preserves the original all-owned-channels behavior for existing
+    callers.
     """
-    return s.execute(
+    q = (
         select(Post.id, Post.posted_at, Post.views, Post.text,
                Post.reactions_total, Post.forwards,
                NormalizedPost.primary_merchant_key,
-               NormalizedPost.has_coupon, NormalizedPost.is_multi_deal)
+               NormalizedPost.has_coupon, NormalizedPost.is_multi_deal,
+               Post.tg_message_id)
         .join(NormalizedPost, NormalizedPost.source_id == Post.id)
         .where(NormalizedPost.source_type == SourceType.OWNED,
                Post.posted_at >= start, Post.posted_at < end)
-    ).all()
+    )
+    if channel_id is not None:
+        q = q.where(Post.channel_id == channel_id)
+    return s.execute(q).all()
 
 
 def _merchant_display_names(s: Session) -> dict[str, str]:

@@ -11,13 +11,110 @@ import { Badge } from "@/components/ui/badge";
 import { StatCard } from "@/components/StatCard";
 import { CalloutCard } from "@/components/CalloutCard";
 import { Async } from "@/components/Async";
-import { TimelineChart } from "@/components/charts";
+import { TimelineChart, StackedBarsChart } from "@/components/charts";
 import { useOverview, useGrowth, useCompetitorDashboard, useInsights, useDrafts, useQueue } from "@/queries/queries";
-import type { OverviewResponse, GrowthRecommendation } from "@/types/api";
+import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint, SourceBreakdown } from "@/types/api";
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString();
+}
+
+// "humanize" a raw source/metric key ("search_engine" -> "Search engine") for legends/labels.
+function humanizeLabel(key: string): string {
+  const s = key.replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Period-over-period delta for a numeric field in a `daily` series: splits the series
+// into an older half and an equally-sized most-recent half and compares them. Requires
+// no new backend data — reuses the daily rows the Growth card already fetched. Returns
+// null (no trend rendered) when there isn't enough history for a meaningful comparison,
+// or the older window is exactly 0 (a percentage delta would be undefined/fabricated).
+function periodTrend(daily: GrowthDailyPoint[], key: "subs_end" | "joined" | "left" | "net", mode: "sum" | "avg" = "sum"): { value: number } | null {
+  const n = daily.length;
+  if (n < 4) return null;
+  const half = Math.floor(n / 2);
+  const older = daily.slice(0, half);
+  const recent = daily.slice(n - half);
+  const aggregate = (rows: GrowthDailyPoint[]) => {
+    const sum = rows.reduce((acc, d) => acc + (key === "subs_end" ? d.subs_end ?? 0 : d[key]), 0);
+    return mode === "avg" ? sum / rows.length : sum;
+  };
+  const olderVal = aggregate(older);
+  const recentVal = aggregate(recent);
+  if (olderVal === 0) return null;
+  const pct = ((recentVal - olderVal) / Math.abs(olderVal)) * 100;
+  return { value: Math.round(pct * 10) / 10 };
+}
+
+function ChannelHeader({ channel }: { channel: OverviewResponse["channel"] }) {
+  if (!channel?.available) return null;
+  const initial = (channel.title ?? channel.username ?? "?").trim().charAt(0).toUpperCase() || "?";
+  return (
+    <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
+      <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary/10 text-base font-semibold text-primary">
+        {initial}
+      </div>
+      <div className="min-w-0">
+        <p className="truncate text-base font-semibold leading-tight">{channel.title ?? "Untitled channel"}</p>
+        <p className="mt-0.5 flex flex-wrap items-center gap-1.5 truncate text-sm text-muted-foreground">
+          {channel.username && <span>@{channel.username}</span>}
+          {channel.username && channel.subscribers != null && <span aria-hidden>·</span>}
+          {channel.subscribers != null && (
+            <span className="inline-flex items-center gap-1">
+              <HugeiconsIcon icon={UserGroupIcon} className="h-3.5 w-3.5" />
+              {channel.subscribers.toLocaleString()} subscribers
+            </span>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Reshape a Telegram broadcast-stats source breakdown ({totals, daily}) into the
+// {label, [source]: value}[] row format StackedBarsChart expects.
+function sourceRows(sb: SourceBreakdown) {
+  return Object.entries(sb.daily)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, sources]) => ({ label: date, ...sources }));
+}
+
+function SourceBreakdownChart({ title, sb }: { title: string; sb: SourceBreakdown }) {
+  const keys = Object.keys(sb.totals);
+  const rows = sourceRows(sb);
+  const chartKeys = keys.map((k) => ({ key: k, name: humanizeLabel(k) }));
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-medium text-muted-foreground">{title}</p>
+      <StackedBarsChart data={rows} keys={chartKeys} unit="" height={200} />
+      <div className="flex flex-wrap gap-1.5">
+        {keys.map((k) => (
+          <Badge key={k} variant="outline" className="text-xs">
+            {humanizeLabel(k)}: {sb.totals[k].toLocaleString()}
+          </Badge>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Renders the view/follower "by source" stacked charts when Telegram broadcast stats are
+// available for the channel (Channel.can_view_stats); renders nothing (no placeholder, no
+// error) when absent — which is the current state for the tracked channel.
+function SourceBreakdownSection({ viewSources, followerSources }: {
+  viewSources?: SourceBreakdown | null; followerSources?: SourceBreakdown | null;
+}) {
+  const hasViews = !!viewSources && Object.keys(viewSources.totals).length > 0;
+  const hasFollowers = !!followerSources && Object.keys(followerSources.totals).length > 0;
+  if (!hasViews && !hasFollowers) return null;
+  return (
+    <div className="space-y-4 border-t pt-4">
+      {hasViews && <SourceBreakdownChart title="Views by source" sb={viewSources!} />}
+      {hasFollowers && <SourceBreakdownChart title="Joins by source" sb={followerSources!} />}
+    </div>
+  );
 }
 
 function QueueStats({ queue_counts }: { queue_counts: Record<string, number> }) {
@@ -67,6 +164,8 @@ export default function OverviewPage() {
       <Async q={overview} rows={2}>
         {(data: OverviewResponse) => (
           <>
+            <ChannelHeader channel={data.channel} />
+
             <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
               <StatCard label="Posts collected" value={data.posts.toLocaleString()} icon={<HugeiconsIcon icon={Note01Icon} className="h-4 w-4" />} />
               <StatCard label="Competitors tracked" value={data.competitors.toLocaleString()} icon={<HugeiconsIcon icon={UserGroupIcon} className="h-4 w-4" />} />
@@ -93,14 +192,26 @@ export default function OverviewPage() {
                     {(g) => {
                       if (!g.available) return <p className="text-sm text-muted-foreground">{g.reason}</p>;
                       const chartData = g.daily.map((d) => ({ label: d.date, subs_end: d.subs_end ?? 0 }));
+                      const churnData = g.daily.map((d) => ({ label: d.date, joined: d.joined, left: d.left }));
+                      const subsTrend = periodTrend(g.daily, "subs_end", "avg");
+                      const joinedTrend = periodTrend(g.daily, "joined", "sum");
+                      const netTrend = periodTrend(g.daily, "net", "sum");
                       return (
                         <div className="space-y-4">
                           <div className="grid grid-cols-3 gap-3">
-                            <StatCard label="Subscribers" value={fmtNum(g.current)} />
-                            <StatCard label="Joined" value={`+${fmtNum(g.joined)}`} />
-                            <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)} />
+                            <StatCard label="Subscribers" value={fmtNum(g.current)}
+                              trend={subsTrend ? { ...subsTrend, label: "vs prior period" } : undefined} />
+                            <StatCard label="Joined" value={`+${fmtNum(g.joined)}`}
+                              trend={joinedTrend ? { ...joinedTrend, label: "vs prior period" } : undefined} />
+                            <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)}
+                              trend={netTrend ? { ...netTrend, label: "vs prior period" } : undefined} />
                           </div>
                           <TimelineChart data={chartData} dataKey="subs_end" unit="" />
+                          <div>
+                            <p className="mb-1 text-xs font-medium text-muted-foreground">Joined vs left</p>
+                            <TimelineChart data={churnData} dataKey="joined" secondaryKey="left" unit="" secondaryUnit="" />
+                          </div>
+                          <SourceBreakdownSection viewSources={g.view_sources} followerSources={g.follower_sources} />
                         </div>
                       );
                     }}
@@ -125,14 +236,21 @@ export default function OverviewPage() {
                     {(c) => {
                       const top = c.signals.slice(0, 2);
                       if (top.length === 0) return <p className="text-sm text-muted-foreground">No signals detected.</p>;
-                      return top.map((s, i) => (
-                        <CalloutCard
-                          key={i}
-                          severity={s.type === "threat" ? "warning" : "success"}
-                          title={s.description}
-                          label={`${s.competitor} · ${s.kind}`}
-                        />
-                      ));
+                      return (
+                        <>
+                          {top.map((s, i) => (
+                            <CalloutCard
+                              key={i}
+                              severity={s.type === "threat" ? "warning" : "success"}
+                              title={s.description}
+                              label={`${s.competitor} · ${s.kind}`}
+                            />
+                          ))}
+                          <p className="text-xs text-muted-foreground">
+                            Showing {top.length} of {c.signals.length} signal{c.signals.length === 1 ? "" : "s"}
+                          </p>
+                        </>
+                      );
                     }}
                   </Async>
                 </CardContent>
@@ -145,16 +263,20 @@ export default function OverviewPage() {
                   <div className="flex items-center justify-between">
                     <div>
                       <CardTitle>Now playing</CardTitle>
-                      <CardDescription>Top recommendation &amp; pipeline health</CardDescription>
+                      <CardDescription>Top recommendations &amp; pipeline health</CardDescription>
                     </div>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <Async q={insights} rows={2}>
                     {(ins) => {
-                      const top = ins.recommendations.toSorted((a, b) => a.priority - b.priority)[0];
-                      if (!top) return <p className="text-sm text-muted-foreground">No recommendations yet.</p>;
-                      return <PriorityCard rec={top} />;
+                      const top = ins.recommendations.toSorted((a, b) => a.priority - b.priority).slice(0, 3);
+                      if (top.length === 0) return <p className="text-sm text-muted-foreground">No recommendations yet.</p>;
+                      return (
+                        <div className="space-y-2">
+                          {top.map((rec, i) => <PriorityCard key={i} rec={rec} />)}
+                        </div>
+                      );
                     }}
                   </Async>
                   <Link href="/plan" className="inline-flex items-center gap-1 text-xs text-primary hover:underline">

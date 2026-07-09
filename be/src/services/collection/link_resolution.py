@@ -63,6 +63,41 @@ _RESOLUTION_EXCEPTIONS = (httpx.HTTPError, ssl.SSLError)
 # merchant/resolved_url, but no longer re-queued every run).
 _MAX_ATTEMPTS = 5
 
+# The platform's own domain plus self-promo/utility domains (WhatsApp,
+# Telegram itself). A link that resolves to one of these is never a
+# merchant — it's either a self-referral or app-share/deeplink noise — so it
+# must never be captured as a `merchant_key` via the generic domain-capture
+# fallback, nor treated as a "known merchant domain" shortcut.
+#
+# NOTE: `grbn.in` is deliberately included here (it's the platform's own
+# domain too) so that if resolution ever terminates *still on* grbn.in (a
+# dead/self-referential shortlink that never actually redirects anywhere),
+# `_capture_domain` doesn't fabricate a bogus "grbn" merchant out of it.
+_SELF_DOMAINS = {
+    "grabon.in", "www.grabon.in", "grbn.in",
+    "whatsapp.com", "wa.me", "chat.whatsapp.com",
+    "t.me", "telegram.me", "telegram.org",
+}
+
+# Subset used for the PRE-fetch short-circuit in `_resolve_one` (checked
+# against the RAW, pre-redirect domain). This deliberately excludes
+# `grbn.in`: it's the platform's own shortener (see
+# `processing.parser._SHORTENER_DOMAINS`) whose entire purpose is to be
+# followed to the real merchant behind it — a raw link on grbn.in must still
+# be fetched, unlike the other entries here which are already final
+# destinations and never need a network round-trip to know they're not a
+# merchant.
+_SELF_DOMAINS_PREFETCH = _SELF_DOMAINS - {"grbn.in"}
+
+
+def _is_self_domain(domain: str | None, domains: frozenset | set = _SELF_DOMAINS) -> bool:
+    """True if `domain` (a bare host, e.g. "www.grabon.in" or "t.me") is in
+    `domains` (default `_SELF_DOMAINS`) or a subdomain thereof."""
+    if not domain:
+        return False
+    d = domain.lower()
+    return d in domains or any(d.endswith("." + s) for s in domains)
+
 
 @dataclass
 class _ResolveOutcome:
@@ -218,6 +253,13 @@ class LinkResolutionEngine(BaseCollector):
             status = "resolved" if merchant_key else "no_match"
             return _ResolveOutcome(url, resolved_url, merchant_key, status)
 
+        # self-domain (platform's own domain, WhatsApp, Telegram) — never a
+        # merchant; short-circuit before any network call. Excludes grbn.in
+        # (see _SELF_DOMAINS_PREFETCH) since that domain must still be
+        # followed to reveal the real merchant behind the shortlink.
+        if _is_self_domain(raw_domain, _SELF_DOMAINS_PREFETCH):
+            return _ResolveOutcome(url, url, None, "no_match")
+
         # raw link already on a known merchant domain — no network call needed
         if raw_domain:
             direct = detect_merchant_key(raw_domain)
@@ -261,6 +303,8 @@ class LinkResolutionEngine(BaseCollector):
         if not ext.domain or not ext.suffix:
             return None, None
         domain = f"{ext.domain}.{ext.suffix}".lower()
+        if _is_self_domain(domain):
+            return None, None
         slug = re.sub(r"[^a-z0-9]+", "_", ext.domain.lower()).strip("_")
         if not slug:
             return None, None

@@ -21,7 +21,7 @@ class BriefingGenerator:
 
     def generate(self, weekly: bool = False) -> str:
         with session_scope() as s:
-            ctx = full_briefing_context(s)
+            ctx = full_briefing_context(s, weekly=weekly)
         if not ctx["channel"].get("available"):
             return "No channel data yet — run collection and the intelligence engines first."
         try:

@@ -120,6 +120,16 @@ class GrowthEngine(BaseCollector):
             else:
                 strategy, recs = self._cold_start(s, now, basis)
 
+            # AI-facing hourly posting evidence: independent of OPTIMIZATION/COLD_START —
+            # pass through whatever real hourly signal exists (however thin), tagged with
+            # its sample_size, instead of withholding it below the mode threshold.
+            if strategy is not None and not strategy["blueprint"].get("posting_plan"):
+                plan, sample_size = self._own_hourly_posting_plan(
+                    s, strategy["blueprint"].get("posting_frequency_baseline"))
+                if plan:
+                    strategy["blueprint"]["posting_plan"] = plan
+                    strategy["blueprint"]["posting_plan_sample_size"] = sample_size
+
         if strategy is None:
             result.skipped_reason = (
                 "Insufficient intelligence to build a strategy. Run the upstream "
@@ -277,6 +287,7 @@ class GrowthEngine(BaseCollector):
             plan = self._build_posting_plan(style.posts_per_day, ev.get("hourly_all"))
             if plan:
                 blueprint["posting_plan"] = plan
+                blueprint["posting_plan_sample_size"] = sum(n for _, _, n in (ev.get("hourly_all") or []))
                 parts_txt = "; ".join(
                     f"{p['part']} {p['hours']} → ~{p['recommended_posts_per_day']} posts ({p['action']})"
                     for p in plan
@@ -512,6 +523,26 @@ class GrowthEngine(BaseCollector):
         ("Evening", "18:00–23:00", range(18, 24)),
     ]
 
+    def _own_hourly_posting_plan(self, s, fallback_posts_per_day) -> tuple[list[dict] | None, int]:
+        """Real hourly-bucketed posting evidence from owned history (Phase 6's
+        `timing` LearningRecord), looked up independent of GrowthMode — used to fill
+        in `posting_plan` when the mode-specific path above didn't already set one."""
+        timing_lr = s.scalar(
+            select(LearningRecord).where(
+                LearningRecord.learning_version == LEARNING_VERSION,
+                LearningRecord.category == "timing",
+            )
+        )
+        hourly_all = (timing_lr.evidence or {}).get("hourly_all") if timing_lr else None
+        if not hourly_all:
+            return None, 0
+        style = s.scalar(
+            select(ChannelStyleProfile).where(ChannelStyleProfile.learning_version == LEARNING_VERSION)
+        )
+        posts_per_day = (style.posts_per_day if style else None) or fallback_posts_per_day
+        plan = self._build_posting_plan(posts_per_day, hourly_all)
+        return plan, sum(n for _, _, n in hourly_all)
+
     def _build_posting_plan(self, posts_per_day, hourly_all) -> list[dict] | None:
         """Distribute the daily posting budget across day-parts, shifting volume
         toward higher-performing parts while keeping presence in every active part
@@ -534,7 +565,7 @@ class GrowthEngine(BaseCollector):
             current_share = part_n / total_n
             parts.append({
                 "part": name, "hours": label, "current_share": current_share,
-                "part_avg_views_per_day": part_avg,
+                "part_avg_views_per_day": part_avg, "sample_size": part_n,
                 # weight current volume by relative performance -> shift toward winners
                 "raw_weight": current_share * (part_avg / overall_avg),
             })
@@ -553,6 +584,7 @@ class GrowthEngine(BaseCollector):
                 "current_posts_per_day": cur_ppd,
                 "recommended_posts_per_day": rec_ppd,
                 "avg_views_per_day": round(p["part_avg_views_per_day"], 1),
+                "sample_size": p["sample_size"],
                 "action": action,
             })
         return plan

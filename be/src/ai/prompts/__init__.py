@@ -13,7 +13,7 @@ from __future__ import annotations
 from src.ai.prompts.briefing import DAILY_INSTRUCTIONS, WEEKLY_INSTRUCTIONS
 from src.ai.prompts.coach import COACH_SYSTEM
 from src.ai.prompts.copywriter import COPYWRITER_INSTRUCTIONS
-from src.ai.prompts.discovery import verify_candidate_prompt
+from src.ai.prompts.discovery import VERIFY_CANDIDATE_SYSTEM, verify_candidate_input
 from src.ai.prompts.grounding import GROUNDING_SYSTEM
 from src.ai.prompts.insight_writer import NARRATE_SYSTEM
 from src.ai.prompts.planner import PLAN_INSTRUCTIONS
@@ -26,5 +26,6 @@ __all__ = [
     "DAILY_INSTRUCTIONS",
     "WEEKLY_INSTRUCTIONS",
     "COPYWRITER_INSTRUCTIONS",
-    "verify_candidate_prompt",
+    "VERIFY_CANDIDATE_SYSTEM",
+    "verify_candidate_input",
 ]

@@ -102,7 +102,11 @@ def test_duplicate_url_resolved_only_once_per_run(isolated_db, monkeypatch):
 
     _patch_transport(monkeypatch, handler)
 
-    shared_url = "https://grbn.in/dup123"
+    # NOT a self-domain (grbn.in/grabon.in/whatsapp/telegram) — a shortlink
+    # that dead-ends on one of those must NOT be captured as a merchant (see
+    # test_self_domain_never_captured_as_merchant below); this test is only
+    # about the once-per-run cache + the generic domain-capture fallback.
+    shared_url = "https://myshortlink.io/dup123"
     ids = _make_post_and_links([shared_url, shared_url])
 
     engine = LinkResolutionEngine(limit=100)
@@ -195,3 +199,80 @@ def test_resolution_failure_is_recorded_and_retryable(isolated_db, monkeypatch):
         link = s.get(ExtractedLink, ids[0])
         assert link.resolution_attempts == 2
         assert link.resolution_status == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# (d) self-domains (platform's own domain, WhatsApp, Telegram) never become a
+#     merchant_key — neither via the raw-domain pre-fetch shortcut nor via the
+#     domain-capture fallback when a shortlink dead-ends without redirecting.
+# --------------------------------------------------------------------------- #
+def test_self_domain_never_captured_as_merchant(isolated_db, monkeypatch):
+    from src.services.collection.link_resolution import LinkResolutionEngine
+    from src.db.models_normalization import ExtractedLink
+    from src.db.session import session_scope
+
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        # No redirect — simulates a dead/self-referential shortlink.
+        return httpx.Response(200, request=request)
+
+    _patch_transport(monkeypatch, handler)
+
+    # A raw link whose *known* domain is a self/utility domain (e.g. a post
+    # sharing a WhatsApp channel link directly) must short-circuit BEFORE any
+    # network call.
+    whatsapp_ids = _make_post_and_links(
+        ["https://whatsapp.com/channel/abc123"], domains=["whatsapp.com"]
+    )
+    # A grbn.in shortlink that never actually redirects anywhere (dead-ends on
+    # itself) must NOT be captured as a fake "grbn" merchant — but it DOES
+    # still require the network fetch (grbn.in is the platform's own
+    # shortener and must always be followed).
+    grbn_ids = _make_post_and_links(["https://grbn.in/dead1"], domains=["grbn.in"])
+
+    engine = LinkResolutionEngine(limit=100)
+    engine.run(_fake_job())
+
+    assert calls == ["https://grbn.in/dead1"], (
+        f"whatsapp.com link should have skipped the network call entirely, got {calls}"
+    )
+
+    with session_scope() as s:
+        wa_link = s.get(ExtractedLink, whatsapp_ids[0])
+        assert wa_link.merchant_key is None
+        assert wa_link.resolution_status == "no_match"
+        assert wa_link.resolved_url == "https://whatsapp.com/channel/abc123"
+
+        grbn_link = s.get(ExtractedLink, grbn_ids[0])
+        assert grbn_link.merchant_key is None
+        assert grbn_link.resolution_status == "no_match"
+
+
+def test_raw_shortener_domain_still_resolves_through_redirect(isolated_db, monkeypatch):
+    """grbn.in must be excluded from becoming a merchant itself, but a raw
+    link on grbn.in that DOES redirect to a real merchant must still resolve
+    normally — the pre-fetch self-domain shortcut must not swallow it."""
+    from src.services.collection.link_resolution import LinkResolutionEngine
+    from src.db.models_normalization import ExtractedLink
+    from src.db.session import session_scope
+
+    final_url = "https://www.nutrabay.com/products/whey-protein"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith("https://grbn.in/"):
+            return httpx.Response(302, headers={"Location": final_url}, request=request)
+        return httpx.Response(200, request=request)
+
+    _patch_transport(monkeypatch, handler)
+
+    ids = _make_post_and_links(["https://grbn.in/nb003"], domains=["grbn.in"])
+
+    engine = LinkResolutionEngine(limit=100)
+    engine.run(_fake_job())
+
+    with session_scope() as s:
+        link = s.get(ExtractedLink, ids[0])
+        assert link.merchant_key == "nutrabay"
+        assert link.resolution_status == "resolved"

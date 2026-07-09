@@ -266,9 +266,9 @@ def competitor_profiles(s: Session) -> list[dict]:
         .order_by(CompetitorProfile.post_count.desc()))]
 
 
-def full_briefing_context(s: Session) -> dict:
+def full_briefing_context(s: Session, weekly: bool = False) -> dict:
     """Everything the briefing generator needs, as one grounded bundle."""
-    return {
+    out = {
         "channel": channel_overview(s),
         "what_changed_and_why": reasoning_insights(s),
         "growth_recommendations": growth_recommendations(s),
@@ -277,6 +277,21 @@ def full_briefing_context(s: Session) -> dict:
         "merchant_opportunities": merchant_opportunities(s),
         "channel_style": channel_style(s),
     }
+    if weekly:
+        from datetime import date as _date
+
+        from src.services.analytics.daily_report import _owned_channel
+
+        traj = posting_trajectory(s, days=7)
+        week_start = _date.fromisoformat(traj["days"][0]["date"]) if traj["days"] else None
+        end_day = _date.fromisoformat(traj["days"][-1]["date"]) if traj["days"] else None
+        out["prev_week_digest"] = prev_week_digest(s, week_start) if week_start else None
+        ch = _owned_channel(s)
+        out["follower_deltas"] = (
+            follower_deltas_by_day(s, ch.id if ch else None, week_start, end_day)
+            if week_start and end_day else {}
+        )
+    return out
 
 
 def to_json(data: dict | list) -> str:
@@ -352,6 +367,31 @@ def daily_report_or_live(s: Session, day) -> dict:
     return d
 
 
+def scheduled_count_today(s: Session, day=None) -> int:
+    """Count of `ScheduledPost` rows due on ``day`` (IST calendar date, defaulting
+    to the latest owned-post day) — i.e. what's actually queued to post that day,
+    as opposed to `posting_trajectory`'s purely historical cadence target.
+
+    `CANCELLED` rows are excluded (they were pulled from the plan); every other
+    status (queued/retry/sending/published/failed/blocked) still counts as "was
+    scheduled for that day" for reconciliation purposes against the recommended
+    cadence.
+    """
+    from src.db.models_automation import ScheduledPost, ScheduleStatus
+    from src.services.analytics.day import _ist_bounds, latest_owned_date
+
+    if day is None:
+        day = latest_owned_date(s)
+    if day is None:
+        return 0
+    start, end = _ist_bounds(day)
+    return s.scalar(
+        select(func.count()).select_from(ScheduledPost)
+        .where(ScheduledPost.scheduled_at >= start, ScheduledPost.scheduled_at < end,
+               ScheduledPost.status != ScheduleStatus.CANCELLED)
+    ) or 0
+
+
 def posting_trajectory(s: Session, days: int = 14, end_day=None) -> dict:
     """Per-IST-day owned posting counts over the last ``days`` (ending at ``end_day``
     or the latest owned day). Returns the day series plus ``recent_cadence`` (median
@@ -404,3 +444,71 @@ def posting_trajectory(s: Session, days: int = 14, end_day=None) -> dict:
     lifetime = bp.get("posting_frequency_baseline")
     return {"days": series, "recent_cadence": cadence,
             "lifetime_baseline": round(lifetime, 1) if lifetime else None}
+
+
+def clamp_recommended_posts(
+    candidate, recent_median: int, recent_max_30d: int | None = None
+) -> tuple[int, bool]:
+    """Safety-clamp the AI's own `recommended_posts` headline before it reaches a user.
+
+    `candidate=None`/unparseable is an AI-unavailable fallback, not a clamp event —
+    returns `recent_median` with `False` so the caller doesn't set `plan_clamped`.
+    Otherwise: floor of 1 while there's active recent cadence (never silently accept
+    0 unless `recent_median` itself is 0 — a genuine pause); ceiling of
+    `3 * recent_max_30d`, or `max(3 * recent_median, 5)` when `recent_max_30d` is
+    unavailable/zero.
+    """
+    if candidate is None:
+        return int(recent_median or 0), False
+    try:
+        value = int(round(float(candidate)))
+    except (TypeError, ValueError):
+        return int(recent_median or 0), False
+
+    floor = 1 if recent_median and recent_median > 0 else 0
+    ceiling = 3 * recent_max_30d if recent_max_30d else max(3 * (recent_median or 0), 5)
+
+    clamped = min(max(value, floor), ceiling)
+    return clamped, clamped != value
+
+
+def prev_week_digest(s: Session, week_start) -> str | None:
+    """Previous week's AI narrative: the WEEKLY `CampaignPlan` whose `end_date` falls
+    immediately before `week_start`, so this week's briefing can build on it instead
+    of restating from scratch. `None` when absent or not AI-generated."""
+    from datetime import timedelta
+
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+
+    prev_end = week_start - timedelta(days=1)
+    wk = s.scalar(
+        select(CampaignPlan)
+        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+               CampaignPlan.plan_type == PlanType.WEEKLY,
+               CampaignPlan.end_date == prev_end)
+        .order_by(CampaignPlan.generated_at.desc())
+    )
+    if wk and wk.is_ai_generated and wk.ai_digest:
+        return wk.ai_digest
+    return None
+
+
+def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_day) -> dict[str, dict]:
+    """Per-IST-day joined/left/net follower counts for `channel_id` over
+    [start_day, end_day], keyed by ISO date — drops in alongside `posting_trajectory`'s
+    day series for the weekly view. Days with no `DailySubscriberStat` row are simply
+    absent from the result (the caller decides the gap-fill default)."""
+    from src.db.models_growth_snapshot import DailySubscriberStat
+
+    if channel_id is None:
+        return {}
+    rows = s.scalars(
+        select(DailySubscriberStat)
+        .where(DailySubscriberStat.channel_id == channel_id,
+               DailySubscriberStat.stat_date >= start_day,
+               DailySubscriberStat.stat_date <= end_day)
+    ).all()
+    return {r.stat_date.isoformat(): {"joined": r.subs_joined or 0,
+                                       "left": r.subs_left or 0,
+                                       "net": r.subs_net or 0}
+            for r in rows}

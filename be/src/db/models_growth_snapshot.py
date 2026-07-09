@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import date as date_, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.base import Base
@@ -52,4 +52,49 @@ class DailySubscriberStat(Base):
     subs_joined: Mapped[int] = mapped_column(Integer, default=0)
     subs_left: Mapped[int] = mapped_column(Integer, default=0)
     subs_net: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DailyViewSource(Base):
+    """Per-IST-day view counts broken out by traffic source ("search", a named
+    channel, "other", ...), sourced from Telegram's admin-only
+    ``views_by_source_graph`` (``stats.getBroadcastStats`` — requires
+    ``Channel.can_view_stats``; see
+    ``telegram_owned.py::_collect_broadcast_stats``). One row per
+    (channel, day, source); Telegram's graph is the source of truth so a
+    resync simply overwrites the value rather than accumulating a delta.
+    """
+
+    __tablename__ = "daily_view_sources"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "stat_date", "source_label", name="uq_dailyviewsrc_channel_date_src"),
+        Index("ix_dailyviewsrc_channel_date", "channel_id", "stat_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    stat_date: Mapped[date_] = mapped_column(Date, nullable=False)  # IST calendar day
+    source_label: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DailyJoinSource(Base):
+    """Per-IST-day new-follower counts broken out by source, sourced from
+    Telegram's admin-only ``new_followers_by_source_graph``. Same conventions
+    as ``DailyViewSource`` above."""
+
+    __tablename__ = "daily_join_sources"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "stat_date", "source_label", name="uq_dailyjoinsrc_channel_date_src"),
+        Index("ix_dailyjoinsrc_channel_date", "channel_id", "stat_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    stat_date: Mapped[date_] = mapped_column(Date, nullable=False)  # IST calendar day
+    source_label: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    joins: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

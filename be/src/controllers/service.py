@@ -547,17 +547,21 @@ def _today_details(s, recommended_posts: int):
 
     bp = (ctx.growth_blueprint(s).get("blueprint") or {})
     eng = CampaignPlanningEngine()
-    recent = eng._recent_distribution(s, datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    recent = eng._recent_distribution(s, now)
     # The blueprint's posting_plan is sized to the stale baseline, so use it only for
     # the RELATIVE shape and rescale each window to the recommended cadence — otherwise
     # the per-window posts sum to ~18 while the headline says ~50.
     raw = bp.get("posting_plan") or []
     raw_sum = sum((p.get("recommended_posts_per_day") or 0) for p in raw) or 1
     windows = [{"part": p.get("part"), "hours": p.get("hours"),
-                "posts": round((p.get("recommended_posts_per_day") or 0) * recommended_posts / raw_sum)}
+                "posts": round((p.get("recommended_posts_per_day") or 0) * recommended_posts / raw_sum),
+                # historical day-part performance, when known — lets the AI cite a real
+                # number for WHY this window instead of generic "peak hours" filler.
+                "avg_views_per_day": p.get("avg_views_per_day")}
                for p in raw]
     allocation = eng._allocate_posts(bp, recommended_posts)
-    merchants = eng._merchant_allocation(recent)
+    merchants = eng._merchant_allocation(s, recent, now)
     risks = eng._risks(recent, recommended_posts)
     return windows, allocation, merchants, (risks or None)
 
@@ -597,7 +601,21 @@ def daily_brief(date: str | None = None) -> dict:
         yesterday = ctx.daily_report_or_live(s, prev)
         traj = ctx.posting_trajectory(s, days=14, end_day=prev)
         recommended = traj["recent_cadence"]
+        traj30 = ctx.posting_trajectory(s, days=30, end_day=prev)
+        recent_max_30d = max((d["posts"] for d in traj30["days"]), default=0)
         windows, allocation, merchants, risks = _today_details(s, recommended)
+        scheduled_count = ctx.scheduled_count_today(s, day)
+        gap = max(recommended - scheduled_count, 0)
+
+        evt = None
+        try:
+            evs = upcoming_events(s, day, within_days=14)
+            if evs:
+                e = evs[0]
+                evt = {"name": e.name, "days_away": (e.next_date - day).days,
+                       "date_confidence": e.date_confidence}
+        except Exception:
+            evt = None
 
         active = [d["posts"] for d in traj["days"] if d["posts"] > 0]
         lo, hi = (min(active), max(active)) if active else (0, 0)
@@ -631,6 +649,7 @@ def daily_brief(date: str | None = None) -> dict:
                 "posting_windows": windows,
                 "deal_type_allocation": allocation,
                 "merchant_allocation": merchants,
+                "upcoming_event": evt,
             })
             ai_ok = bool(ai_res.get("available"))
             plan = ai_res.get("plan") or {}
@@ -646,23 +665,17 @@ def daily_brief(date: str | None = None) -> dict:
                     # enough (missing/mismatched) to key the cache lookup on.
                     row.target_date = day
 
-        # cadence_why is ALWAYS the deterministic explanation so the number in the text
-        # always matches the deterministic recommended_posts headline (the AI's free-text
-        # rationale lives in `digest` instead, where an approximation is harmless).
-        cadence_why = det_why
+        if ai_ok and plan.get("recommended_posts") is not None:
+            recommended_final, was_clamped = ctx.clamp_recommended_posts(
+                plan.get("recommended_posts"), recommended, recent_max_30d)
+            ai_why = plan.get("cadence_why")
+            cadence_why = ai_why if (not was_clamped and ai_why) else det_why
+        else:
+            recommended_final, was_clamped = recommended, False
+            cadence_why = det_why
         slots = plan.get("post_slots", []) if ai_ok else []
         emphasis = plan.get("emphasis") if ai_ok else None
         watch = plan.get("watch") if ai_ok else None
-
-        evt = None
-        try:
-            evs = upcoming_events(s, day, within_days=14)
-            if evs:
-                e = evs[0]
-                evt = {"name": e.name, "days_away": (e.next_date - day).days,
-                       "date_confidence": e.date_confidence}
-        except Exception:
-            evt = None
 
         return {
             "available": True,
@@ -673,7 +686,7 @@ def daily_brief(date: str | None = None) -> dict:
             "trajectory": {"days": traj["days"], "recent_cadence": recommended,
                            "lifetime_baseline": traj["lifetime_baseline"]},
             "today": {
-                "recommended_posts": recommended,
+                "recommended_posts": recommended_final,
                 "cadence_why": cadence_why,
                 "posting_windows": windows,
                 "deal_type_allocation": allocation,
@@ -682,6 +695,9 @@ def daily_brief(date: str | None = None) -> dict:
                 "emphasis": emphasis, "watch": watch,
                 "risks": risks,
                 "confidence": round(min(1.0, len(active) / 14), 3),
+                "scheduled_count": scheduled_count,
+                "gap": gap,
+                "plan_clamped": was_clamped,
             },
             "digest": digest,
             "factcheck_status": fc_status,
@@ -695,6 +711,7 @@ def weekly_brief(end: str | None = None) -> dict:
     weekly narrative (best-effort)."""
     from datetime import date as date_cls
     from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.daily_report import _owned_channel
     from src.services.planning.calendar import upcoming_events
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
 
@@ -711,9 +728,13 @@ def weekly_brief(end: str | None = None) -> dict:
             return {"available": False, "reason": "No owned posts yet."}
 
         traj = ctx.posting_trajectory(s, days=7, end_day=end_day)
+        ch = _owned_channel(s)
+        week_start_date = date_cls.fromisoformat(traj["days"][0]["date"]) if traj["days"] else end_day
+        deltas = ctx.follower_deltas_by_day(s, ch.id if ch else None, week_start_date, end_day)
         days = [{"date": d["date"],
                  "weekday": date_cls.fromisoformat(d["date"]).strftime("%a"),
-                 "posts": d["posts"], "views_avg": d["views_avg"]}
+                 "posts": d["posts"], "views_avg": d["views_avg"],
+                 **(deltas.get(d["date"]) or {"joined": 0, "left": 0, "net": 0})}
                 for d in traj["days"]]
         posts_total = sum(d["posts"] for d in traj["days"])
         views_total = round(sum(d["posts"] * d["views_avg"] for d in traj["days"]))
@@ -746,6 +767,10 @@ def weekly_brief(end: str | None = None) -> dict:
                 ai_summary = ""
         except Exception:
             ai_summary = ""
+
+        if ai_ok and wk is not None:
+            wk.ai_digest = ai_summary
+            wk.is_ai_generated = True
 
         return {"available": True,
                 "week_start": traj["days"][0]["date"] if traj["days"] else end_day.isoformat(),
