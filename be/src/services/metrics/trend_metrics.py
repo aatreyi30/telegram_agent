@@ -18,7 +18,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.db.models import Post
-from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_normalization import NormalizedPost, SourceType
 
 
@@ -26,7 +25,7 @@ from src.db.models_normalization import NormalizedPost, SourceType
 class TrendFact:
     posted_at: datetime
     views: int | None
-    cluster: str | None
+    is_multi_deal: bool
     merchant_key: str | None
     has_cta: bool
     has_media: bool
@@ -35,7 +34,7 @@ class TrendFact:
 def load_owned_facts(s: Session) -> list[TrendFact]:
     np_rows = s.execute(
         select(NormalizedPost.source_id, NormalizedPost.cta_texts,
-               NormalizedPost.primary_merchant_key, NormalizedPost.id)
+               NormalizedPost.primary_merchant_key, NormalizedPost.is_multi_deal)
         .where(NormalizedPost.source_type == SourceType.OWNED)
     ).all()
     post_meta = {
@@ -44,25 +43,16 @@ def load_owned_facts(s: Session) -> list[TrendFact]:
             select(Post.id, Post.posted_at, Post.views, Post.has_media)
         ).all()
     }
-    npids = [r[3] for r in np_rows]
-    clusters = {}
-    if npids:
-        for npid, desc in s.execute(
-            select(PostClassification.normalized_post_id, PostTypeCluster.descriptor)
-            .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id)
-            .where(PostClassification.normalized_post_id.in_(npids))
-        ).all():
-            clusters[npid] = desc
 
     facts = []
-    for src_id, cta, mkey, npid in np_rows:
+    for src_id, cta, mkey, multi in np_rows:
         meta = post_meta.get(src_id)
         if not meta or meta[0] is None:
             continue
         posted_at, views, media = meta
         pa = posted_at if posted_at.tzinfo else posted_at.replace(tzinfo=timezone.utc)
         facts.append(TrendFact(
-            posted_at=pa, views=views, cluster=clusters.get(npid),
+            posted_at=pa, views=views, is_multi_deal=multi,
             merchant_key=mkey, has_cta=bool(cta), has_media=bool(media),
         ))
     return facts

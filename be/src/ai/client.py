@@ -53,13 +53,17 @@ class AIClient:
             raise AIUnavailable(reason)
         client = self._get_client()
         system = GROUNDING_SYSTEM + (("\n\n" + system_extra) if system_extra else "")
-        resp = client.chat.completions.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            temperature=0.3,  # low → stick to the provided facts
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-        )
+        try:
+            resp = client.chat.completions.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=0.3,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+            )
+        except Exception as exc:
+            logger.warning("AI completion failed: %s", exc)
+            raise AIUnavailable(str(exc)) from exc
         return (resp.choices[0].message.content or "").strip()
 
     def agentic(self, user: str, tools: list[dict], tool_runner, *,
@@ -83,10 +87,14 @@ class AIClient:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user}]
         for _ in range(max_iterations):
-            resp = client.chat.completions.create(
-                model=self.model, max_tokens=max_tokens, temperature=0.3,
-                tools=oai_tools, tool_choice="auto", messages=messages,
-            )
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model, max_tokens=max_tokens, temperature=0.3,
+                    tools=oai_tools, tool_choice="auto", messages=messages,
+                )
+            except Exception as exc:
+                logger.warning("AI agentic completion failed: %s", exc)
+                raise AIUnavailable(str(exc)) from exc
             msg = resp.choices[0].message
             if msg.tool_calls:
                 messages.append({

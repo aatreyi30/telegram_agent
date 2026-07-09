@@ -139,23 +139,24 @@ class ReasoningEngine(BaseCollector):
     def _mix_shift(self, recent, prior, perf, perf_median, insights):
         if len(recent) < MIN_PERIOD_POSTS or len(prior) < MIN_PERIOD_POSTS:
             return
-        sr = T.share_map(recent, lambda f: f.cluster)
-        sp = T.share_map(prior, lambda f: f.cluster)
+        def _key(f): return "loot_deal" if f.is_multi_deal else "single_deal"
+        sr = T.share_map(recent, _key)
+        sp = T.share_map(prior, _key)
         deltas = []
-        for cluster in set(sr) | set(sp):
-            d = sr.get(cluster, 0.0) - sp.get(cluster, 0.0)
+        for pt in set(sr) | set(sp):
+            d = sr.get(pt, 0.0) - sp.get(pt, 0.0)
             if abs(d) >= SIGNIF_PP:
-                deltas.append((abs(d), d, cluster))
+                deltas.append((abs(d), d, pt))
         deltas.sort(reverse=True)
-        for _, d, cluster in deltas[:2]:
+        for _, d, pt in deltas[:2]:
             direction = "up" if d > 0 else "down"
-            label = plain_label(cluster)
+            label = plain_label(pt)
             moved = "more" if d > 0 else "fewer"
-            obs = (f"You posted {moved} {label} — they went from {_in10(sp.get(cluster, 0))} "
-                   f"to {_in10(sr.get(cluster, 0))}.")
-            vpd = perf.get(cluster)
-            evidence = {"cluster": cluster, "share_recent": round(sr.get(cluster, 0), 3),
-                        "share_prior": round(sp.get(cluster, 0), 3),
+            obs = (f"You posted {moved} {label} — they went from {_in10(sp.get(pt, 0))} "
+                   f"to {_in10(sr.get(pt, 0))}.")
+            vpd = perf.get(pt)
+            evidence = {"post_type": pt, "share_recent": round(sr.get(pt, 0), 3),
+                        "share_prior": round(sp.get(pt, 0), 3),
                         "avg_views_per_day": vpd, "perf_median": perf_median}
             if vpd is not None and perf_median:
                 good = vpd >= perf_median   # this type does better than most
@@ -253,23 +254,24 @@ class ReasoningEngine(BaseCollector):
                 ev["volume_change_pct"] = vol_change
 
         # mix shift toward under/over performers
-        sr = T.share_map(recentE, lambda f: f.cluster)
-        sp = T.share_map(priorE, lambda f: f.cluster)
+        def _key(f): return "loot_deal" if f.is_multi_deal else "single_deal"
+        sr = T.share_map(recentE, _key)
+        sp = T.share_map(priorE, _key)
         if perf_median:
             contributors = []
-            for cluster in set(sr) | set(sp):
-                d = sr.get(cluster, 0.0) - sp.get(cluster, 0.0)
-                vpd = perf.get(cluster)
+            for pt in set(sr) | set(sp):
+                d = sr.get(pt, 0.0) - sp.get(pt, 0.0)
+                vpd = perf.get(pt)
                 if abs(d) >= SIGNIF_PP and vpd is not None:
                     aligned = (d > 0) == (vpd >= perf_median)  # gained a good / lost a bad -> up
                     if (direction == "up") == aligned:
-                        contributors.append((abs(d), cluster, d, vpd))
+                        contributors.append((abs(d), pt, d, vpd))
             contributors.sort(reverse=True)
-            for _, cluster, d, vpd in contributors[:2]:
-                reasons.append(f"you posted {'more' if d>0 else 'fewer'} {plain_label(cluster)}, "
+            for _, pt, d, vpd in contributors[:2]:
+                reasons.append(f"you posted {'more' if d>0 else 'fewer'} {plain_label(pt)}, "
                                f"which usually get about {vpd:.0f} views a day")
                 ev.setdefault("mix_contributors", []).append(
-                    {"cluster": cluster, "share_delta_pp": round(d * 100, 1), "avg_views_per_day": vpd})
+                    {"post_type": pt, "share_delta_pp": round(d * 100, 1), "avg_views_per_day": vpd})
 
         obs = (f"Your posts are getting {'more' if direction == 'up' else 'fewer'} views — about "
                f"{vr:.0f} views a day now, versus about {vp:.0f} a month earlier "
