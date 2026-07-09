@@ -10,19 +10,14 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { StatCard } from "@/components/StatCard";
 import { Async } from "@/components/Async";
-import { TimelineChart, StackedBarsChart } from "@/components/charts";
+import { TimelineChart } from "@/components/charts";
+import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useOverview, useGrowth, useInsights, useDrafts, useQueue } from "@/queries/queries";
-import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint, SourceBreakdown } from "@/types/api";
+import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint } from "@/types/api";
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString();
-}
-
-// "humanize" a raw source/metric key ("search_engine" -> "Search engine") for legends/labels.
-function humanizeLabel(key: string): string {
-  const s = key.replace(/_/g, " ");
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // Period-over-period delta for a numeric field in a `daily` series: splits the series
@@ -68,50 +63,6 @@ function ChannelHeader({ channel }: { channel: OverviewResponse["channel"] }) {
           )}
         </p>
       </div>
-    </div>
-  );
-}
-
-// Reshape a Telegram broadcast-stats source breakdown ({totals, daily}) into the
-// {label, [source]: value}[] row format StackedBarsChart expects.
-function sourceRows(sb: SourceBreakdown) {
-  return Object.entries(sb.daily)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, sources]) => ({ label: date, ...sources }));
-}
-
-function SourceBreakdownChart({ title, sb }: { title: string; sb: SourceBreakdown }) {
-  const keys = Object.keys(sb.totals);
-  const rows = sourceRows(sb);
-  const chartKeys = keys.map((k) => ({ key: k, name: humanizeLabel(k) }));
-  return (
-    <div className="space-y-2">
-      <p className="text-xs font-medium text-muted-foreground">{title}</p>
-      <StackedBarsChart data={rows} keys={chartKeys} unit="" height={200} />
-      <div className="flex flex-wrap gap-1.5">
-        {keys.map((k) => (
-          <Badge key={k} variant="outline" className="text-xs">
-            {humanizeLabel(k)}: {sb.totals[k].toLocaleString()}
-          </Badge>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// Renders the view/follower "by source" stacked charts when Telegram broadcast stats are
-// available for the channel (Channel.can_view_stats); renders nothing (no placeholder, no
-// error) when absent — which is the current state for the tracked channel.
-function SourceBreakdownSection({ viewSources, followerSources }: {
-  viewSources?: SourceBreakdown | null; followerSources?: SourceBreakdown | null;
-}) {
-  const hasViews = !!viewSources && Object.keys(viewSources.totals).length > 0;
-  const hasFollowers = !!followerSources && Object.keys(followerSources.totals).length > 0;
-  if (!hasViews && !hasFollowers) return null;
-  return (
-    <div className="space-y-4 border-t pt-4">
-      {hasViews && <SourceBreakdownChart title="Views by source" sb={viewSources!} />}
-      {hasFollowers && <SourceBreakdownChart title="Joins by source" sb={followerSources!} />}
     </div>
   );
 }
@@ -208,7 +159,11 @@ export default function OverviewPage() {
                           <p className="mb-1 text-xs font-medium text-muted-foreground">Joined vs left</p>
                           <TimelineChart data={churnData} dataKey="joined" secondaryKey="left" unit="" secondaryUnit="" />
                         </div>
-                        <SourceBreakdownSection viewSources={g.view_sources} followerSources={g.follower_sources} />
+                        {hasSourceBreakdown(g.view_sources, g.follower_sources) && (
+                          <div className="border-t pt-4">
+                            <SourceBreakdownSection viewSources={g.view_sources} followerSources={g.follower_sources} />
+                          </div>
+                        )}
                       </div>
                     );
                   }}

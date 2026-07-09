@@ -7,6 +7,7 @@ import { BarsChart, TimelineChart } from "@/components/charts";
 import { StatCard } from "@/components/StatCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DateFilter } from "@/components/ui/date-range-picker";
+import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useAnalytics, useDataRange } from "@/queries/queries";
 import { useQueryParams } from "@/lib/use-search-params";
 import { CHART_AXIS_COLOR as AXIS, CHART_GRID_COLOR as GRID } from "@/constants/charts";
@@ -176,6 +177,13 @@ export default function AnalyticsPage() {
                       </BarChart>
                     </ResponsiveContainer>
                   </ChartCard>
+
+                  {hasSourceBreakdown(a.growth.view_sources, a.growth.follower_sources) && (
+                    <ChartCard title="Views & joins by source"
+                      sub="Telegram's admin broadcast-stats breakdown — straight from the API, no derived math.">
+                      <SourceBreakdownSection viewSources={a.growth.view_sources} followerSources={a.growth.follower_sources} />
+                    </ChartCard>
+                  )}
                 </>
               )}
 

@@ -7,7 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { BarsChart } from "@/components/charts";
-import { useDataRange, useDay } from "@/queries/queries";
+import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
+import { useDataRange, useDay, useGrowth } from "@/queries/queries";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { useQueryParams } from "@/lib/use-search-params";
 
@@ -63,6 +64,11 @@ export default function DayViewPage() {
     if (q.data && "date_end" in q.data && q.data.date_end) return q.data.date_end;
     return resolvedStart;
   })();
+
+  // Views/joins "by source" (Telegram broadcast stats) come straight from /growth,
+  // scoped to the same resolved date window as the day/range view above.
+  const growth = useGrowth(resolvedStart || undefined, resolvedEnd || undefined,
+    { enabled: !!resolvedStart && !!resolvedEnd });
 
   const handlePresetChange = (p: string) => {
     const val = p === "custom" ? "7d" : p;
@@ -181,6 +187,21 @@ export default function DayViewPage() {
                   </Table>
                 </CardContent>
               </Card>
+
+              {growth.data && hasSourceBreakdown(growth.data.view_sources, growth.data.follower_sources) && (
+                <Card>
+                  <CardHeader>
+                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-2" />
+                    <CardTitle className="text-base">Views &amp; joins by source</CardTitle>
+                    <p className="text-xs text-muted-foreground">
+                      Telegram's admin broadcast-stats breakdown for this window — straight from the API.
+                    </p>
+                  </CardHeader>
+                  <CardContent>
+                    <SourceBreakdownSection viewSources={growth.data.view_sources} followerSources={growth.data.follower_sources} />
+                  </CardContent>
+                </Card>
+              )}
 
               <div className="grid gap-4 md:grid-cols-2">
                 <Card>
