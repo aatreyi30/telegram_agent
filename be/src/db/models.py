@@ -291,6 +291,10 @@ class Competitor(Base, TimestampMixin):
     last_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolution_confidence: Mapped[float | None] = mapped_column(Float)
     verified_by: Mapped[str | None] = mapped_column(String(16))  # heuristic|ai|manual
+    # per-competitor cron gate: sync/intel skip this competitor when False (the
+    # operator turned monitoring off from Settings > Competitors). Defaults to
+    # True so every existing competitor keeps today's behaviour unchanged.
+    monitoring_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     posts: Mapped[list["CompetitorPost"]] = relationship(back_populates="competitor")
 
