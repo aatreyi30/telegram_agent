@@ -143,8 +143,20 @@ def _run_engine(engine, target) -> int:
 
 
 def j_deal_ranking() -> dict:
-    return {"processed": 0, "status": "limited",
-            "detail": "limited: ranking runs at generation time; live re-score needs stored per-deal metrics"}
+    """Phase 3.2 -- runs the audience-aware ``DealScoringEngine`` on a schedule
+    and persists one ``DealScore`` history row per active deal (``deal_scores``
+    table). Replaces the earlier no-op stub (ranking used to only run at
+    draft-generation time via ``DealRanker`` -- see ``generation/ranking.py``,
+    which still drives selection at generation time; this job feeds
+    ``/api/deals/scored`` and the planner's ``scored_deals`` context instead).
+    Job key/cadence (``deal_ranking``, ``cadences.DEAL_RANKING_MIN``) kept as-is
+    -- only the body changed."""
+    from src.db.session import session_scope
+    from src.services.intelligence.deal_scoring import DealScoringEngine
+
+    with session_scope() as s:
+        n = DealScoringEngine().score_all_active(s)
+    return {"processed": n, "detail": f"{n} active deals scored (deal_scores history)"}
 
 
 def j_price_history() -> dict:
@@ -182,7 +194,12 @@ def j_competitor_intel() -> dict:
 
 def _briefing(weekly=False) -> str:
     from src.ai.briefing import BriefingGenerator
-    return BriefingGenerator().generate(weekly=weekly)
+    from src.config.settings import get_settings
+    from src.services.ai_outputs import record_ai_output
+
+    txt = BriefingGenerator().generate(weekly=weekly)
+    record_ai_output("weekly_briefing" if weekly else "daily_briefing", txt, get_settings().ai_model)
+    return txt
 
 
 def j_ai_daily_summary() -> dict:
@@ -201,6 +218,24 @@ def j_weekly_report() -> dict:
         return {"processed": 1, "detail": "weekly plan + AI summary refreshed"}
     except Exception:
         return {"processed": 1, "detail": "weekly plan refreshed (AI summary skipped)"}
+
+
+def j_weekly_retro() -> dict:
+    """Phase 2.4 -- builds the WeeklyRetro for the week that just ended (the
+    IST Monday->Sunday preceding today), so weekly_report/weekly_brief right
+    after it (08:30) can read a fresh retro. Runs every Monday at 07:30 IST --
+    30 min before weekly_report -- see cadences.WEEKLY_RETRO_TIME."""
+    from src.db.session import session_scope
+    from src.services.analytics.periods import to_ist
+    from src.services.analytics.retro import build_weekly_retro
+
+    today_ist = to_ist(_now()).date()
+    this_monday = today_ist - timedelta(days=today_ist.weekday())
+    week_start = this_monday - timedelta(days=7)
+    with session_scope() as s:
+        row = build_weekly_retro(s, week_start)
+        n_adj = len(row.metrics.get("adjustments") or [])
+    return {"processed": 1, "detail": f"retro for week of {week_start.isoformat()} — {n_adj} adjustment(s)"}
 
 
 def j_monthly_report() -> dict:
@@ -344,16 +379,42 @@ def j_daily_report() -> dict:
         return run_daily_reports(s)  # defaults to latest owned date
 
 
+def j_outcome_collector() -> dict:
+    from src.services.analytics.outcomes import collect_due_outcomes
+    from src.db.session import session_scope
+    with session_scope() as s:
+        n = collect_due_outcomes(s)
+    return {"processed": n, "detail": f"{n} post outcomes advanced"}
+
+
 def j_db_cleanup() -> dict:
+    from sqlalchemy import func, select
     from src.db.models import CollectionEvent
+    from src.db.models_competitor_intel import CompetitorBenchmark, CompetitorProfile
     from src.db.models_scheduler import SchedulerRun
     from src.db.session import session_scope
     cutoff = _now() - timedelta(days=30)
+    intel_cutoff = _now() - timedelta(days=90)
     removed = 0
     with session_scope() as s:
         removed += s.query(SchedulerRun).filter(SchedulerRun.started_at < cutoff).delete()
         removed += s.query(CollectionEvent).filter(CollectionEvent.created_at < cutoff).delete()
-    return {"processed": removed, "detail": f"pruned {removed} old log rows (>30d)"}
+
+        # Competitor intel (0.1): keep 90 days of snapshot history, but never drop a
+        # competitor's newest snapshot even if it's older than that (so a competitor
+        # profiled only once, long ago, doesn't lose its only data point).
+        for model in (CompetitorProfile, CompetitorBenchmark):
+            latest_per_competitor = dict(s.execute(
+                select(model.competitor_id, func.max(model.computed_at))
+                .group_by(model.competitor_id)
+            ).all())
+            stale = s.scalars(select(model).where(model.computed_at < intel_cutoff)).all()
+            for row in stale:
+                if row.computed_at == latest_per_competitor.get(row.competitor_id):
+                    continue
+                s.delete(row)
+                removed += 1
+    return {"processed": removed, "detail": f"pruned {removed} old rows (>30d logs, >90d competitor intel)"}
 
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +434,7 @@ JOBS: list[Job] = [
     Job("competitor_discover", "Competitor Discovery", *_daily(C.COMPETITOR_DISCOVER_TIME), "medium", j_competitor_discover),
     Job("competitor_intel", "Competitor Intelligence", *_daily(C.COMPETITOR_INTEL_TIME), "medium", j_competitor_intel),
     Job("ai_daily_summary", "AI Daily Summary", *_daily(C.AI_DAILY_SUMMARY_TIME), "medium", j_ai_daily_summary),
+    Job("weekly_retro", "Weekly Retro", *_weekly("mon", C.WEEKLY_RETRO_TIME), "medium", j_weekly_retro),
     Job("weekly_report", "Weekly Report", *_weekly(C.WEEKLY_REPORT_DOW, C.WEEKLY_REPORT_TIME), "medium", j_weekly_report),
     Job("monthly_report", "Monthly Report", *_monthly(C.MONTHLY_REPORT_DAY, C.MONTHLY_REPORT_TIME), "medium", j_monthly_report),
     Job("learning", "AI Learning Dataset Builder", *_daily(C.LEARNING_TIME), "medium", j_learning),
@@ -382,6 +444,7 @@ JOBS: list[Job] = [
     Job("analytics_aggregation", "Analytics Aggregation", *_every_hr(C.ANALYTICS_AGGREGATION_HOURS), "low", j_analytics_aggregation),
     Job("merchant_feed_sync", "Merchant Feed Sync", *_every_min(C.MERCHANT_FEED_SYNC_MIN), "high", j_merchant_feed_sync),
     Job("notification_engine", "Notification Engine", *_every_min(C.NOTIFICATION_ENGINE_MIN), "medium", j_notification_engine),
+    Job("outcome_collector", "Outcome Collector", *_every_min(C.OUTCOME_COLLECTOR_MIN), "high", j_outcome_collector),
     Job("org_health", "Organization Health Check", *_every_hr(C.ORG_HEALTH_HOURS), "low", j_org_health),
     Job("db_cleanup", "Database Cleanup", *_daily(C.DB_CLEANUP_TIME), "low", j_db_cleanup),
     Job("daily_report", "Daily Channel Report", *_daily(C.DAILY_REPORT_TIME), "high", j_daily_report),
