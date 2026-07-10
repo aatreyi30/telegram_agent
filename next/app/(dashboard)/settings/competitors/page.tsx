@@ -91,6 +91,14 @@ function CompetitorsTab() {
     }
   }
 
+  async function toggleMonitoring(c: CompetitorRow) {
+    try {
+      await updateCompetitor.mutateAsync({ id: c.id, monitoring_enabled: !c.monitoring_enabled });
+    } catch {
+      // best-effort — the row just won't flip; no separate error surface for this control
+    }
+  }
+
   async function confirmDelete() {
     if (!deleteTarget) return;
     try {
@@ -121,6 +129,7 @@ function CompetitorsTab() {
                     <TableHead>Title</TableHead>
                     <TableHead>Category</TableHead>
                     <TableHead>Posts</TableHead>
+                    <TableHead>Monitored</TableHead>
                     <TableHead></TableHead>
                   </TableRow>
                 </TableHeader>
@@ -131,6 +140,17 @@ function CompetitorsTab() {
                       <TableCell className="text-muted-foreground">{c.title || "—"}</TableCell>
                       <TableCell><CategoryBadge category={c.category ?? undefined} /></TableCell>
                       <TableCell>{(c.posts ?? 0).toLocaleString()}</TableCell>
+                      <TableCell>
+                        <Button
+                          variant={c.monitoring_enabled ? "secondary" : "outline"}
+                          size="sm"
+                          onClick={() => toggleMonitoring(c)}
+                          disabled={updateCompetitor.isPending}
+                          aria-pressed={c.monitoring_enabled}
+                        >
+                          {c.monitoring_enabled ? "On" : "Off"}
+                        </Button>
+                      </TableCell>
                       <TableCell>
                         <div className="flex justify-end gap-1">
                           <Button variant="ghost" size="icon" onClick={() => openEdit(c)}>

@@ -42,7 +42,7 @@ export function useCreateCompetitor() {
 export function useUpdateCompetitor() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: number; category?: string; title?: string }) =>
+    mutationFn: ({ id, ...body }: { id: number; category?: string; title?: string; monitoring_enabled?: boolean }) =>
       api.patch(`/competitors/${id}`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.competitors() });

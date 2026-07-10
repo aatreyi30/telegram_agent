@@ -157,6 +157,7 @@ export interface CompetitorRow {
   id: number; username: string; title: string | null;
   category: "platform" | "channel" | null; status: string;
   last_collected_at: string | null; posts: number;
+  monitoring_enabled: boolean;
   [key: string]: any;
 }
 
@@ -254,7 +255,8 @@ export interface WeeklyResponse {
 
 export interface OrgSettings {
   grabon_shortener_url?: string; grabon_amazon_tag?: string; grabon_flipkart_params?: string;
-  grabon_shorten_all?: boolean; preferred_categories?: string[]; [key: string]: unknown;
+  grabon_shorten_all?: boolean; preferred_categories?: string[];
+  auto_discover_competitors?: boolean; [key: string]: unknown;
 }
 
 export interface OrgResponse { id: number; key: string; name: string; affiliate_provider: string; settings: OrgSettings; channels: number; }
