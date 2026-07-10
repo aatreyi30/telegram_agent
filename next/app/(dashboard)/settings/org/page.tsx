@@ -75,6 +75,15 @@ function OrgTab() {
                   onChange={(e) => setS("grabon_shorten_all", e.target.checked)} />
                 Shorten every link (even merchants with no affiliate rule)
               </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={data.settings?.auto_discover_competitors !== false}
+                  onChange={(e) => setS("auto_discover_competitors", e.target.checked)} />
+                Auto-discover new competitor channels
+              </label>
+              <p className="text-xs text-muted-foreground">
+                When off, the daily discovery job stops adding new competitors automatically —
+                existing ones (and their monitoring toggle in Settings &gt; Competitors) are unaffected.
+              </p>
               {note && <Note {...note} />}
               <Button onClick={save}>Save organization</Button>
             </CardContent>
