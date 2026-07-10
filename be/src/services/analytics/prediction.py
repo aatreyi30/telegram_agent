@@ -102,19 +102,35 @@ def _nearest(snaps: list[PostMetricSnapshot], target: float, tol: float) -> Post
     return min(cands, key=lambda sn: abs(sn.age_hours - target))
 
 
-def _gather(s: Session, channel_id: int) -> list[dict]:
+def _gather(s: Session, channel_id: int, as_of: datetime | None = None) -> list[dict]:
     """One row per owned post in the last ``WINDOW_DAYS`` with a usable ~24h
-    snapshot: feature-cell fields + views_1h/6h/24h + forward_rate."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+    snapshot: feature-cell fields + views_1h/6h/24h + forward_rate.
+
+    ``as_of`` (default ``None`` -- today's live behaviour, unchanged) bounds
+    the training window to strictly BEFORE that instant when given (Phase 2
+    backtest, ``backtest.py``): ``posted_at >= as_of - WINDOW_DAYS`` AND
+    ``posted_at < as_of``. That upper bound is the no-look-ahead guarantee --
+    it excludes the very post being predicted (whose own ``posted_at`` equals
+    ``as_of``) and every post after it, so a post's own outcome can never leak
+    into its own prediction's training data. When ``as_of`` is ``None`` there
+    is no upper bound at all (identical query to before this parameter
+    existed) -- live posts never have a future ``posted_at`` anyway, so this
+    is a no-op there, not just an equivalent one.
+    """
+    reference = as_of if as_of is not None else datetime.now(timezone.utc)
+    cutoff = reference - timedelta(days=WINDOW_DAYS)
+    conditions = [
+        Channel.kind == "owned",
+        Post.channel_id == channel_id,
+        Post.posted_at.isnot(None),
+        Post.posted_at >= cutoff,
+    ]
+    if as_of is not None:
+        conditions.append(Post.posted_at < as_of)
     posts = s.execute(
         select(Post.id, Post.posted_at)
         .join(Channel, Channel.id == Post.channel_id)
-        .where(
-            Channel.kind == "owned",
-            Post.channel_id == channel_id,
-            Post.posted_at.isnot(None),
-            Post.posted_at >= cutoff,
-        )
+        .where(*conditions)
     ).all()
     if not posts:
         return []
@@ -203,14 +219,26 @@ def _lookup(rows: list[dict], hb: str | None, dc: str | None, cluster: int | Non
     return rows, "channel_median"
 
 
-def _subscriber_scale(s: Session, channel_id: int) -> float:
+def _subscriber_scale(s: Session, channel_id: int, as_of: datetime | None = None) -> float:
     """current_subs / median_subs_of_window -- scales the historical median up
     (or down) for a channel that has grown (or shrunk) since. 1.0 (no-op) if
-    there's no subscriber snapshot history to scale against."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+    there's no subscriber snapshot history to scale against.
+
+    ``as_of`` (default ``None``, unchanged live behaviour) makes "current"
+    mean "as of that instant" for a backtest: only snapshots captured strictly
+    before/at ``as_of`` count, and the "current" reading is the most recent one
+    at or before ``as_of`` -- never a snapshot from after the post being
+    predicted. No upper bound is applied when ``as_of`` is ``None`` (identical
+    query to before this parameter existed).
+    """
+    reference = as_of if as_of is not None else datetime.now(timezone.utc)
+    cutoff = reference - timedelta(days=WINDOW_DAYS)
+    conditions = [ParticipantSnapshot.channel_id == channel_id, ParticipantSnapshot.captured_at >= cutoff]
+    if as_of is not None:
+        conditions.append(ParticipantSnapshot.captured_at <= as_of)
     rows = s.execute(
         select(ParticipantSnapshot.captured_at, ParticipantSnapshot.count)
-        .where(ParticipantSnapshot.channel_id == channel_id, ParticipantSnapshot.captured_at >= cutoff)
+        .where(*conditions)
         .order_by(ParticipantSnapshot.captured_at)
     ).all()
     counts = [r[1] for r in rows if r[1]]
@@ -223,9 +251,19 @@ def _subscriber_scale(s: Session, channel_id: int) -> float:
     return current / med
 
 
-def predict(s: Session, channel_id: int, features: dict) -> dict:
+def predict(s: Session, channel_id: int, features: dict, *, as_of: datetime | None = None) -> dict:
     """Pure lookup with fallback hierarchy. ``features`` carries
     ``hour_bucket``, ``day_class``, ``post_type_cluster``, ``merchant_key``.
+
+    ``as_of`` (default ``None``) is the no-look-ahead knob for backtesting
+    (Phase 2 self-eval, ``services/analytics/backtest.py``): when given, both
+    the cell-median lookup (``_gather``) and the subscriber-drift scaling
+    (``_subscriber_scale``) only see data strictly before that instant, so a
+    post's own outcome can never enter its own prediction's training window.
+    Leaving it ``None`` (every existing call site -- ``daily_planner.py``,
+    ``publishing.py``) preserves today's live "last 28 days from now" behaviour
+    exactly, byte-for-byte -- see ``test_prediction_baseline.py`` /
+    ``test_backtest.py::test_as_of_none_matches_live_behavior``.
 
     Returns ``{views_1h, views_6h, views_24h, forwards_24h}`` (any of them
     ``None`` when there's genuinely no decay-ratio/forward-rate history to
@@ -237,7 +275,7 @@ def predict(s: Session, channel_id: int, features: dict) -> dict:
     cluster = features.get("post_type_cluster")
     merchant = features.get("merchant_key")
 
-    rows = _gather(s, channel_id)
+    rows = _gather(s, channel_id, as_of=as_of)
     matches, level = _lookup(rows, hb, dc, cluster, merchant)
     if not matches:
         return {
@@ -252,7 +290,7 @@ def predict(s: Session, channel_id: int, features: dict) -> dict:
 
     med_views = median([r["views_24h"] for r in matches])
     med_fwd_rate = median([r["forward_rate"] for r in matches])
-    scale = _subscriber_scale(s, channel_id)
+    scale = _subscriber_scale(s, channel_id, as_of=as_of)
     predicted_24h = med_views * scale
 
     # channel-wide decay ratios (not cell-scoped -- Section 2.2)
@@ -279,6 +317,7 @@ def predict_for_slot(
     *,
     merchant_key: str | None = None,
     post_type_cluster: int | None = None,
+    as_of: datetime | None = None,
 ) -> tuple[dict, dict]:
     """Build the feature cell for a not-yet-posted draft scheduled at
     ``scheduled_at_utc`` and return ``(features, prediction)`` -- the shapes
@@ -289,6 +328,9 @@ def predict_for_slot(
     actually sent and re-collected) -- callers pass ``None`` unless/until a
     pre-send classifier exists; the fallback hierarchy in ``predict()``
     handles that gracefully by dropping it first.
+
+    ``as_of`` (default ``None``, unchanged) is forwarded to ``predict()`` for
+    the backtest no-look-ahead knob; live callers never pass it.
     """
     when_ist = to_ist(scheduled_at_utc)
     features = {
@@ -298,7 +340,7 @@ def predict_for_slot(
         "post_type_cluster": post_type_cluster,
         "merchant_key": merchant_key,
     }
-    prediction = predict(s, channel_id, features)
+    prediction = predict(s, channel_id, features, as_of=as_of)
     features["fallback_level"] = prediction["fallback_level"]
     features["n_samples"] = prediction["n_samples"]
     features["subscriber_scale"] = prediction["subscriber_scale"]
