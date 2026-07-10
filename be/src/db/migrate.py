@@ -43,6 +43,7 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("report_ids", "JSON"),
         ("adherence", "JSON"),
         ("reconciliation", "JSON"),
+        ("operator_directive", "TEXT"),
     ],
     "channel_style_profiles": [("channel_id", "INTEGER")],
     "post_type_performance": [("channel_id", "INTEGER")],

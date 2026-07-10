@@ -101,3 +101,5 @@ class CampaignPlan(Base, TimestampMixin):
     # --- closed-loop feedback (§3.5) ---
     adherence: Mapped[dict | None] = mapped_column(JSON)              # planned vs published (deterministic)
     reconciliation: Mapped[dict | None] = mapped_column(JSON)         # expected-vs-actual + AI summary
+    # --- Steer & Regenerate: operator-supplied guidance the AI was asked to honor ---
+    operator_directive: Mapped[str | None] = mapped_column(Text)
