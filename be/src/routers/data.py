@@ -145,9 +145,11 @@ def add_competitor(background_tasks: BackgroundTasks,
 def update_competitor(competitor_id: int,
                       user: dict = Depends(require_role("editor")),
                       category: str | None = Body(None, embed=True),
-                      title: str | None = Body(None, embed=True)):
+                      title: str | None = Body(None, embed=True),
+                      monitoring_enabled: bool | None = Body(None, embed=True)):
     try:
-        result = service.update_competitor(competitor_id, category=category, title=title)
+        result = service.update_competitor(competitor_id, category=category, title=title,
+                                           monitoring_enabled=monitoring_enabled)
     except ValueError as e:
         return fail(str(e), 400)
     if not result.get("ok"):

@@ -242,6 +242,7 @@ def competitors_list() -> list[dict]:
             "status": c.access_status,
             "last_collected_at": c.last_collected_at.isoformat() if c.last_collected_at else None,
             "posts": post_counts.get(c.id, 0),
+            "monitoring_enabled": c.monitoring_enabled,
         } for c in rows]
 
 
@@ -340,12 +341,16 @@ def create_competitor_record(username: str, category: str) -> dict:
 
 
 def update_competitor(competitor_id: int, category: str | None = None,
-                      title: str | None = None) -> dict:
-    """Edit a competitor's ``category``/``title`` -- the only two editable
-    fields. ``username`` is immutable (it's the Telegram identity collected
-    posts/profiles are keyed to; changing it would orphan them), so it isn't
-    accepted here at all. Category is validated the same way
-    ``create_competitor_record`` validates it on create."""
+                      title: str | None = None,
+                      monitoring_enabled: bool | None = None) -> dict:
+    """Edit a competitor's ``category``/``title``/``monitoring_enabled`` --
+    the only editable fields. ``username`` is immutable (it's the Telegram
+    identity collected posts/profiles are keyed to; changing it would orphan
+    them), so it isn't accepted here at all. Category is validated the same
+    way ``create_competitor_record`` validates it on create.
+    ``monitoring_enabled`` gates the daily cron (competitor sync + intel --
+    see j_competitor_sync/CompetitorIntelligenceEngine.run): turning it off
+    just stops future collection/profiling, it never deletes existing data."""
     if category is not None and category not in _COMPETITOR_CATEGORIES:
         raise ValueError(f"category must be one of {_COMPETITOR_CATEGORIES}")
 
@@ -357,10 +362,13 @@ def update_competitor(competitor_id: int, category: str | None = None,
             c.category = category
         if title is not None:
             c.title = title
+        if monitoring_enabled is not None:
+            c.monitoring_enabled = monitoring_enabled
         s.flush()
         return {"ok": True, "id": c.id, "username": c.username, "title": c.title,
                 "category": c.category, "status": c.access_status,
-                "last_collected_at": c.last_collected_at.isoformat() if c.last_collected_at else None}
+                "last_collected_at": c.last_collected_at.isoformat() if c.last_collected_at else None,
+                "monitoring_enabled": c.monitoring_enabled}
 
 
 def delete_competitor(competitor_id: int, confirm: bool = False) -> dict:
