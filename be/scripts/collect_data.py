@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-daily_collect_and_export.py
+collect_data.py
 
 Runs one full daily cycle for the tgagent data-collection engine — the whole
 pipeline, not just raw collection:
 
-  1. Collect fresh posts from every OWNED channel.
+  1. Collect fresh posts from every OWNED channel (--initial for a historical
+     backfill instead of the default incremental sync).
   2. Discover new competitor channels on Telegram (MTProto search).
   3. Collect fresh posts from every COMPETITOR channel (existing + newly discovered).
   4. Normalize raw posts -> structured NormalizedPost rows (prices, coupons,
@@ -13,27 +14,39 @@ pipeline, not just raw collection:
   5. Resolve shortlinks (grbn.in etc.) to their real merchant.
   6. Classify posts into learned post-type clusters.
   7. Build merchant intelligence (profiles, metric windows, opportunities).
-  8. Build competitor intelligence (profiles, benchmarks vs us, signals).
-  9. Pull everything for "yesterday" + "today" (or one exact --date) out of
+  8. Build competitor intelligence (profiles, benchmarks vs us).
+  9. Backfill DailyChannelReport rows for every day in the export window.
+ 10. Optionally (--backtest) run a historical baseline_v1 self-eval over the
+     window's owned posts, so prediction accuracy is visible on the weekly
+     retro / /plan immediately (see services/analytics/backtest.py).
+ 11. Pull everything for "yesterday" + "today" (or one exact --date) out of
      the main operational database and mirror it into a SEPARATE, freshly
      generated .db file — channels, competitors, posts, competitor posts,
      normalized posts, extracted prices/coupons/links, classifications,
-     merchants + products, and the merchant/competitor intelligence tables.
+     merchants + products, merchant/competitor intelligence, the Predict ->
+     Outcome -> Retro loop tables, deal scores, AI outputs, daily reports,
+     campaign plans, and the subscriber/velocity growth tables.
 
 Run from the project root (the folder that contains the `src/` package),
 using the same Python environment the app normally runs in:
 
-    python scripts/daily_collect_and_export.py --date yesterday
+    python scripts/collect_data.py --date yesterday
 
 Common flags:
 
     --date yesterday | today | 2026-07-08     # export exactly one calendar day
     --days-back 1                              # or a range: yesterday+today (default)
     --export-db-url sqlite:///./data/x.db      # omit to auto-name by date
+    --initial                                  # owned collection = historical backfill
     --pages 3                                  # t.me/s pages per competitor
     --max-new-competitors 5                    # discovery cap
     --link-resolve-limit 300                   # shortlinks resolved per run
+    --link-resolve-concurrency 10              # CONSERVATIVE vs the live scheduler's default
+    --http-timeout 15                          # explicit timeout for scripted network calls
+    --pace-seconds 2.0                         # sleep between targets — never hammer Telegram
     --classify-k 6                             # post-type clusters to learn
+    --backtest                                 # historical baseline_v1 self-eval (off by default)
+    --backtest-batch-size 200                  # commit chunk size for --backtest
     --skip-owned / --skip-discovery / --skip-competitors
     --skip-normalize / --skip-link-resolution / --skip-classify
     --skip-merchant-intel / --skip-competitor-intel
@@ -56,14 +69,15 @@ import argparse
 import logging
 import os
 import sys
+import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # Make sure "src" is importable when this script is run as
-# `python scripts/daily_collect_and_export.py` from the project root.
+# `python scripts/collect_data.py` from the project root.
 # --------------------------------------------------------------------------- #
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -88,6 +102,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--date", default=None,
                     help="Export exactly ONE calendar day (UTC), e.g. --date 2026-07-08 for "
                          "yesterday, or --date today / --date yesterday. Overrides --days-back.")
+    p.add_argument("--initial", action="store_true",
+                    help="Owned-channel collection uses CollectionType.INITIAL (historical backfill) "
+                         "instead of the default CollectionType.INCREMENTAL.")
     p.add_argument("--pages", type=int, default=3,
                     help="t.me/s pages to paginate per competitor collection run (default 3).")
     p.add_argument("--max-new-competitors", type=int, default=5,
@@ -104,14 +121,41 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--skip-merchant-intel", action="store_true",
                     help="Skip Phase 4 merchant intelligence (profiles/opportunities).")
     p.add_argument("--skip-competitor-intel", action="store_true",
-                    help="Skip Phase 5 competitor intelligence (profiles/benchmarks/signals).")
+                    help="Skip Phase 5 competitor intelligence (profiles/benchmarks).")
     p.add_argument("--link-resolve-limit", type=int, default=300,
                     help="Max shortlinks to resolve this run (default 300).")
+    p.add_argument("--link-resolve-concurrency", type=int, default=10,
+                    help="Concurrent shortlink resolutions in flight (default 10). Deliberately "
+                         "CONSERVATIVE vs the live scheduler's LINK_RESOLVE_CONCURRENCY default "
+                         "(200) — this script may run unattended against production Telegram/"
+                         "merchant sites, so it never inherits the engine's high-throughput default.")
+    p.add_argument("--http-timeout", type=float, default=15.0,
+                    help="Explicit timeout in seconds for network calls this script configures "
+                         "directly (currently: link resolution's httpx client). Default 15.0 — "
+                         "no call this script makes may hang forever.")
+    p.add_argument("--pace-seconds", type=float, default=2.0,
+                    help="Seconds to sleep between each owned channel, each competitor, and "
+                         "around discovery (default 2.0). Collection stays sequential; this just "
+                         "adds breathing room so a run never hammers Telegram/t.me/s back-to-back. "
+                         "Telethon FloodWait is handled by the collector/JobRunner itself (capped "
+                         "exponential backoff) — this is a separate, additional courtesy delay.")
     p.add_argument("--classify-k", type=int, default=6,
                     help="Number of post-type clusters to learn (default 6).")
+    p.add_argument("--backtest", action="store_true",
+                    help="After collection+normalization+intel, run a historical baseline_v1 "
+                         "self-eval over owned posts in the export window: writes PostPrediction "
+                         "(model_version='baseline_v1_backtest') + PostOutcome rows and builds any "
+                         "IST WeeklyRetro the window touches, so prediction accuracy shows up on "
+                         "/plan + the retro without waiting for the live pipeline. OFF by default. "
+                         "See services/analytics/backtest.py for the no-look-ahead guarantee.")
+    p.add_argument("--backtest-batch-size", type=int, default=200,
+                    help="Posts per commit chunk during --backtest (default 200) — keeps the "
+                         "backtest from building one giant transaction or loading the whole posts "
+                         "table into memory.")
     p.add_argument("--export-only", action="store_true",
                     help="Skip ALL collection/discovery/normalization/intel stages, just export "
-                         "whatever is already in the database.")
+                         "whatever is already in the database (daily-report backfill + --backtest, "
+                         "if requested, still run — both are read-mostly/idempotent).")
     p.add_argument("--dry-run", action="store_true",
                     help="Log what would run without touching any database.")
     p.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
@@ -124,7 +168,7 @@ logging.basicConfig(
     level=getattr(logging, ARGS.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
-log = logging.getLogger("daily_export")
+log = logging.getLogger("collect_data")
 
 if ARGS.export_only:
     ARGS.skip_owned = ARGS.skip_discovery = ARGS.skip_competitors = True
@@ -177,6 +221,7 @@ from src.db.models import (
     Merchant,
     MerchantProduct,
     Post,
+    PostMetricSnapshot,
     ProductPriceSnapshot,
 )
 from src.db.models_normalization import (
@@ -189,7 +234,13 @@ from src.db.models_normalization import (
 )
 from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_intelligence import MerchantMetricWindow, MerchantOpportunity, MerchantProfile
-from src.db.models_competitor_intel import CompetitorBenchmark, CompetitorProfile, CompetitorSignal
+from src.db.models_competitor_intel import CompetitorBenchmark, CompetitorProfile
+from src.db.models_prediction import PostOutcome, PostPrediction, WeeklyRetro
+from src.db.models_deal_score import DealScore
+from src.db.models_ai_output import AIOutput
+from src.db.models_report import DailyChannelReport
+from src.db.models_campaign import CampaignPlan
+from src.db.models_growth_snapshot import DailySubscriberStat, ParticipantSnapshot
 from src.services.collection.base import JobRunner
 from src.services.collection.channels import owned_handles
 from src.services.collection.telegram_owned import OwnedChannelCollector
@@ -211,21 +262,24 @@ class RunSummary:
     classify_job: dict | None = None
     merchant_intel_job: dict | None = None
     competitor_intel_job: dict | None = None
+    daily_report_job: dict | None = None
+    backtest_job: dict | None = None
     errors: list = field(default_factory=list)
 
 
-def collect_owned(summary: RunSummary) -> None:
+def collect_owned(summary: RunSummary, pace_seconds: float, initial: bool) -> None:
     handles = owned_handles()
     if not handles:
         log.warning("No owned channels configured (channels table empty and OWNED_CHANNELS unset). Skipping.")
         return
-    log.info("Collecting %d owned channel(s): %s", len(handles), ", ".join(handles))
+    collection_type = CollectionType.INITIAL if initial else CollectionType.INCREMENTAL
+    log.info("Collecting %d owned channel(s) [%s]: %s", len(handles), collection_type, ", ".join(handles))
     runner = JobRunner()
-    for handle in handles:
+    for i, handle in enumerate(handles):
         try:
             job = runner.run_collector(
-                OwnedChannelCollector(handle, CollectionType.INCREMENTAL),
-                collection_type=CollectionType.INCREMENTAL,
+                OwnedChannelCollector(handle, collection_type),
+                collection_type=collection_type,
                 target=handle,
             )
             log.info(
@@ -237,9 +291,12 @@ def collect_owned(summary: RunSummary) -> None:
         except Exception as exc:  # noqa: BLE001
             log.error("  owned:%s FAILED: %s", handle, exc)
             summary.errors.append(f"owned:{handle}: {exc}")
+        # pace between targets (Task C.1) — never hammer Telegram back-to-back
+        if pace_seconds > 0 and i < len(handles) - 1:
+            time.sleep(pace_seconds)
 
 
-def discover_new_competitors(summary: RunSummary, max_add: int) -> None:
+def discover_new_competitors(summary: RunSummary, max_add: int, pace_seconds: float) -> None:
     settings = get_settings()
     if not (settings.telegram_api_id and settings.telegram_api_hash):
         log.warning(
@@ -260,19 +317,24 @@ def discover_new_competitors(summary: RunSummary, max_add: int) -> None:
     except Exception as exc:  # noqa: BLE001
         log.error("  discovery FAILED: %s", exc)
         summary.errors.append(f"discovery: {exc}")
+    # pace AROUND discovery (Task C.1) — a beat before competitor collection starts
+    if pace_seconds > 0:
+        time.sleep(pace_seconds)
 
 
-def collect_competitors(summary: RunSummary, pages: int) -> None:
+def collect_competitors(summary: RunSummary, pages: int, pace_seconds: float) -> None:
     with session_scope() as s:
         usernames = list(
-            s.scalars(select(Competitor.username).where(Competitor.username.isnot(None)))
+            s.scalars(select(Competitor.username).where(
+                Competitor.username.isnot(None), Competitor.monitoring_enabled.is_(True)))
         )
     if not usernames:
-        log.warning("No competitors on file yet (table empty, discovery off/unavailable). Skipping.")
+        log.warning("No competitors on file yet (table empty, discovery off/unavailable, "
+                    "or all competitors have monitoring turned off). Skipping.")
         return
     log.info("Collecting %d competitor channel(s), %d page(s) each...", len(usernames), pages)
     runner = JobRunner()
-    for username in usernames:
+    for i, username in enumerate(usernames):
         try:
             job = runner.run_collector(
                 CompetitorCollector(username, max_pages=pages),
@@ -288,6 +350,9 @@ def collect_competitors(summary: RunSummary, pages: int) -> None:
         except Exception as exc:  # noqa: BLE001
             log.error("  competitor:%s FAILED: %s", username, exc)
             summary.errors.append(f"competitor:{username}: {exc}")
+        # pace between targets (Task C.1)
+        if pace_seconds > 0 and i < len(usernames) - 1:
+            time.sleep(pace_seconds)
 
 
 def run_normalize(summary: RunSummary) -> None:
@@ -309,14 +374,20 @@ def run_normalize(summary: RunSummary) -> None:
         summary.errors.append(f"normalize: {exc}")
 
 
-def run_link_resolution(summary: RunSummary, limit: int) -> None:
-    """Follow grbn.in/short links to their real merchant (fills ExtractedLink.merchant_key)."""
+def run_link_resolution(summary: RunSummary, limit: int, concurrency: int, timeout: float) -> None:
+    """Follow grbn.in/short links to their real merchant (fills ExtractedLink.merchant_key).
+
+    Task C.4 — `concurrency`/`timeout` are passed straight into
+    `LinkResolutionEngine` rather than relying on the live scheduler's
+    `settings.link_resolve_concurrency` (200) default, since this script may
+    run unattended against production Telegram/merchant sites."""
     from src.services.collection.link_resolution import LinkResolutionEngine
 
-    log.info("Resolving up to %d shortlink(s)...", limit)
+    log.info("Resolving up to %d shortlink(s) (concurrency=%d, timeout=%.1fs)...",
+              limit, concurrency, timeout)
     try:
         job = JobRunner().run_collector(
-            LinkResolutionEngine(limit=limit, delay=0.3),
+            LinkResolutionEngine(limit=limit, delay=0.3, concurrency=concurrency, timeout=timeout),
             collection_type=CollectionType.MANUAL,
             target="link_resolution",
         )
@@ -367,7 +438,7 @@ def run_merchant_intel(summary: RunSummary) -> None:
 
 
 def run_competitor_intel(summary: RunSummary) -> None:
-    """Phase 5: build competitor profiles, benchmarks vs us, and threat/opportunity signals."""
+    """Phase 5: build competitor profiles and benchmarks vs us."""
     from src.services.intelligence.competitor import CompetitorIntelligenceEngine
 
     log.info("Building competitor intelligence...")
@@ -383,6 +454,61 @@ def run_competitor_intel(summary: RunSummary) -> None:
     except Exception as exc:  # noqa: BLE001
         log.error("  competitor_intel FAILED: %s", exc)
         summary.errors.append(f"competitor_intel: {exc}")
+
+
+def run_daily_reports_for_window(summary: RunSummary, start: datetime, end: datetime) -> None:
+    """Task A.3 — backfill DailyChannelReport rows for every day the export
+    window covers, so the AI/plan/report surfaces have owned-channel daily
+    aggregates for dates that predate this script's own run.
+
+    Idempotent: `build_owned_report` + `persist_report` upsert on
+    (channel_id, report_date, source_type), so reruns for the same window are
+    safe. Runs unconditionally (not gated by any --skip-* flag) — it's a
+    read-mostly aggregation over whatever is already in the database, which is
+    exactly what --export-only wants filled in too."""
+    from src.services.analytics.daily_report import build_owned_report, persist_report
+
+    days: list[date] = []
+    d = start.date()
+    end_date = end.date()  # `end` is the exclusive next-day boundary
+    while d < end_date:
+        days.append(d)
+        d += timedelta(days=1)
+    if not days:
+        return
+
+    log.info("Building daily channel reports for %d day(s): %s -> %s",
+              len(days), days[0].isoformat(), days[-1].isoformat())
+    try:
+        built = 0
+        with session_scope() as s:
+            for day in days:
+                persist_report(s, build_owned_report(s, day))
+                built += 1
+        log.info("  daily_report -> upserted %d day(s)", built)
+        summary.daily_report_job = {"days": built}
+    except Exception as exc:  # noqa: BLE001
+        log.error("  daily_report FAILED: %s", exc)
+        summary.errors.append(f"daily_report: {exc}")
+
+
+def run_backtest_step(summary: RunSummary, start: datetime, end: datetime, batch_size: int) -> None:
+    """Task B — historical baseline_v1 self-eval over the export window's
+    owned posts. OFF unless --backtest is passed. See
+    services/analytics/backtest.py for the no-look-ahead guarantee and
+    batching (Task C.5)."""
+    from src.services.analytics.backtest import run_backtest
+
+    log.info("Running baseline_v1 backtest over %s -> %s (batch_size=%d)...",
+              start.isoformat(), end.isoformat(), batch_size)
+    try:
+        with session_scope() as s:
+            counts = run_backtest(s, start, end, batch_size=batch_size)
+        log.info("  backtest -> %s", counts)
+        summary.backtest_job = counts
+    except Exception as exc:  # noqa: BLE001
+        log.error("  backtest FAILED: %s", exc)
+        summary.errors.append(f"backtest: {exc}")
 
 
 # ============================================================================
@@ -406,7 +532,19 @@ EXPORT_TABLES = [
     # Phase 4: merchant intelligence
     MerchantProfile.__table__, MerchantMetricWindow.__table__, MerchantOpportunity.__table__,
     # Phase 5: competitor intelligence
-    CompetitorProfile.__table__, CompetitorBenchmark.__table__, CompetitorSignal.__table__,
+    CompetitorProfile.__table__, CompetitorBenchmark.__table__,
+    # upgrade.md Phase 2: predict -> outcome -> retro loop
+    PostPrediction.__table__, PostOutcome.__table__, WeeklyRetro.__table__,
+    # upgrade.md Phase 3: deal scoring history
+    DealScore.__table__,
+    # upgrade.md Phase 0.2: persisted AI outputs
+    AIOutput.__table__,
+    # daily aggregate report rows
+    DailyChannelReport.__table__,
+    # Phase 10: campaign plans
+    CampaignPlan.__table__,
+    # velocity / growth data
+    PostMetricSnapshot.__table__, DailySubscriberStat.__table__, ParticipantSnapshot.__table__,
 ]
 
 
@@ -484,8 +622,7 @@ def _upsert(dest_engine: Engine, table, rows: list[dict]) -> int:
     return len(rows)
 
 
-def export_window(export_db_url: str, days_back: int, single_date: str | None = None) -> dict:
-    start, end = _window(days_back, single_date)
+def export_window(export_db_url: str, start: datetime, end: datetime) -> dict:
     log.info("Exporting window %s -> %s (UTC) into %s", start.isoformat(), end.isoformat(), export_db_url)
 
     dest_engine = _get_export_engine(export_db_url)
@@ -552,9 +689,22 @@ def export_window(export_db_url: str, days_back: int, single_date: str | None = 
                 ProductPriceSnapshot.captured_at.between(start, end)))
         )
 
+        # --- upgrade.md Phase 2: predictions/outcomes/metric snapshots,
+        # scoped to the SAME owned posts as everything else per-post above ---
+        post_predictions = list(s.scalars(
+            select(PostPrediction).where(PostPrediction.post_id.in_(owned_post_ids)))) if owned_post_ids else []
+        post_outcomes = list(s.scalars(
+            select(PostOutcome).where(PostOutcome.post_id.in_(owned_post_ids)))) if owned_post_ids else []
+        post_metric_snapshots = list(s.scalars(
+            select(PostMetricSnapshot).where(
+                PostMetricSnapshot.post_id.in_(owned_post_ids)))) if owned_post_ids else []
+
         # --- reference / registry / intelligence tables: mirrored in full ----
-        # (small tables; "merchants detected" and profile/opportunity/signal
-        # rows represent current cumulative state, not a single day's slice)
+        # (small tables; "merchants detected", profile/opportunity rows, the
+        # predict/outcome/retro loop's WeeklyRetro, deal scoring history, AI
+        # outputs, daily reports, campaign plans, and the subscriber/growth
+        # snapshots all represent current cumulative state, not a single
+        # day's slice)
         channels = list(s.scalars(select(Channel)))
         competitors = list(s.scalars(select(Competitor)))
         merchants = list(s.scalars(select(Merchant)))
@@ -567,7 +717,13 @@ def export_window(export_db_url: str, days_back: int, single_date: str | None = 
         merchant_opportunities = list(s.scalars(select(MerchantOpportunity)))
         competitor_profiles = list(s.scalars(select(CompetitorProfile)))
         competitor_benchmarks = list(s.scalars(select(CompetitorBenchmark)))
-        competitor_signals = list(s.scalars(select(CompetitorSignal)))
+        weekly_retros = list(s.scalars(select(WeeklyRetro)))
+        deal_scores = list(s.scalars(select(DealScore)))
+        ai_outputs = list(s.scalars(select(AIOutput)))
+        daily_channel_reports = list(s.scalars(select(DailyChannelReport)))
+        campaign_plans = list(s.scalars(select(CampaignPlan)))
+        daily_subscriber_stats = list(s.scalars(select(DailySubscriberStat)))
+        participant_snapshots = list(s.scalars(select(ParticipantSnapshot)))
 
         counts["channels"] = _upsert(dest_engine, Channel.__table__, [_row_to_dict(o) for o in channels])
         counts["competitors"] = _upsert(dest_engine, Competitor.__table__, [_row_to_dict(o) for o in competitors])
@@ -605,8 +761,26 @@ def export_window(export_db_url: str, days_back: int, single_date: str | None = 
             dest_engine, CompetitorProfile.__table__, [_row_to_dict(o) for o in competitor_profiles])
         counts["competitor_benchmarks"] = _upsert(
             dest_engine, CompetitorBenchmark.__table__, [_row_to_dict(o) for o in competitor_benchmarks])
-        counts["competitor_signals"] = _upsert(
-            dest_engine, CompetitorSignal.__table__, [_row_to_dict(o) for o in competitor_signals])
+        counts["post_predictions"] = _upsert(
+            dest_engine, PostPrediction.__table__, [_row_to_dict(o) for o in post_predictions])
+        counts["post_outcomes"] = _upsert(
+            dest_engine, PostOutcome.__table__, [_row_to_dict(o) for o in post_outcomes])
+        counts["post_metric_snapshots"] = _upsert(
+            dest_engine, PostMetricSnapshot.__table__, [_row_to_dict(o) for o in post_metric_snapshots])
+        counts["weekly_retros"] = _upsert(
+            dest_engine, WeeklyRetro.__table__, [_row_to_dict(o) for o in weekly_retros])
+        counts["deal_scores"] = _upsert(
+            dest_engine, DealScore.__table__, [_row_to_dict(o) for o in deal_scores])
+        counts["ai_outputs"] = _upsert(
+            dest_engine, AIOutput.__table__, [_row_to_dict(o) for o in ai_outputs])
+        counts["daily_channel_reports"] = _upsert(
+            dest_engine, DailyChannelReport.__table__, [_row_to_dict(o) for o in daily_channel_reports])
+        counts["campaign_plans"] = _upsert(
+            dest_engine, CampaignPlan.__table__, [_row_to_dict(o) for o in campaign_plans])
+        counts["daily_subscriber_stats"] = _upsert(
+            dest_engine, DailySubscriberStat.__table__, [_row_to_dict(o) for o in daily_subscriber_stats])
+        counts["participant_snapshots"] = _upsert(
+            dest_engine, ParticipantSnapshot.__table__, [_row_to_dict(o) for o in participant_snapshots])
 
     dest_engine.dispose()
     return counts
@@ -617,21 +791,25 @@ def export_window(export_db_url: str, days_back: int, single_date: str | None = 
 # ============================================================================
 
 def main() -> int:
-    log.info("=== daily_collect_and_export starting (%s) ===", datetime.now(timezone.utc).isoformat())
+    log.info("=== collect_data starting (%s) ===", datetime.now(timezone.utc).isoformat())
     settings = get_settings()
     log.info("Source DB : %s", settings.db_url)
     log.info("Export DB : %s", ARGS.export_db_url)
+
+    start, end = _window(ARGS.days_back, ARGS.date)
 
     if ARGS.dry_run:
         log.info("[dry-run] owned handles: %s", owned_handles())
         with session_scope() as s:
             comp_count = s.scalar(select(Competitor).limit(1)) is not None
         log.info("[dry-run] competitors on file: %s", "yes" if comp_count else "none yet")
-        if ARGS.date:
-            log.info("[dry-run] would export exactly one day (%s, UTC) into %s", ARGS.date, ARGS.export_db_url)
-        else:
-            log.info("[dry-run] would export window covering last %d day(s) + today into %s",
-                      ARGS.days_back, ARGS.export_db_url)
+        log.info("[dry-run] would export window %s -> %s (UTC) into %s",
+                  start.isoformat(), end.isoformat(), ARGS.export_db_url)
+        log.info("[dry-run] owned collection type: %s",
+                  CollectionType.INITIAL if ARGS.initial else CollectionType.INCREMENTAL)
+        log.info("[dry-run] pace_seconds=%.1f link_resolve_concurrency=%d http_timeout=%.1f",
+                  ARGS.pace_seconds, ARGS.link_resolve_concurrency, ARGS.http_timeout)
+        log.info("[dry-run] backtest=%s (batch_size=%d)", ARGS.backtest, ARGS.backtest_batch_size)
         return 0
 
     init_db()  # idempotent: creates tables in the MAIN db if this is a fresh install
@@ -639,17 +817,17 @@ def main() -> int:
     summary = RunSummary()
 
     if not ARGS.skip_owned:
-        collect_owned(summary)
+        collect_owned(summary, ARGS.pace_seconds, ARGS.initial)
     else:
         log.info("Skipping owned-channel collection (--skip-owned).")
 
     if not ARGS.skip_discovery:
-        discover_new_competitors(summary, ARGS.max_new_competitors)
+        discover_new_competitors(summary, ARGS.max_new_competitors, ARGS.pace_seconds)
     else:
         log.info("Skipping competitor discovery (--skip-discovery).")
 
     if not ARGS.skip_competitors:
-        collect_competitors(summary, ARGS.pages)
+        collect_competitors(summary, ARGS.pages, ARGS.pace_seconds)
     else:
         log.info("Skipping competitor collection (--skip-competitors).")
 
@@ -659,7 +837,7 @@ def main() -> int:
         log.info("Skipping normalization (--skip-normalize).")
 
     if not ARGS.skip_link_resolution:
-        run_link_resolution(summary, ARGS.link_resolve_limit)
+        run_link_resolution(summary, ARGS.link_resolve_limit, ARGS.link_resolve_concurrency, ARGS.http_timeout)
     else:
         log.info("Skipping link resolution (--skip-link-resolution).")
 
@@ -678,8 +856,18 @@ def main() -> int:
     else:
         log.info("Skipping competitor intelligence (--skip-competitor-intel).")
 
+    # Task A.3 — backfill daily reports for the export window (idempotent,
+    # runs regardless of --skip-* / --export-only).
+    run_daily_reports_for_window(summary, start, end)
+
+    # Task B — historical baseline_v1 self-eval, opt-in only.
+    if ARGS.backtest:
+        run_backtest_step(summary, start, end, ARGS.backtest_batch_size)
+    else:
+        log.info("Skipping backtest (pass --backtest to run the historical baseline_v1 self-eval).")
+
     try:
-        counts = export_window(ARGS.export_db_url, ARGS.days_back, ARGS.date)
+        counts = export_window(ARGS.export_db_url, start, end)
     except Exception:
         log.error("Export step failed:\n%s", traceback.format_exc())
         return 1
@@ -693,6 +881,8 @@ def main() -> int:
     log.info("Classify                : %s", summary.classify_job)
     log.info("Merchant intel          : %s", summary.merchant_intel_job)
     log.info("Competitor intel        : %s", summary.competitor_intel_job)
+    log.info("Daily reports           : %s", summary.daily_report_job)
+    log.info("Backtest                : %s", summary.backtest_job)
     log.info("Exported -> %s : %s", ARGS.export_db_url, counts)
     if summary.errors:
         log.warning("Completed with %d error(s):", len(summary.errors))
