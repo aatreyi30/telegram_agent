@@ -28,6 +28,11 @@ def _org_settings(s) -> dict:
         "grabon_amazon_tag": s.grabon_amazon_tag,
         "grabon_flipkart_params": s.grabon_flipkart_params,
         "grabon_shorten_all": s.grabon_shorten_all,
+        # Global cron gate (not backed by .env, editable via PATCH /api/org only):
+        # once a channel's competitor set is established, this stops
+        # j_competitor_discover from auto-adding new ones. Defaults True so a
+        # fresh install keeps discovering, matching today's behaviour.
+        "auto_discover_competitors": True,
         "owned_channels": s.owned_channels,
         "competitor_channels": s.competitor_channels,
     }
@@ -45,7 +50,14 @@ def seed_org(session: Session) -> Organization:
         logger.info("[seed-org] created org '%s'", org.key)
     else:
         org.affiliate_provider = settings.affiliate_provider_name
-        org.settings = _org_settings(settings)
+        # Merge, DB-wins: .env-derived values only seed DEFAULTS / fill keys the org
+        # doesn't have yet. Anything already set on the org (via the Settings UI /
+        # PATCH /api/org — e.g. auto_discover_competitors, affiliate tags) is
+        # PRESERVED. Previously this reassigned the whole dict from .env on every
+        # startup, silently resetting UI-edited settings.
+        merged = _org_settings(settings)
+        merged.update(org.settings or {})
+        org.settings = merged
 
     # one owner user with a login. Password from ADMIN_PASSWORD, else a random one
     # printed once (so a fresh install always has working credentials).

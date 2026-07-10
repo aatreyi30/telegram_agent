@@ -263,8 +263,31 @@ def _detect_category(title: str | None, username: str | None) -> str | None:
 # ── public API ───────────────────────────────────────────────────────
 
 
+def _auto_discover_allowed() -> bool:
+    """The org-level 'auto-discover new competitors' toggle (Settings > Org).
+    Defaults to enabled (today's behaviour) if the org row or the setting is
+    missing -- only an explicit ``False`` turns discovery off."""
+    from src.db.org_seed import get_default_org
+
+    try:
+        with session_scope() as sess:
+            org = get_default_org(sess)
+            if org is None:
+                return True
+            return (org.settings or {}).get("auto_discover_competitors", True) is not False
+    except Exception:
+        return True
+
+
 def discover_competitors(max_add: int = 5) -> dict:
-    """Search, rank, classify, and add the top new competitor channels."""
+    """Search, rank, classify, and add the top new competitor channels.
+
+    Returns ``{"status": "disabled", ...}`` without running anything if the
+    org has turned off ``auto_discover_competitors`` (see Settings > Org)."""
+    if not _auto_discover_allowed():
+        logger.info("[discovery] auto_discover_competitors is disabled — skipping")
+        return {"candidates": 0, "added": 0, "top": [], "status": "disabled"}
+
     s = get_settings()
     if not (s.telegram_api_id and s.telegram_api_hash):
         raise RuntimeError("Telegram MTProto not configured.")
