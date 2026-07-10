@@ -107,9 +107,11 @@ def j_competitor_sync() -> dict:
     from src.db.session import session_scope
     added = 0
     r = _job_runner()
-    # Only use discovered competitors from database (no env var dependency)
+    # Only use discovered competitors from database (no env var dependency),
+    # and only ones the operator hasn't turned monitoring off for.
     with session_scope() as s:
-        usernames = [c.username for c in s.scalars(select(Competitor)) if c.username]
+        usernames = [c.username for c in s.scalars(
+            select(Competitor).where(Competitor.monitoring_enabled.is_(True))) if c.username]
     for u in usernames:
         job = r.run_collector(CompetitorCollector(u, max_pages=5),
                               collection_type=CollectionType.INCREMENTAL, target=u)
@@ -180,7 +182,11 @@ def j_competitor_discover() -> dict:
     so newly added competitors get their posts collected by j_competitor_sync
     before j_competitor_intel profiles them (fixes the same-tick ordering bug)."""
     from src.services.collection.discovery import discover_competitors
-    added = discover_competitors(max_add=5).get("added", 0)
+    result = discover_competitors(max_add=5)
+    if result.get("status") == "disabled":
+        return {"processed": 0, "status": "limited",
+                "detail": "limited: auto_discover_competitors is off (Settings > Org)"}
+    added = result.get("added", 0)
     return {"processed": added, "detail": f"+{added} competitors discovered"}
 
 

@@ -45,3 +45,29 @@ def test_competitor_sync_job_uses_db_only(monkeypatch):
     assert "DbComp" in seen, "DB-discovered competitor missing from tick"
     assert "AnotherComp" in seen, "Second DB-discovered competitor missing from tick"
     assert len(seen) == 2, f"Expected 2 competitors, got {len(seen)}"
+
+
+def test_competitor_sync_job_skips_monitoring_disabled(monkeypatch):
+    """A competitor with monitoring_enabled=False must not be synced -- the
+    per-competitor toggle (Settings > Competitors) is meant to stop the daily
+    cron from re-collecting/re-profiling it forever."""
+    from src.db.session import session_scope
+    from src.db.models import Competitor
+    with session_scope() as s:
+        s.add(Competitor(username="StillMonitored", monitoring_enabled=True))
+        s.add(Competitor(username="PausedComp", monitoring_enabled=False))
+
+    import src.controllers.schedulers as sched
+
+    seen = []
+
+    class _FakeRunner:
+        def run_collector(self, collector, **kw):
+            seen.append(kw.get("target"))
+            return SimpleNamespace(records_added=0)
+
+    monkeypatch.setattr(sched, "_job_runner", lambda: _FakeRunner())
+    sched.j_competitor_sync()
+
+    assert "StillMonitored" in seen
+    assert "PausedComp" not in seen, "monitoring_enabled=False competitor must be skipped"
