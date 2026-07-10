@@ -22,10 +22,7 @@ from src.services.collection.base import BaseCollector, CollectorResult
 from src.db.models import Post
 from collections import Counter
 
-from src.db.models_competitor_intel import (
-    COMPETITOR_INTEL_VERSION,
-    CompetitorProfile,
-)
+from src.services.intelligence.competitor import latest_profiles
 from src.db.models_growth import (
     GROWTH_VERSION,
     GrowthMode,
@@ -369,12 +366,10 @@ class GrowthEngine(BaseCollector):
         # perf is a list of PostTypePerformance rows here — build a {type: views/day} lookup
         perf_by_type = {p.post_type: p.avg_views_per_day for p in perf if p.avg_views_per_day}
         perf_median = statistics.median(list(perf_by_type.values())) if perf_by_type else None
-        comps = s.scalars(
-            select(CompetitorProfile)
-            .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION,
-                   CompetitorProfile.post_count >= 20)
-            .order_by(CompetitorProfile.similarity_to_owned.desc())
-        ).all()
+        comps = sorted(
+            (p for p in latest_profiles(s) if p.post_count >= 20),
+            key=lambda p: -(p.similarity_to_owned or 0.0),
+        )
         emitted = 0
         for cp in comps:
             if emitted >= 2:
@@ -426,11 +421,7 @@ class GrowthEngine(BaseCollector):
 
     # ---------------- COLD START MODE ---------------- #
     def _cold_start(self, s, now, basis):
-        profiles = s.scalars(
-            select(CompetitorProfile)
-            .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorProfile.post_count.desc())
-        ).all()
+        profiles = sorted(latest_profiles(s), key=lambda p: -(p.post_count or 0))
         usable = [p for p in profiles if p.post_count >= 20]
         if not usable:
             return None, []

@@ -16,6 +16,9 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
+
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.db.models_competitor_intel import (
     COMPETITOR_INTEL_VERSION,
@@ -63,6 +66,38 @@ def _cosine(a: list[float], b: list[float]) -> float | None:
     return round(dot / (na * nb), 3)
 
 
+# --------------------------------------------------------------------------- #
+# Latest-per-competitor reads (Phase 0.1) — the table holds a full snapshot
+# history now, so every caller that used to assume "one row per competitor"
+# must go through these instead of querying CompetitorProfile/CompetitorBenchmark
+# directly. SQLite-safe: a `row_number()` window function, no `DISTINCT ON`.
+# --------------------------------------------------------------------------- #
+def latest_profiles(s, intel_version: int = COMPETITOR_INTEL_VERSION) -> list[CompetitorProfile]:
+    """The most recent CompetitorProfile snapshot for each competitor."""
+    rn = func.row_number().over(
+        partition_by=CompetitorProfile.competitor_id,
+        order_by=CompetitorProfile.computed_at.desc(),
+    ).label("rn")
+    sub = select(CompetitorProfile, rn).where(
+        CompetitorProfile.intel_version == intel_version
+    ).subquery()
+    P = aliased(CompetitorProfile, sub)
+    return list(s.scalars(select(P).where(sub.c.rn == 1)).all())
+
+
+def latest_benchmarks(s, intel_version: int = COMPETITOR_INTEL_VERSION) -> list[CompetitorBenchmark]:
+    """The most recent CompetitorBenchmark snapshot for each (competitor, dimension)."""
+    rn = func.row_number().over(
+        partition_by=(CompetitorBenchmark.competitor_id, CompetitorBenchmark.dimension),
+        order_by=CompetitorBenchmark.computed_at.desc(),
+    ).label("rn")
+    sub = select(CompetitorBenchmark, rn).where(
+        CompetitorBenchmark.intel_version == intel_version
+    ).subquery()
+    B = aliased(CompetitorBenchmark, sub)
+    return list(s.scalars(select(B).where(sub.c.rn == 1)).all())
+
+
 class CompetitorIntelligenceEngine(BaseCollector):
     name = "competitor_intel"
     retryable = False
@@ -92,14 +127,15 @@ class CompetitorIntelligenceEngine(BaseCollector):
 
         owned_style = _style_vector(owned)
 
+        # Phase 0.1: versioned snapshots — every run INSERTS a fresh row per
+        # competitor stamped with this run's `computed_at`; history is never
+        # deleted here (see j_db_cleanup for the 90-day retention policy).
+        # `intel_version` stays fixed across runs (it's the computation-schema
+        # version, bumped only when the scoring logic itself changes); the
+        # per-run identity is `computed_at`. Read paths must select the latest
+        # snapshot per competitor (see `latest_profiles`/`latest_benchmarks`
+        # below) since this table now holds many rows per competitor.
         with session_scope() as s:
-            for model in (CompetitorBenchmark, CompetitorProfile):
-                s.query(model).filter(
-                    model.intel_version == COMPETITOR_INTEL_VERSION
-                ).delete()
-            s.flush()
-            logger.info("[competitor_intel] cleared old intel data for version %d", COMPETITOR_INTEL_VERSION)
-
             for cid, summ in comp_summaries.items():
                 n = summ["post_count"]
                 confidence = round(min(1.0, n / FULL_CONFIDENCE_N), 3)

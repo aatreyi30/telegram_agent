@@ -19,7 +19,6 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,9 +28,17 @@ COMPETITOR_INTEL_VERSION = 1
 
 
 class CompetitorProfile(Base, TimestampMixin):
+    """One profiling run's snapshot for one competitor (Phase 0.1: versioned
+    snapshots, never overwritten). ``intel_version`` tracks the *computation*
+    schema (bumped only when the scoring/behaviour logic changes); ``computed_at``
+    is the per-run stamp that makes many rows per (intel_version, competitor_id)
+    valid — read paths must select the latest per competitor (see
+    ``services/intelligence/competitor.py::latest_profiles``), never assume
+    one row per competitor."""
+
     __tablename__ = "competitor_profiles"
     __table_args__ = (
-        UniqueConstraint("intel_version", "competitor_id", name="uq_comp_profile"),
+        Index("ix_comp_profile_competitor_computed", "competitor_id", "computed_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -83,7 +90,10 @@ class CompetitorBenchmark(Base):
     single isolated metric — many rows together form the benchmark)."""
 
     __tablename__ = "competitor_benchmarks"
-    __table_args__ = (Index("ix_bench_comp", "competitor_id"),)
+    __table_args__ = (
+        Index("ix_bench_comp", "competitor_id"),
+        Index("ix_bench_comp_computed", "competitor_id", "computed_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     intel_version: Mapped[int] = mapped_column(Integer, default=COMPETITOR_INTEL_VERSION)
