@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 
 from src.ai import context as ctx
 from src.config.settings import get_settings
-from src.db.models import Channel, Competitor, Post
+from src.db.models import Channel, Competitor, CompetitorPost, Post
 from src.db.models_automation import ScheduledPost, ScheduleStatus
 from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan
 from src.db.models_generation import GeneratedPost, PostStatus
@@ -222,11 +222,31 @@ def insights(start: str | None = None, end: str | None = None) -> dict:
         }
 
 
-def competitors() -> dict:
+def competitors_list() -> list[dict]:
+    """Every row in the ``competitors`` table -- for the Settings > Competitors
+    management screen (Edit/Delete need every row's id, including freshly-added
+    competitors that haven't been profiled yet). Distinct from
+    ``ctx.competitor_profiles`` (AI-grounding data, PROFILED competitors only,
+    used elsewhere for the dashboard/AI context) -- this is the raw source of
+    truth, not a derived view."""
     with session_scope() as s:
-        return {
-            "profiles": ctx.competitor_profiles(s),
-        }
+        rows = s.scalars(select(Competitor).order_by(Competitor.id)).all()
+        post_counts = dict(s.execute(
+            select(CompetitorPost.competitor_id, func.count())
+            .group_by(CompetitorPost.competitor_id)).all())
+        return [{
+            "id": c.id,
+            "username": c.username,
+            "title": c.title,
+            "category": c.category,
+            "status": c.access_status,
+            "last_collected_at": c.last_collected_at.isoformat() if c.last_collected_at else None,
+            "posts": post_counts.get(c.id, 0),
+        } for c in rows]
+
+
+def competitors() -> dict:
+    return {"competitors": competitors_list()}
 
 
 def competitor_dashboard(window_days: int | None = None) -> dict:
@@ -235,10 +255,7 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
     ``window_days`` when set filters basic stats to the last N days (like comparison).
     """
     from src.services.analytics import comparison as cmp
-    from src.db.models_competitor_intel import (
-        CompetitorProfile, CompetitorBenchmark,
-        COMPETITOR_INTEL_VERSION,
-    )
+    from src.services.intelligence.competitor import latest_profiles
 
     with session_scope() as s:
         # comparison data (owned + competitors with profiles)
@@ -249,12 +266,7 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
         competitors_raw = {
             c.id: c for c in s.scalars(select(Competitor)).all()
         }
-        profiles_raw = {
-            p.competitor_id: p for p in s.scalars(
-                select(CompetitorProfile).where(
-                    CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-            ).all()
-        }
+        profiles_raw = {p.competitor_id: p for p in latest_profiles(s)}
 
         # group entities by category
         platform_ents = []
@@ -325,6 +337,85 @@ def create_competitor_record(username: str, category: str) -> dict:
     if category not in _COMPETITOR_CATEGORIES:
         raise ValueError(f"category must be one of {_COMPETITOR_CATEGORIES}")
     return insert_competitor(username, category)
+
+
+def update_competitor(competitor_id: int, category: str | None = None,
+                      title: str | None = None) -> dict:
+    """Edit a competitor's ``category``/``title`` -- the only two editable
+    fields. ``username`` is immutable (it's the Telegram identity collected
+    posts/profiles are keyed to; changing it would orphan them), so it isn't
+    accepted here at all. Category is validated the same way
+    ``create_competitor_record`` validates it on create."""
+    if category is not None and category not in _COMPETITOR_CATEGORIES:
+        raise ValueError(f"category must be one of {_COMPETITOR_CATEGORIES}")
+
+    with session_scope() as s:
+        c = s.get(Competitor, competitor_id)
+        if c is None:
+            return {"ok": False, "error": f"No competitor #{competitor_id}."}
+        if category is not None:
+            c.category = category
+        if title is not None:
+            c.title = title
+        s.flush()
+        return {"ok": True, "id": c.id, "username": c.username, "title": c.title,
+                "category": c.category, "status": c.access_status,
+                "last_collected_at": c.last_collected_at.isoformat() if c.last_collected_at else None}
+
+
+def delete_competitor(competitor_id: int, confirm: bool = False) -> dict:
+    """Delete a competitor and all of its dependent data (competitor posts,
+    normalized rows, classifications, extracted facts, profiles, benchmarks).
+    Destructive + irreversible, so a preview is returned unless confirm=True.
+    Deletes in FK-dependency order via subqueries (no large IN-lists) --
+    mirrors delete_channel's approach exactly, just for the competitor side of
+    the schema."""
+    from src.db.models_classification import PostClassification
+    from src.db.models_competitor_intel import CompetitorBenchmark, CompetitorProfile
+    from src.db.models_normalization import (
+        ExtractedCoupon, ExtractedLink, ExtractedPrice, NormalizedPost, SourceType)
+
+    with session_scope() as s:
+        c = s.get(Competitor, competitor_id)
+        if c is None:
+            return {"ok": False, "error": f"No competitor #{competitor_id}."}
+
+        post_ids = select(CompetitorPost.id).where(CompetitorPost.competitor_id == competitor_id)
+        norm_ids = select(NormalizedPost.id).where(
+            NormalizedPost.source_type == SourceType.COMPETITOR,
+            NormalizedPost.source_id.in_(post_ids))
+
+        def _count(model, *where):
+            return s.scalar(select(func.count()).select_from(model).where(*where)) or 0
+
+        counts = {
+            "username": c.username or str(competitor_id),
+            "competitor_posts": _count(CompetitorPost, CompetitorPost.competitor_id == competitor_id),
+            "normalized_posts": _count(NormalizedPost, NormalizedPost.source_type == SourceType.COMPETITOR,
+                                       NormalizedPost.source_id.in_(post_ids)),
+            "profiles": _count(CompetitorProfile, CompetitorProfile.competitor_id == competitor_id),
+            "benchmarks": _count(CompetitorBenchmark, CompetitorBenchmark.competitor_id == competitor_id),
+        }
+        if not confirm:
+            return {"ok": False, "requires_confirm": True, "would_delete": counts,
+                    "note": "This is irreversible. Re-send with confirm=true to proceed."}
+
+        # delete children first, then parents (FK-safe)
+        s.query(PostClassification).filter(
+            PostClassification.normalized_post_id.in_(norm_ids)).delete(synchronize_session=False)
+        for M in (ExtractedPrice, ExtractedCoupon, ExtractedLink):
+            s.query(M).filter(M.normalized_post_id.in_(norm_ids)).delete(synchronize_session=False)
+        s.query(NormalizedPost).filter(
+            NormalizedPost.source_type == SourceType.COMPETITOR,
+            NormalizedPost.source_id.in_(post_ids)).delete(synchronize_session=False)
+        s.query(CompetitorPost).filter(
+            CompetitorPost.competitor_id == competitor_id).delete(synchronize_session=False)
+        s.query(CompetitorProfile).filter(
+            CompetitorProfile.competitor_id == competitor_id).delete(synchronize_session=False)
+        s.query(CompetitorBenchmark).filter(
+            CompetitorBenchmark.competitor_id == competitor_id).delete(synchronize_session=False)
+        s.delete(c)
+        return {"ok": True, "deleted": counts}
 
 
 def run_onboarding_pipeline(username: str) -> None:
@@ -548,6 +639,8 @@ def weekly_report(include_ai: bool = True) -> dict:
             from src.ai.client import AIUnavailable
             try:
                 ai_summary = BriefingGenerator().generate(weekly=True)
+                from src.services.ai_outputs import record_ai_output
+                record_ai_output("weekly_briefing", ai_summary, get_settings().ai_model)
             except AIUnavailable:
                 ai_summary = None
         except Exception:  # briefing is best-effort; never break the report
@@ -555,6 +648,40 @@ def weekly_report(include_ai: bool = True) -> dict:
 
     return {"available": weekly is not None, "weekly_plan": weekly,
             "what_changed": reasoning, "recommendations": recs, "ai_summary": ai_summary}
+
+
+def retro_latest(week: str | None = None) -> dict:
+    """Phase 2.4 -- the WeeklyRetro for ``week`` (an IST Monday, ISO date
+    string), or the most recent one when ``week`` is omitted."""
+    from datetime import date as date_cls
+
+    from src.db.models_prediction import WeeklyRetro
+
+    with session_scope() as s:
+        q = select(WeeklyRetro)
+        if week:
+            try:
+                q = q.where(WeeklyRetro.week_start == date_cls.fromisoformat(week))
+            except ValueError:
+                return {"available": False, "reason": "week must be YYYY-MM-DD"}
+        row = s.scalar(q.order_by(WeeklyRetro.week_start.desc()))
+        if row is None:
+            return {"available": False, "week_start": None, "metrics": None, "narrative": None}
+        return {
+            "available": True,
+            "week_start": row.week_start.isoformat(),
+            "metrics": row.metrics,
+            "narrative": row.narrative,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+
+
+def deals_scored(limit: int = 50) -> dict:
+    """Phase 3.3 -- latest ``DealScore`` per deal (score + explainable
+    ``components``), ordered by score desc, for ``/api/deals/scored`` and the
+    Deal Queue view on ``/plan``."""
+    with session_scope() as s:
+        return {"items": ctx.top_scored_deals(s, limit=limit)}
 
 
 def _plan_date_bounds(s):
@@ -593,7 +720,51 @@ def _today_details(s, recommended_posts: int):
     return windows, allocation, merchants, (risks or None)
 
 
-def daily_brief(date: str | None = None) -> dict:
+def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
+                        directive: str | None = None) -> dict:
+    """The cache-miss generation path for the daily AI plan: call the planner
+    (honoring ``directive`` if given), fact-check its cited numbers against the same
+    facts it was grounded on, and persist a `CampaignPlan` row pinned to ``day``.
+
+    Shared by `daily_brief` (normal first-request-of-the-day miss) and
+    `regenerate_daily` (forced fresh generation after deleting the stale cache row)
+    so the two paths can never drift apart."""
+    from src.ai.planner import generate_day_plan
+    from src.ai.factcheck import check_cited_numbers
+    from src.services.generation.ai_execution import persist_ai_plan
+
+    # Only pass `directive` through when set — keeps the call signature identical
+    # to before this feature (and compatible with existing tests that monkeypatch
+    # generate_day_plan with a fixed `(s, day=None, inputs=None)` signature) on the
+    # normal, non-regenerate path.
+    directive_kwargs = {"directive": directive} if directive is not None else {}
+    ai_res = generate_day_plan(s, day, inputs={
+        "recommended_posts": recommended,
+        "posting_windows": windows,
+        "deal_type_allocation": allocation,
+        "merchant_allocation": merchants,
+        "upcoming_event": evt,
+    }, **directive_kwargs)
+    ai_ok = bool(ai_res.get("available"))
+    plan = ai_res.get("plan") or {}
+    digest = ai_res.get("digest", "") if ai_ok else ""
+    fc_status = None
+    row = None
+    if ai_ok:
+        fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
+        fc_status = "pass" if fc["status"] == "passed" else "warn"
+        row = persist_ai_plan(s, {**ai_res, "factcheck": fc})
+        if row is not None:
+            # Pin the cache key to the day we actually planned for — the AI's
+            # self-reported "date" inside the plan JSON isn't reliable enough
+            # (missing/mismatched) to key the cache lookup on.
+            row.target_date = day
+            if directive is not None:
+                row.operator_directive = directive
+    return {"ai_ok": ai_ok, "plan": plan, "digest": digest, "fc_status": fc_status, "row": row}
+
+
+def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
     """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
     recommendation grounded in the recent posting trajectory (not the stale lifetime
     baseline). AI writes the narrative + slots best-effort; the numbers are
@@ -602,14 +773,17 @@ def daily_brief(date: str | None = None) -> dict:
     The AI-authored part (digest + slots) is cached per (day, campaign version) as a
     `CampaignPlan` row: the first request for a given day calls the model and persists
     the result; every subsequent request for that SAME day reuses the stored row
-    instead of re-calling the AI. A request for a different day always plans fresh."""
+    instead of re-calling the AI. A request for a different day always plans fresh.
+
+    ``directive`` is only ever passed by `regenerate_daily` (never by the plain
+    `/api/plan/daily` route) — it steers the cache-miss generation, and is only
+    reached at all when the caller has already deleted the stale cached row, so a
+    normal (non-regenerate) call's behavior is unchanged."""
     from datetime import date as date_cls, timedelta
     from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_today
     from src.services.planning.calendar import upcoming_events
-    from src.ai.planner import generate_day_plan
-    from src.ai.factcheck import check_cited_numbers
     from src.db.models_campaign import PlanType
-    from src.services.generation.ai_execution import persist_ai_plan
 
     with session_scope() as s:
         mn, mx = _plan_date_bounds(s)
@@ -670,27 +844,12 @@ def daily_brief(date: str | None = None) -> dict:
             plan = cached.blueprint or {}
             digest = cached.ai_digest or ""
             fc_status = "pass" if cached.factcheck_status == "passed" else "warn"
+            plan_row = cached
         else:
-            ai_res = generate_day_plan(s, day, inputs={
-                "recommended_posts": recommended,
-                "posting_windows": windows,
-                "deal_type_allocation": allocation,
-                "merchant_allocation": merchants,
-                "upcoming_event": evt,
-            })
-            ai_ok = bool(ai_res.get("available"))
-            plan = ai_res.get("plan") or {}
-            digest = ai_res.get("digest", "") if ai_ok else ""
-            fc_status = None
-            if ai_ok:
-                fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
-                fc_status = "pass" if fc["status"] == "passed" else "warn"
-                row = persist_ai_plan(s, {**ai_res, "factcheck": fc})
-                if row is not None:
-                    # Pin the cache key to the day we actually planned for — the
-                    # AI's self-reported "date" inside the plan JSON isn't reliable
-                    # enough (missing/mismatched) to key the cache lookup on.
-                    row.target_date = day
+            gen = _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
+                                      directive=directive)
+            ai_ok, plan, digest, fc_status, plan_row = (
+                gen["ai_ok"], gen["plan"], gen["digest"], gen["fc_status"], gen["row"])
 
         if ai_ok and plan.get("recommended_posts") is not None:
             recommended_final, was_clamped = ctx.clamp_recommended_posts(
@@ -730,10 +889,75 @@ def daily_brief(date: str | None = None) -> dict:
             "factcheck_status": fc_status,
             "ai_available": ai_ok,
             "upcoming_event": evt,
+            "operator_directive": plan_row.operator_directive if plan_row is not None else None,
+            "can_regenerate": day >= ist_today(),
         }
 
 
-def weekly_brief(end: str | None = None) -> dict:
+def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = None):
+    """The cache-miss generation path for the weekly AI narrative: (re)compute the
+    deterministic blueprint fresh, call the briefing generator once (honoring
+    ``directive`` if given), and persist — updating ``wk`` in place if it already
+    exists (blueprint-only row from a CampaignPlanningEngine run) or inserting a
+    fresh row otherwise. Returns ``(ai_summary, ai_ok, themes, row)``.
+
+    Shared by `weekly_brief` (normal first-request-of-the-week miss, ``wk`` may be
+    an existing blueprint-only row) and `regenerate_weekly` (forced fresh
+    generation, always called with ``wk=None`` since the caller already deleted
+    the stale row) so the two paths can never drift apart."""
+    from src.services.planning.calendar import upcoming_events
+    from src.services.planning.campaign import CampaignPlanningEngine
+    from src.services.generation.ai_execution import persist_weekly_plan
+
+    bp_growth = (ctx.growth_blueprint(s).get("blueprint") or {})
+    perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
+            for p in ctx.post_type_performance(s)}
+    try:
+        events = upcoming_events(s, week_start, within_days=30)
+    except Exception:
+        events = []
+    event_data = [{"name": e.name, "next_date": e.next_date,
+                   "days_away": (e.next_date - week_start).days,
+                   "date_confidence": e.date_confidence} for e in events]
+    blueprint = CampaignPlanningEngine()._weekly_plan(
+        bp_growth, perf, week_start, event_data)["blueprint"]
+    themes = blueprint.get("daily_themes") or []
+
+    ai_summary, ai_ok = "", False
+    try:
+        from src.ai.briefing import BriefingGenerator
+        from src.ai.client import AIUnavailable
+        # Same conditional-kwarg reasoning as `_daily_ai_generate`: only pass
+        # `directive` through when set, so existing tests that monkeypatch
+        # `BriefingGenerator.generate` with a fixed `(self, weekly=False)`
+        # signature keep working on the normal, non-regenerate path.
+        directive_kwargs = {"directive": directive} if directive is not None else {}
+        try:
+            ai_summary = BriefingGenerator().generate(weekly=True, **directive_kwargs) or ""
+            ai_ok = bool(ai_summary)
+        except AIUnavailable:
+            ai_summary = ""
+    except Exception:
+        ai_summary = ""
+
+    if wk is not None:
+        # Row already exists for this week (e.g. blueprint-only from a legitimate
+        # CampaignPlanningEngine run) — update it in place, no new insert, no race risk.
+        wk.blueprint = blueprint
+        if ai_ok:
+            wk.ai_digest = ai_summary
+            wk.is_ai_generated = True
+        if directive is not None:
+            wk.operator_directive = directive
+    else:
+        wk = persist_weekly_plan(s, week_start, week_end, blueprint,
+                                  digest=ai_summary, is_ai_generated=ai_ok)
+        if wk is not None and directive is not None:
+            wk.operator_directive = directive
+    return ai_summary, ai_ok, themes, wk
+
+
+def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
     """The weekly view: last 7 days of actual posting + this week's themes + an AI
     weekly narrative (best-effort).
 
@@ -745,13 +969,15 @@ def weekly_brief(end: str | None = None) -> dict:
     caching contract `daily_brief()` already has. A row's `is_ai_generated`/
     `ai_digest` being unset is literally the "no digest yet, call the AI" tag —
     once set, every later request for that week reuses it, no matter how many
-    times the page is reopened."""
+    times the page is reopened.
+
+    ``directive`` is only ever passed by `regenerate_weekly` (never by the plain
+    `/api/plan/weekly` route) — same contract as `daily_brief`'s ``directive``."""
     from datetime import date as date_cls, timedelta
     from src.services.analytics.day import latest_owned_date
     from src.services.analytics.daily_report import _owned_channel
+    from src.services.analytics.periods import ist_today
     from src.services.planning.calendar import upcoming_events
-    from src.services.planning.campaign import CampaignPlanningEngine
-    from src.services.generation.ai_execution import persist_weekly_plan
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
 
     with session_scope() as s:
@@ -809,50 +1035,108 @@ def weekly_brief(end: str | None = None) -> dict:
             # prior attempt didn't get a usable AI response) — compute the
             # deterministic blueprint fresh (cheap, and doesn't depend on
             # CampaignPlanningEngine's Monday cron ever having run) and try AI once.
-            bp_growth = (ctx.growth_blueprint(s).get("blueprint") or {})
-            perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
-                    for p in ctx.post_type_performance(s)}
-            try:
-                events = upcoming_events(s, week_start, within_days=30)
-            except Exception:
-                events = []
-            event_data = [{"name": e.name, "next_date": e.next_date,
-                           "days_away": (e.next_date - week_start).days,
-                           "date_confidence": e.date_confidence} for e in events]
-            blueprint = CampaignPlanningEngine()._weekly_plan(
-                bp_growth, perf, week_start, event_data)["blueprint"]
-            themes = blueprint.get("daily_themes") or []
+            ai_summary, ai_ok, themes, wk = _weekly_ai_generate(
+                s, week_start, week_end, wk, directive=directive)
 
-            ai_summary, ai_ok = "", False
-            try:
-                from src.ai.briefing import BriefingGenerator
-                from src.ai.client import AIUnavailable
-                try:
-                    ai_summary = BriefingGenerator().generate(weekly=True) or ""
-                    ai_ok = bool(ai_summary)
-                except AIUnavailable:
-                    ai_summary = ""
-            except Exception:
-                ai_summary = ""
-
-            if wk is not None:
-                # Row already exists for this week (e.g. blueprint-only from a
-                # legitimate CampaignPlanningEngine run) — update it in place, no
-                # new insert, no race risk.
-                wk.blueprint = blueprint
-                if ai_ok:
-                    wk.ai_digest = ai_summary
-                    wk.is_ai_generated = True
-            else:
-                persist_weekly_plan(s, week_start, week_end, blueprint,
-                                     digest=ai_summary, is_ai_generated=ai_ok)
-
+        current_week_start = ist_today() - timedelta(days=ist_today().weekday())
         return {"available": True,
                 "week_start": week_start.isoformat(),
                 "week_end": week_end.isoformat(),
                 "days": days, "totals": totals, "themes": themes,
                 "recommended_posts_per_day": traj["recent_cadence"],
-                "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok}
+                "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok,
+                "operator_directive": wk.operator_directive if wk is not None else None,
+                "can_regenerate": week_start >= current_week_start}
+
+
+def regenerate_daily(date: str | None = None, directive: str | None = None) -> dict:
+    """Steer & Regenerate — force a fresh AI day plan for ``date`` (or latest owned
+    day), optionally steered by a free-text operator ``directive``. Refuses to
+    regenerate an already-elapsed IST day (the guidance would land after the fact).
+    Deletes the stale cached `CampaignPlan` row first so `daily_brief` takes its
+    normal cache-miss path — the SAME generation path a first-ever request for that
+    day would take — just with ``directive`` threaded into the planner prompt and
+    persisted on the new row."""
+    from datetime import date as date_cls
+    from sqlalchemy import delete
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    from src.services.ai_outputs import record_ai_output
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_today
+
+    with session_scope() as s:
+        day = None
+        if date:
+            try:
+                day = date_cls.fromisoformat(date)
+            except ValueError:
+                day = None
+        if day is None:
+            day = latest_owned_date(s)
+        if day is None:
+            return {"available": False, "reason": "No owned posts yet."}
+        if day < ist_today():
+            return {"available": False,
+                    "reason": "This day has already elapsed — regenerating it has no effect."}
+
+        s.execute(delete(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day,
+        ))
+
+    result = daily_brief(date=day.isoformat(), directive=directive)
+    if result.get("available"):
+        note = f"daily {day.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
+        record_ai_output("plan_regenerated", note, get_settings().ai_model)
+    return result
+
+
+def regenerate_weekly(end: str | None = None, directive: str | None = None) -> dict:
+    """Steer & Regenerate — force a fresh AI weekly narrative for the calendar week
+    containing ``end`` (or latest owned day), optionally steered by a free-text
+    operator ``directive``. Refuses to regenerate a week that has already fully
+    elapsed (its Monday is before the current IST week's Monday) — the guidance
+    would land after the fact. Deletes the stale cached `CampaignPlan` row first so
+    `weekly_brief` takes its normal cache-miss path, with ``directive`` threaded
+    into the briefing prompt and persisted on the new row."""
+    from datetime import date as date_cls, timedelta
+    from sqlalchemy import delete
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    from src.services.ai_outputs import record_ai_output
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_today
+
+    with session_scope() as s:
+        anchor = None
+        if end:
+            try:
+                anchor = date_cls.fromisoformat(end)
+            except ValueError:
+                anchor = None
+        if anchor is None:
+            anchor = latest_owned_date(s)
+        if anchor is None:
+            return {"available": False, "reason": "No owned posts yet."}
+
+        week_start = anchor - timedelta(days=anchor.weekday())
+        today = ist_today()
+        current_week_start = today - timedelta(days=today.weekday())
+        if week_start < current_week_start:
+            return {"available": False,
+                    "reason": "This day has already elapsed — regenerating it has no effect."}
+
+        s.execute(delete(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.WEEKLY,
+            CampaignPlan.target_date == week_start,
+        ))
+
+    result = weekly_brief(end=week_start.isoformat(), directive=directive)
+    if result.get("available"):
+        note = f"weekly {week_start.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
+        record_ai_output("plan_regenerated", note, get_settings().ai_model)
+    return result
 
 
 def queue(page: int = 1, page_size: int = 20) -> dict:
@@ -877,3 +1161,90 @@ def queue(page: int = 1, page_size: int = 20) -> dict:
                   "attempts": f"{r.attempts}/{r.max_attempts}",
                   "note": (r.last_error or "")} for r in rows]
     return {"counts": counts, "items": items, **_page_meta(total, page, page_size)}
+
+
+def _cadence_minutes_by_key() -> dict[str, int]:
+    """Every job's cadence expressed in minutes, derived from cadences.py constants
+    (interval jobs use their _MIN/_HOURS constant directly; daily/weekly/monthly jobs
+    use the calendar-fact multipliers 24*60 / 7*24*60 / 30*24*60)."""
+    from src.controllers import cadences as C
+
+    day, week, month = 24 * 60, 7 * 24 * 60, 30 * 24 * 60
+    return {
+        "telegram_sync": C.TELEGRAM_SYNC_MIN,
+        "competitor_sync": C.COMPETITOR_SYNC_MIN,
+        "normalize_posts": C.NORMALIZE_POSTS_MIN,
+        "stats_refresh": C.STATS_REFRESH_MIN,
+        "deal_monitoring": C.DEAL_MONITORING_HOURS * 60,
+        "price_history": C.PRICE_HISTORY_HOURS * 60,
+        "deal_ranking": C.DEAL_RANKING_MIN,
+        "link_resolution": C.LINK_RESOLUTION_DEFAULT_MIN,
+        "growth_detection": day,
+        "competitor_discover": day,
+        "competitor_intel": day,
+        "ai_daily_summary": day,
+        "weekly_retro": week,
+        "weekly_report": week,
+        "monthly_report": month,
+        "learning": day,
+        "deal_expiry": C.DEAL_EXPIRY_HOURS * 60,
+        "queue_processor": C.QUEUE_PROCESSOR_MIN,
+        "url_health": C.URL_HEALTH_HOURS * 60,
+        "analytics_aggregation": C.ANALYTICS_AGGREGATION_HOURS * 60,
+        "merchant_feed_sync": C.MERCHANT_FEED_SYNC_MIN,
+        "notification_engine": C.NOTIFICATION_ENGINE_MIN,
+        "org_health": C.ORG_HEALTH_HOURS * 60,
+        "db_cleanup": day,
+        "daily_report": day,
+        "daily_plan": day,
+    }
+
+
+def _aware_utc(dt):
+    """SQLite can hand back naive datetimes for tz-aware columns; treat naive as UTC
+    (that's the only tz this app ever writes) so age math never raises."""
+    from datetime import timezone
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def scheduler_runs(limit: int = 100, job: str | None = None) -> dict:
+    """Recent SchedulerRun rows plus a per-job status summary, for the Schedulers page."""
+    from datetime import datetime, timezone
+    from src.controllers.schedulers import JOBS
+    from src.db.models_scheduler import SchedulerRun
+
+    cadence_minutes = _cadence_minutes_by_key()
+    with session_scope() as s:
+        q = select(SchedulerRun).order_by(SchedulerRun.id.desc())
+        if job:
+            q = q.where(SchedulerRun.scheduler_key == job)
+        rows = s.scalars(q.limit(limit)).all()
+        runs = [{"key": r.scheduler_key, "status": r.status, "detail": r.detail,
+                 "error": r.error, "processed": r.records_processed,
+                 "duration_ms": r.duration_ms,
+                 "at": r.started_at.isoformat() if r.started_at else None} for r in rows]
+
+        now = datetime.now(timezone.utc)
+        jobs = []
+        for j in JOBS:
+            last = s.scalar(select(SchedulerRun).where(SchedulerRun.scheduler_key == j.key)
+                            .order_by(SchedulerRun.id.desc()))
+            cmin = cadence_minutes.get(j.key, 24 * 60)
+            last_started_at = _aware_utc(last.started_at) if last else None
+            overdue = None
+            if last_started_at is not None:
+                age_min = (now - last_started_at).total_seconds() / 60
+                overdue = age_min > 2 * cmin
+            jobs.append({
+                "key": j.key, "name": j.name, "cadence": j.cadence, "priority": j.priority,
+                "last_status": last.status if last else None,
+                "last_detail": last.detail if last else None,
+                "last_error": last.error if last else None,
+                "last_started_at": last_started_at.isoformat() if last_started_at else None,
+                "last_duration_ms": last.duration_ms if last else None,
+                "cadence_minutes": cmin,
+                "overdue": overdue,
+            })
+    return {"jobs": jobs, "runs": runs}
