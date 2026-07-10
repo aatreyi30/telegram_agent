@@ -141,6 +141,32 @@ def add_competitor(background_tasks: BackgroundTasks,
     return ok({**record, "pipeline_started": True})
 
 
+@router.patch("/competitors/{competitor_id}")
+def update_competitor(competitor_id: int,
+                      user: dict = Depends(require_role("editor")),
+                      category: str | None = Body(None, embed=True),
+                      title: str | None = Body(None, embed=True)):
+    try:
+        result = service.update_competitor(competitor_id, category=category, title=title)
+    except ValueError as e:
+        return fail(str(e), 400)
+    if not result.get("ok"):
+        return fail(result.get("error", "Competitor not found"), 404)
+    return ok(result)
+
+
+@router.delete("/competitors/{competitor_id}")
+def delete_competitor(competitor_id: int, confirm: bool = Query(default=False),
+                      user: dict = Depends(require_role("owner"))):
+    result = service.delete_competitor(competitor_id, confirm=confirm)
+    if result.get("ok"):
+        return ok(result)
+    if result.get("requires_confirm"):
+        return fail(result.get("note", "Confirmation required."), status_code=409,
+                    details=result.get("would_delete"))
+    return fail(result.get("error", "Not found."), status_code=404)
+
+
 @router.get("/plans")
 def plans():
     return ok(service.plans())
@@ -154,6 +180,20 @@ def plan_daily(date: str | None = None):
 @router.get("/plan/weekly")
 def plan_weekly(end: str | None = None):
     return ok(service.weekly_brief(end=end))
+
+
+@router.post("/plan/daily/regenerate")
+def plan_daily_regenerate(user: dict = Depends(require_role("editor")),
+                          date: str | None = Body(None, embed=True),
+                          directive: str | None = Body(None, embed=True)):
+    return ok(service.regenerate_daily(date=date, directive=directive))
+
+
+@router.post("/plan/weekly/regenerate")
+def plan_weekly_regenerate(user: dict = Depends(require_role("editor")),
+                           end: str | None = Body(None, embed=True),
+                           directive: str | None = Body(None, embed=True)):
+    return ok(service.regenerate_weekly(end=end, directive=directive))
 
 
 @router.get("/weekly")
@@ -172,3 +212,18 @@ def growth(start: str | None = Query(default=None), end: str | None = Query(defa
 @router.get("/digest")
 def digest():
     return ok(service.digest())
+
+
+@router.get("/schedulers/runs")
+def scheduler_runs(limit: int = Query(default=100), job: str | None = Query(default=None)):
+    return ok(service.scheduler_runs(limit=limit, job=job))
+
+
+@router.get("/retro/latest")
+def retro_latest(week: str | None = Query(default=None)):
+    return ok(service.retro_latest(week=week))
+
+
+@router.get("/deals/scored")
+def deals_scored(limit: int = Query(default=50)):
+    return ok(service.deals_scored(limit=limit))
