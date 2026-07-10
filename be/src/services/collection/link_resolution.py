@@ -113,12 +113,26 @@ class LinkResolutionEngine(BaseCollector):
     name = "link_resolution"
     retryable = False
 
-    def __init__(self, limit: int = 2000, delay: float = 0.1):
+    def __init__(
+        self,
+        limit: int = 2000,
+        delay: float = 0.1,
+        concurrency: int | None = None,
+        timeout: float | None = None,
+    ):
         self.limit = limit
         # `delay` is kept for backward-compatible call sites (cli.py); the old
         # per-request sleep no longer applies now that requests run
         # concurrently under a semaphore + bounded connection pool.
         self.delay = delay
+        # Optional overrides (default None -> today's behaviour, byte-for-byte):
+        # `concurrency` falls back to `settings.link_resolve_concurrency` (200,
+        # tuned for the live scheduler); callers like a manual backfill script
+        # that want a conservative cap (e.g. 10) without touching the global
+        # setting pass it explicitly here. `timeout` falls back to the 30s this
+        # engine has always used.
+        self.concurrency = concurrency
+        self.timeout = timeout
         self.ua = get_settings().tme_user_agent
         self.bus = get_event_bus()
 
@@ -169,11 +183,13 @@ class LinkResolutionEngine(BaseCollector):
             by_url.setdefault(url, []).append((link_id, post_id))
             domain_by_url.setdefault(url, domain)
 
-        sem = asyncio.Semaphore(settings.link_resolve_concurrency)
+        concurrency = self.concurrency if self.concurrency is not None else settings.link_resolve_concurrency
+        timeout = self.timeout if self.timeout is not None else 30.0
+        sem = asyncio.Semaphore(concurrency)
         async with httpx.AsyncClient(
             http2=True,
             limits=httpx.Limits(max_connections=250, max_keepalive_connections=50),
-            timeout=30.0,
+            timeout=timeout,
             headers={"User-Agent": self.ua},
         ) as client:
 
