@@ -19,6 +19,7 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,16 +29,23 @@ COMPETITOR_INTEL_VERSION = 1
 
 
 class CompetitorProfile(Base, TimestampMixin):
-    """One profiling run's snapshot for one competitor (Phase 0.1: versioned
-    snapshots, never overwritten). ``intel_version`` tracks the *computation*
-    schema (bumped only when the scoring/behaviour logic changes); ``computed_at``
-    is the per-run stamp that makes many rows per (intel_version, competitor_id)
-    valid — read paths must select the latest per competitor (see
-    ``services/intelligence/competitor.py::latest_profiles``), never assume
-    one row per competitor."""
+    """The CURRENT profile for one competitor -- one row per (intel_version,
+    competitor_id), upserted in place every run (see
+    ``services/intelligence/competitor.py``). ``intel_version`` tracks the
+    *computation* schema (bumped only when the scoring/behaviour logic
+    changes); ``computed_at`` is the timestamp of the most recent refresh.
+
+    A prior revision of this table briefly kept a full per-run snapshot
+    history (no unique constraint, one row inserted per run). That was
+    reverted: the on-disk ``tgagent.db`` still physically carries the unique
+    index from before that change, so re-adding the constraint here just
+    brings the model back in line with disk and gives the upsert a conflict
+    target. ``latest_profiles``/``latest_benchmarks`` (row_number-window
+    reads) still work unchanged with one row per competitor."""
 
     __tablename__ = "competitor_profiles"
     __table_args__ = (
+        UniqueConstraint("intel_version", "competitor_id", name="uq_comp_profile"),
         Index("ix_comp_profile_competitor_computed", "competitor_id", "computed_at"),
     )
 
@@ -87,7 +95,10 @@ class CompetitorProfile(Base, TimestampMixin):
 
 class CompetitorBenchmark(Base):
     """One dimension of our-channel-vs-competitor comparison (behaviour, not a
-    single isolated metric — many rows together form the benchmark)."""
+    single isolated metric — many rows together form the benchmark). Current
+    state only: each run replaces a competitor's benchmark rows (delete then
+    insert -- see ``CompetitorIntelligenceEngine.run``), so this never grows
+    unbounded either."""
 
     __tablename__ = "competitor_benchmarks"
     __table_args__ = (
