@@ -1,5 +1,7 @@
 from __future__ import annotations
 import os, tempfile
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -17,9 +19,10 @@ def _isolated_db():
     yield
 
 
-def test_competitors_tick_uses_db_only(monkeypatch):
-    """_competitors must iterate only DB-discovered Competitor.username rows,
-    not env var competitors (env var dependency removed).
+def test_competitor_sync_job_uses_db_only(monkeypatch):
+    """j_competitor_sync (src/controllers/schedulers.py — the live scheduler job,
+    superseding the legacy CollectionScheduler removed in Phase 0.5) must iterate
+    only DB-discovered Competitor.username rows, not env var competitors.
     """
     from src.db.session import session_scope
     from src.db.models import Competitor
@@ -27,11 +30,17 @@ def test_competitors_tick_uses_db_only(monkeypatch):
         s.add(Competitor(username="DbComp"))
         s.add(Competitor(username="AnotherComp"))
 
-    import src.services.collection.scheduler as mod
-    sched = mod.CollectionScheduler()
+    import src.controllers.schedulers as sched
+
     seen = []
-    monkeypatch.setattr(sched.runner, "run_collector", lambda collector, **kw: seen.append(kw.get("target")))
-    sched._competitors()
+
+    class _FakeRunner:
+        def run_collector(self, collector, **kw):
+            seen.append(kw.get("target"))
+            return SimpleNamespace(records_added=0)
+
+    monkeypatch.setattr(sched, "_job_runner", lambda: _FakeRunner())
+    sched.j_competitor_sync()
 
     assert "DbComp" in seen, "DB-discovered competitor missing from tick"
     assert "AnotherComp" in seen, "Second DB-discovered competitor missing from tick"
