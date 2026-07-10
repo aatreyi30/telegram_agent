@@ -19,5 +19,11 @@ export const queryKeys = {
   users: () => ["users"] as const,
   digest: () => ["digest"] as const,
   dailyBrief: (date?: string | null) => ["plan-daily", date] as const,
+  dailyBriefAll: () => ["plan-daily"] as const,
   weeklyBrief: (end?: string | null) => ["plan-weekly", end] as const,
+  weeklyBriefAll: () => ["plan-weekly"] as const,
+  schedulerRuns: (job?: string | null) => ["scheduler-runs", job] as const,
+  retroLatest: (week?: string | null) => ["retro-latest", week] as const,
+  retroLatestAll: () => ["retro-latest"] as const,
+  scoredDeals: (limit?: number) => ["deals-scored", limit] as const,
 };
