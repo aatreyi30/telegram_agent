@@ -8,7 +8,7 @@ import type {
   CompetitorsResponse, CompetitorTrendsResponse,
   DailyBrief, DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
   OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
-  QueueResponse, UsersResponse, WeeklyBrief, WeeklyResponse,
+  QueueResponse, RetroLatest, ScoredDealsResponse, SchedulerRunsResponse, UsersResponse, WeeklyBrief, WeeklyResponse,
 } from "@/types/api";
 
 export function useOverview() {
@@ -119,5 +119,25 @@ export function useWeeklyBrief(end?: string | null) {
   return useQuery({
     queryKey: queryKeys.weeklyBrief(end),
     queryFn: () => api.get<WeeklyBrief>(`/plan/weekly${qs}`),
+  });
+}
+export function useSchedulerRuns(job?: string | null) {
+  const qs = job ? `?job=${job}` : "";
+  return useQuery({
+    queryKey: queryKeys.schedulerRuns(job),
+    queryFn: () => api.get<SchedulerRunsResponse>(`/schedulers/runs${qs}`),
+  });
+}
+export function useLatestRetro(week?: string | null) {
+  const qs = week ? `?week=${week}` : "";
+  return useQuery({
+    queryKey: queryKeys.retroLatest(week),
+    queryFn: () => api.get<RetroLatest>(`/retro/latest${qs}`),
+  });
+}
+export function useScoredDeals(limit: number = 50) {
+  return useQuery({
+    queryKey: queryKeys.scoredDeals(limit),
+    queryFn: () => api.get<ScoredDealsResponse>(`/deals/scored?limit=${limit}`),
   });
 }
