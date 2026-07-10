@@ -30,6 +30,29 @@ from src.db.session import session_scope
 from src.services.analytics.engagement import channel_distribution, engagement_score
 
 
+def outcome_fields_from_counters(
+    views: int | None, forwards: int | None, reactions: int | None, distribution: dict
+) -> dict:
+    """Pure math shared with ``backtest.py`` (Task B) -- turn a post's LATEST
+    observed counters into the ``PostOutcome`` field values this script writes
+    (views_24h/forwards_24h/reactions_24h/forward_rate/reaction_rate/
+    engagement_score), via ``engagement.py``'s single source-of-truth formula.
+    No DB access here -- callers own the session/row lifecycle."""
+    views = views or 0
+    forwards = forwards or 0
+    reactions = reactions or 0
+    forward_rate = forwards / max(views, 1)
+    reaction_rate = reactions / max(views, 1)
+    return {
+        "views_24h": views,
+        "forwards_24h": forwards,
+        "reactions_24h": reactions,
+        "forward_rate": forward_rate,
+        "reaction_rate": reaction_rate,
+        "engagement_score": engagement_score(views, forward_rate, reaction_rate, distribution),
+    }
+
+
 def main() -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     created = skipped = 0
@@ -48,28 +71,17 @@ def main() -> None:
                 skipped += 1
                 continue
 
-            views = views or 0
-            forwards = forwards or 0
-            reactions = reactions or 0
-            forward_rate = forwards / max(views, 1)
-            reaction_rate = reactions / max(views, 1)
-
             if channel_id not in dist_cache:
                 dist_cache[channel_id] = channel_distribution(s, channel_id)
-            score = engagement_score(views, forward_rate, reaction_rate, dist_cache[channel_id])
+            fields = outcome_fields_from_counters(views, forwards, reactions, dist_cache[channel_id])
 
             s.add(
                 PostOutcome(
                     post_id=pid,
-                    views_24h=views,
-                    forwards_24h=forwards,
-                    reactions_24h=reactions,
-                    forward_rate=forward_rate,
-                    reaction_rate=reaction_rate,
-                    engagement_score=score,
                     phase_1h_done=False,
                     phase_6h_done=False,
                     phase_24h_done=True,
+                    **fields,
                 )
             )
             created += 1
