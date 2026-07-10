@@ -13,10 +13,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.db.models import Channel
-from src.db.models_competitor_intel import (
-    COMPETITOR_INTEL_VERSION,
-    CompetitorProfile,
-)
 from src.db.models_growth import GROWTH_VERSION, GrowthRecommendation, GrowthStrategy
 from src.db.models_intelligence import (
     MERCHANT_INTEL_VERSION,
@@ -199,6 +195,8 @@ def owned_merchant_coverage(s: Session) -> dict:
 def merchant_mix(s: Session, owned_coverage_pct: float | None = None) -> dict:
     """Us-vs-competitors merchant mix: each channel's share of its merchant-resolved
     posts per merchant (shares sum to ~1.0 per channel)."""
+    from src.services.intelligence.competitor import latest_profiles
+
     channels: list[dict] = []
 
     owned_counts = dict(s.execute(
@@ -215,8 +213,7 @@ def merchant_mix(s: Session, owned_coverage_pct: float | None = None) -> dict:
             "shares": {k: v / owned_resolved for k, v in owned_counts.items()},
         })
 
-    for p in s.scalars(select(CompetitorProfile)
-            .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)):
+    for p in latest_profiles(s):
         mix = p.merchant_mix or {}
         resolved = sum(mix.values())
         if not resolved:
@@ -238,8 +235,18 @@ def merchant_mix(s: Session, owned_coverage_pct: float | None = None) -> dict:
 
 
 def competitor_profiles(s: Session) -> list[dict]:
+    from src.db.models import Competitor
+    from src.services.intelligence.competitor import latest_profiles
+
+    profiles = sorted(latest_profiles(s), key=lambda p: -(p.post_count or 0))
+    # join in title/category from the raw Competitor row (not stored on the profile
+    # snapshot itself) -- same lookup pattern as service.competitor_dashboard().
+    raw_by_id = {c.id: c for c in s.scalars(select(Competitor)).all()}
     return [{
-        "competitor": p.username, "posts": p.post_count, "span_days": p.span_days,
+        "competitor": p.username,
+        "title": raw_by_id[p.competitor_id].title if p.competitor_id in raw_by_id else None,
+        "category": (raw_by_id[p.competitor_id].category if p.competitor_id in raw_by_id else None) or "unclassified",
+        "posts": p.post_count, "span_days": p.span_days,
         "posts_per_day": p.posts_per_day,
         "avg_text_len": p.avg_text_len, "emoji_rate": p.emoji_rate,
         "hashtag_rate": p.hashtag_rate, "cta_rate": p.cta_rate,
@@ -252,9 +259,38 @@ def competitor_profiles(s: Session) -> list[dict]:
         "deal_mix": p.deal_mix, "merchant_mix": p.merchant_mix,
         "merchant_coverage": p.merchant_coverage,
         "similarity_to_us": p.similarity_to_owned, "confidence": p.confidence,
-    } for p in s.scalars(select(CompetitorProfile)
-        .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-        .order_by(CompetitorProfile.post_count.desc()))]
+    } for p in profiles]
+
+
+def top_scored_deals(s: Session, limit: int = 15) -> list[dict]:
+    """Latest ``DealScore`` per deal (Phase 3.3), joined to ``EnrichedDeal``,
+    ordered by score desc -- feeds the planner's ``scored_deals`` context and
+    ``/api/deals/scored``. SQLite-safe latest-per-deal via ``row_number()``
+    (no ``DISTINCT ON``), mirroring 0.1's ``latest_profiles`` pattern.
+    ``components`` is included verbatim for explainability."""
+    from sqlalchemy.orm import aliased
+    from src.db.models_deal_score import DealScore
+    from src.db.models_generation import DealValidity, EnrichedDeal
+
+    rn = func.row_number().over(
+        partition_by=DealScore.deal_id, order_by=DealScore.scored_at.desc()
+    ).label("rn")
+    sub = select(DealScore, rn).subquery()
+    DS = aliased(DealScore, sub)
+    rows = s.execute(
+        select(DS, EnrichedDeal)
+        .join(EnrichedDeal, EnrichedDeal.id == DS.deal_id)
+        .where(sub.c.rn == 1, EnrichedDeal.deal_validity != DealValidity.INVALID)
+        .order_by(DS.score.desc())
+        .limit(limit)
+    ).all()
+    return [{
+        "deal_id": deal.deal_id, "title": deal.title, "merchant_key": deal.merchant_key,
+        "current_price": deal.current_price, "discount_percent": deal.discount_percent,
+        "url": deal.clean_url or deal.url,
+        "score": ds.score, "components": ds.components,
+        "scored_at": ds.scored_at.isoformat() if ds.scored_at else None,
+    } for ds, deal in rows]
 
 
 def full_briefing_context(s: Session, weekly: bool = False) -> dict:
@@ -281,6 +317,7 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
             follower_deltas_by_day(s, ch.id if ch else None, week_start, end_day)
             if week_start and end_day else {}
         )
+        out["retro"] = latest_retro(s)
     return out
 
 
@@ -480,6 +517,19 @@ def prev_week_digest(s: Session, week_start) -> str | None:
     if wk and wk.is_ai_generated and wk.ai_digest:
         return wk.ai_digest
     return None
+
+
+def latest_retro(s: Session) -> dict | None:
+    """Most recent ``WeeklyRetro``'s metrics + narrative (Phase 2.4), modeled on
+    ``prev_week_digest`` above — lets the weekly briefing/plan build on last
+    week's rule-based ``adjustments`` instead of restating from scratch. `None`
+    when no retro has run yet."""
+    from src.db.models_prediction import WeeklyRetro
+
+    row = s.scalar(select(WeeklyRetro).order_by(WeeklyRetro.week_start.desc()))
+    if row is None:
+        return None
+    return {"week_start": row.week_start.isoformat(), "metrics": row.metrics, "narrative": row.narrative}
 
 
 def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_day) -> dict[str, dict]:
