@@ -37,6 +37,13 @@ def to_ist(dt: datetime) -> datetime:
     return dt.astimezone(IST)
 
 
+def ist_today() -> date:
+    """Today's calendar date in IST — the one place "today" should be computed for
+    day/week elapsed-guards (e.g. Steer & Regenerate), so they agree with the
+    channel's own timezone rather than the server's local/UTC clock."""
+    return to_ist(datetime.now(timezone.utc)).date()
+
+
 def ist_day_bounds_utc(day: date) -> tuple[datetime, datetime]:
     """UTC datetime half-open range [start, end) covering one IST calendar day."""
     start = datetime(day.year, day.month, day.day, tzinfo=IST).astimezone(timezone.utc)
