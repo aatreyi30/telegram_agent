@@ -30,7 +30,10 @@ from src.services.generation.enrichment import DealEnrichmentEngine
 from src.services.generation.formatting import PostFormatter
 from src.services.generation.strategy import PostingStrategy
 from src.config.settings import get_settings
+from src.db.models import Channel
 from src.db.models_generation import EnrichedDeal, GeneratedPost, PostStatus
+from src.db.models_prediction import PostPrediction
+from src.services.analytics.prediction import MODEL_VERSION, dominant_merchant_key, predict_for_slot
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -102,6 +105,17 @@ def build_and_schedule_day(s: Session, max_slots: int = 8, per_collection: int =
     channels = settings.owned_channels
     channel = f"@{channels[0].lstrip('@')}" if channels else None
 
+    # resolve the owned Channel row (int FK) so queued drafts can carry a
+    # Phase 2.2 baseline_v1 prediction -- best effort, never blocks planning.
+    channel_row = None
+    if channel:
+        channel_row = s.scalar(
+            select(Channel).where(Channel.kind == "owned", Channel.username == channel.lstrip("@"))
+        )
+    if channel_row is None:
+        channel_row = s.scalars(select(Channel).where(Channel.kind == "owned")).first()
+    channel_id = channel_row.id if channel_row else None
+
     # idempotent day: clear prior AUTO-PLANNED queued drafts so re-running rebuilds
     # a fresh day rather than stacking duplicate slots (manual drafts are untouched).
     from src.db.models_automation import ScheduleStatus, ScheduledPost
@@ -169,6 +183,21 @@ def build_and_schedule_day(s: Session, max_slots: int = 8, per_collection: int =
         s.add(gp)
         s.flush()
         when = _next_occurrence(hour, now_ist)
+        if channel_id is not None:
+            # Phase 2.2 -- baseline_v1 prediction for this draft, written now
+            # (post_type_cluster is unknown pre-send; see predict_for_slot's
+            # docstring) so the OutcomeCollector has something to score against.
+            merchant_key = dominant_merchant_key(enriched)
+            features, prediction = predict_for_slot(s, channel_id, when, merchant_key=merchant_key)
+            s.add(PostPrediction(
+                generated_post_id=gp.id,
+                predicted_views_1h=prediction["views_1h"],
+                predicted_views_6h=prediction["views_6h"],
+                predicted_views_24h=prediction["views_24h"],
+                predicted_forwards_24h=prediction["forwards_24h"],
+                model_version=MODEL_VERSION,
+                features=features,
+            ))
         if channel:
             enqueue(s, gp.id, channel, when)
         used |= {it.get("original_url") for it in fresh}
