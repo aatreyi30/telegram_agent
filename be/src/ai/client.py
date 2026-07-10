@@ -12,27 +12,11 @@ from __future__ import annotations
 
 import json
 
+from src.ai.prompts import GROUNDING_SYSTEM
 from src.config.settings import get_settings
 from src.logger import get_logger
 
 logger = get_logger(__name__)
-
-# The grounding contract — enforced on every call (source-truth: no hallucination).
-GROUNDING_SYSTEM = (
-    "You are the AI growth analyst for a Telegram deal-channel growth platform. "
-    "You operate on top of deterministic analytics engines.\n\n"
-    "ABSOLUTE RULES:\n"
-    "1. Use ONLY facts present in the DATA provided in the conversation (or returned "
-    "by tools). Never invent or estimate numbers, merchants, prices, dates, views, "
-    "categories, or claims.\n"
-    "2. Every statement you make must trace to a specific value in the provided data.\n"
-    "3. If the data is insufficient to answer, say exactly what is missing — do not guess.\n"
-    "4. Engagement figures are age-normalized proxies (views/day), not exact; and many "
-    "merchant links are unresolved — reflect that uncertainty honestly.\n"
-    "5. Write in plain, simple language a channel operator understands. Lead with the "
-    "point. No jargon, no filler.\n"
-    "You never publish anything — you only produce text for the operator to review."
-)
 
 
 class AIUnavailable(RuntimeError):
@@ -69,13 +53,17 @@ class AIClient:
             raise AIUnavailable(reason)
         client = self._get_client()
         system = GROUNDING_SYSTEM + (("\n\n" + system_extra) if system_extra else "")
-        resp = client.chat.completions.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            temperature=0.3,  # low → stick to the provided facts
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-        )
+        try:
+            resp = client.chat.completions.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=0.3,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+            )
+        except Exception as exc:
+            logger.warning("AI completion failed: %s", exc)
+            raise AIUnavailable(str(exc)) from exc
         return (resp.choices[0].message.content or "").strip()
 
     def agentic(self, user: str, tools: list[dict], tool_runner, *,
@@ -99,10 +87,14 @@ class AIClient:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user}]
         for _ in range(max_iterations):
-            resp = client.chat.completions.create(
-                model=self.model, max_tokens=max_tokens, temperature=0.3,
-                tools=oai_tools, tool_choice="auto", messages=messages,
-            )
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model, max_tokens=max_tokens, temperature=0.3,
+                    tools=oai_tools, tool_choice="auto", messages=messages,
+                )
+            except Exception as exc:
+                logger.warning("AI agentic completion failed: %s", exc)
+                raise AIUnavailable(str(exc)) from exc
             msg = resp.choices[0].message
             if msg.tool_calls:
                 messages.append({

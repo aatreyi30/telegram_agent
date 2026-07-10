@@ -8,14 +8,17 @@ through the JobRunner, so all runs share the same lifecycle/observability.
 from __future__ import annotations
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import select
 
 from src.services.collection.base import JobRunner
 from src.services.collection.channels import owned_handles
 from src.services.collection.merchant import MerchantEnrichmentCollector  # noqa: F401 (registry)
+from src.services.collection.link_resolution import LinkResolutionEngine
 from src.services.collection.telegram_competitor import CompetitorCollector
 from src.services.collection.telegram_owned import OwnedChannelCollector
 from src.config.settings import get_settings
-from src.db.models import CollectionType
+from src.db.models import CollectionType, Competitor
+from src.db.session import session_scope
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -47,12 +50,25 @@ class CollectionScheduler:
             )
 
     def _competitors(self) -> None:
-        for username in self.settings.competitor_channels:
+        # Only use discovered competitors from database (no env var dependency)
+        usernames = []
+        with session_scope() as s:
+            for c in s.scalars(select(Competitor)):
+                if c.username:
+                    usernames.append(c.username)
+        for username in usernames:
             self.runner.run_collector(
-                CompetitorCollector(username, max_pages=1),
+                CompetitorCollector(username, max_pages=5),
                 collection_type=CollectionType.INCREMENTAL,
                 target=username,
             )
+
+    def _resolve_links(self) -> None:
+        self.runner.run_collector(
+            LinkResolutionEngine(),
+            collection_type=CollectionType.INCREMENTAL,
+            target="link_resolution",
+        )
 
     def start(self) -> None:
         s = self.settings
@@ -73,16 +89,23 @@ class CollectionScheduler:
         else:
             logger.warning("no OWNED_CHANNELS configured — owned collection disabled")
 
-        if s.competitor_channels:
-            self.scheduler.add_job(
-                self._competitors,
-                "interval",
-                minutes=s.competitor_interval_min,
-                id="competitors",
-            )
-            logger.info("scheduled competitor monitoring for %d channel(s)", len(s.competitor_channels))
-        else:
-            logger.warning("no COMPETITOR_CHANNELS configured — competitor monitoring disabled")
+        # Competitor collection now uses discovered competitors from database (no env var dependency)
+        # Always schedule - will collect from whatever competitors are in the Competitor table
+        self.scheduler.add_job(
+            self._competitors,
+            "interval",
+            minutes=s.competitor_interval_min,
+            id="competitors",
+        )
+        logger.info("scheduled competitor monitoring (uses discovered competitors from database) every %d min", s.competitor_interval_min)
+
+        self.scheduler.add_job(
+            self._resolve_links,
+            "interval",
+            minutes=s.link_resolve_interval_min,
+            id="link_resolution",
+        )
+        logger.info("scheduled link resolution every %d min", s.link_resolve_interval_min)
 
         self.scheduler.start()
         logger.info("scheduler started")

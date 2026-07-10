@@ -1,12 +1,11 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { Async, Empty } from "@/components/Async";
 import { PageHeader } from "@/components/AppLayout";
 import { Badge } from "@/components/ui/primitives";
 import { Card, CardContent } from "@/components/ui/card";
 import { Pagination } from "@/components/ui/pagination";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
-import { api } from "@/services/api";
+import { useQueue } from "@/queries/queries";
 
 function statusVariant(s: string) {
   if (s === "published") return "success" as const;
@@ -16,7 +15,7 @@ function statusVariant(s: string) {
 
 export function Queue() {
   const [page, setPage] = useState(1);
-  const q = useQuery({ queryKey: ["queue", page], queryFn: () => api.get<any>(`/api/queue?page=${page}&page_size=15`) });
+  const q = useQueue(page);
 
   return (
     <div>
@@ -28,7 +27,7 @@ export function Queue() {
         {(d) => (
           <div className="space-y-4">
             <div className="flex flex-wrap gap-2">
-              {Object.entries(d.counts || {}).map(([k, v]: any) => (
+              {Object.entries(d.counts || {}).map(([k, v]) => (
                 <Badge key={k} variant={statusVariant(k)}>{k}: {v}</Badge>
               ))}
               {Object.keys(d.counts || {}).length === 0 && (
@@ -44,7 +43,7 @@ export function Queue() {
                         <TR><TH>ID</TH><TH>Category</TH><TH>Channel</TH><TH>Status</TH><TH>Scheduled (UTC)</TH><TH>Tries</TH><TH>Note</TH></TR>
                       </THead>
                       <TBody>
-                        {d.items.map((r: any) => (
+                        {d.items.map((r) => (
                           <TR key={r.id}>
                             <TD>#{r.id}</TD>
                             <TD>{r.category ? <Badge variant="primary">{r.category}</Badge> : <span className="text-muted-foreground">#{r.post_id}</span>}</TD>

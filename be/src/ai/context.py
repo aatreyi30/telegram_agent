@@ -16,7 +16,6 @@ from src.db.models import Channel
 from src.db.models_competitor_intel import (
     COMPETITOR_INTEL_VERSION,
     CompetitorProfile,
-    CompetitorSignal,
 )
 from src.db.models_growth import GROWTH_VERSION, GrowthRecommendation, GrowthStrategy
 from src.db.models_intelligence import (
@@ -30,6 +29,7 @@ from src.db.models_learning import (
     LearningRecord,
     PostTypePerformance,
 )
+from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.models_reasoning import REASONING_VERSION, ReasonedInsight
 
 
@@ -85,6 +85,61 @@ def post_type_performance(s: Session) -> list[dict]:
                 .order_by(PostTypePerformance.rank_by_views_per_day))]
 
 
+def post_type_performance_range(s: Session, start, end) -> list[dict]:
+    """Same shape as `post_type_performance`, computed live from raw owned posts
+    within [start, end) instead of the last batch snapshot — lets the Insights
+    date-picker show performance for the selected window rather than always
+    whatever the last Channel Learning Engine run happened to cover."""
+    import statistics
+    from collections import defaultdict
+    from datetime import datetime, timezone
+
+    from src.db.models import Post
+    from src.db.models_normalization import NormalizedPost, SourceType
+
+    q = (
+        select(Post.posted_at, Post.views, NormalizedPost.is_multi_deal)
+        .select_from(Post)
+        .join(NormalizedPost, (NormalizedPost.source_id == Post.id)
+              & (NormalizedPost.source_type == SourceType.OWNED))
+    )
+    if start:
+        q = q.where(Post.posted_at >= start)
+    if end:
+        q = q.where(Post.posted_at < end)
+
+    def _type(is_multi: bool) -> str:
+        return "loot_deal" if is_multi else "single_deal"
+
+    now = datetime.now(timezone.utc)
+    groups: dict[str, list[tuple]] = defaultdict(list)
+    for posted_at, views, is_multi in s.execute(q).all():
+        groups[_type(is_multi)].append((posted_at, views))
+
+    total = sum(len(items) for items in groups.values())
+    if not total:
+        return []
+
+    out = []
+    for descriptor, items in groups.items():
+        vpd = []
+        for posted_at, views in items:
+            if views is None or posted_at is None:
+                continue
+            pa = posted_at if posted_at.tzinfo else posted_at.replace(tzinfo=timezone.utc)
+            age = max((now - pa).total_seconds() / 86400.0, 1.0)
+            vpd.append(views / age)
+        out.append({
+            "post_type": descriptor, "posts": len(items),
+            "share": round(len(items) / total, 3),
+            "avg_views_per_day": round(statistics.fmean(vpd), 1) if vpd else None,
+        })
+    out.sort(key=lambda r: (r["avg_views_per_day"] or -1), reverse=True)
+    for i, r in enumerate(out):
+        r["rank"] = i + 1
+    return out
+
+
 def learnings(s: Session) -> list[dict]:
     window = _owned_window_desc(s)
     out = []
@@ -95,7 +150,7 @@ def learnings(s: Session) -> list[dict]:
         if r.metric_value is not None and r.comparison_value:
             lift = (r.metric_value / r.comparison_value - 1) * 100
             how = (f"{r.metric_value:.1f} vs {r.comparison_value:.1f} {r.metric_name or 'views/day'} "
-                   f"= {lift:+.0f}% · n={r.sample_size:,} · {window} · age-normalized")
+                   f"= {lift:+.0f}% · n={r.sample_size:,} · {window}")
         out.append({"category": r.category, "statement": r.statement,
                     "confidence": r.confidence, "sample_size": r.sample_size,
                     "how_calculated": how, "period": window})
@@ -117,7 +172,7 @@ def channel_style(s: Session) -> dict:
 def merchant_profiles(s: Session) -> list[dict]:
     return [{"merchant": p.merchant_key, "posts": p.post_count_owned,
              "avg_views_per_day": p.avg_views_per_day, "price_median": p.price_median,
-             "confidence": p.confidence}
+             "price_sample_size": p.price_sample_size, "confidence": p.confidence}
             for p in s.scalars(select(MerchantProfile)
                 .where(MerchantProfile.intel_version == MERCHANT_INTEL_VERSION)
                 .order_by(MerchantProfile.post_count_owned.desc()))]
@@ -131,35 +186,318 @@ def merchant_opportunities(s: Session) -> list[dict]:
                 .order_by(MerchantOpportunity.confidence.desc()))]
 
 
-def competitor_signals(s: Session) -> list[dict]:
-    return [{"type": sig.signal_type, "competitor": sig.username, "kind": sig.kind,
-             "description": sig.description, "confidence": sig.confidence}
-            for sig in s.scalars(select(CompetitorSignal)
-                .where(CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION)
-                .order_by(CompetitorSignal.confidence.desc()))]
+def owned_merchant_coverage(s: Session) -> dict:
+    """Fraction of OWNED normalized posts that resolved to a known merchant."""
+    total = s.scalar(select(func.count()).select_from(NormalizedPost)
+                      .where(NormalizedPost.source_type == SourceType.OWNED)) or 0
+    resolved = s.scalar(select(func.count()).select_from(NormalizedPost)
+                         .where(NormalizedPost.source_type == SourceType.OWNED,
+                                NormalizedPost.primary_merchant_key.isnot(None))) or 0
+    return {"resolved": resolved, "total": total, "pct": (resolved / total) if total else 0.0}
+
+
+def merchant_mix(s: Session, owned_coverage_pct: float | None = None) -> dict:
+    """Us-vs-competitors merchant mix: each channel's share of its merchant-resolved
+    posts per merchant (shares sum to ~1.0 per channel)."""
+    channels: list[dict] = []
+
+    owned_counts = dict(s.execute(
+        select(NormalizedPost.primary_merchant_key, func.count(NormalizedPost.id))
+        .where(NormalizedPost.source_type == SourceType.OWNED,
+               NormalizedPost.primary_merchant_key.isnot(None))
+        .group_by(NormalizedPost.primary_merchant_key)
+    ).all())
+    owned_resolved = sum(owned_counts.values())
+    if owned_resolved:
+        channels.append({
+            "name": "You", "is_owned": True, "resolved_posts": owned_resolved,
+            "coverage_pct": owned_coverage_pct,
+            "shares": {k: v / owned_resolved for k, v in owned_counts.items()},
+        })
+
+    for p in s.scalars(select(CompetitorProfile)
+            .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)):
+        mix = p.merchant_mix or {}
+        resolved = sum(mix.values())
+        if not resolved:
+            continue
+        channels.append({
+            "name": p.username, "is_owned": False, "resolved_posts": resolved,
+            "coverage_pct": p.merchant_coverage,
+            "shares": {k: v / resolved for k, v in mix.items()},
+        })
+
+    owned_shares = next((c["shares"] for c in channels if c["is_owned"]), {})
+    all_merchants = {m for c in channels for m in c["shares"]}
+    # Only keep merchants with >=1% share in at least one channel (filter out one-off links)
+    significant = {m for m in all_merchants
+                   if any(c["shares"].get(m, 0) >= 0.01 for c in channels)}
+    merchants_sorted = sorted(significant, key=lambda m: -owned_shares.get(m, 0.0))
+
+    return {"merchants": merchants_sorted, "channels": channels}
 
 
 def competitor_profiles(s: Session) -> list[dict]:
-    return [{"competitor": p.username, "posts": p.post_count,
-             "similarity_to_us": p.similarity_to_owned,
-             "top_hour_ist": p.top_posting_hour_ist}
-            for p in s.scalars(select(CompetitorProfile)
-                .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-                .order_by(CompetitorProfile.post_count.desc()))]
+    return [{
+        "competitor": p.username, "posts": p.post_count, "span_days": p.span_days,
+        "posts_per_day": p.posts_per_day,
+        "avg_text_len": p.avg_text_len, "emoji_rate": p.emoji_rate,
+        "hashtag_rate": p.hashtag_rate, "cta_rate": p.cta_rate,
+        "coupon_rate": p.coupon_rate, "multi_deal_rate": p.multi_deal_rate,
+        "avg_links": p.avg_links, "media_rate": p.media_rate,
+        "avg_views": p.avg_views, "views_sample_size": p.views_sample_size,
+        "top_hour_ist": p.top_posting_hour_ist,
+        "weekday_distribution": p.weekday_distribution,
+        "hour_distribution_ist": p.hour_distribution_ist,
+        "deal_mix": p.deal_mix, "merchant_mix": p.merchant_mix,
+        "merchant_coverage": p.merchant_coverage,
+        "similarity_to_us": p.similarity_to_owned, "confidence": p.confidence,
+    } for p in s.scalars(select(CompetitorProfile)
+        .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
+        .order_by(CompetitorProfile.post_count.desc()))]
 
 
-def full_briefing_context(s: Session) -> dict:
+def full_briefing_context(s: Session, weekly: bool = False) -> dict:
     """Everything the briefing generator needs, as one grounded bundle."""
-    return {
+    out = {
         "channel": channel_overview(s),
         "what_changed_and_why": reasoning_insights(s),
         "growth_recommendations": growth_recommendations(s),
         "post_type_performance": post_type_performance(s),
-        "competitor_signals": competitor_signals(s),
         "merchant_opportunities": merchant_opportunities(s),
         "channel_style": channel_style(s),
     }
+    if weekly:
+        from datetime import date as _date
+
+        from src.services.analytics.daily_report import _owned_channel
+
+        traj = posting_trajectory(s, days=7)
+        week_start = _date.fromisoformat(traj["days"][0]["date"]) if traj["days"] else None
+        end_day = _date.fromisoformat(traj["days"][-1]["date"]) if traj["days"] else None
+        out["prev_week_digest"] = prev_week_digest(s, week_start) if week_start else None
+        ch = _owned_channel(s)
+        out["follower_deltas"] = (
+            follower_deltas_by_day(s, ch.id if ch else None, week_start, end_day)
+            if week_start and end_day else {}
+        )
+    return out
 
 
 def to_json(data: dict | list) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+_REPORT_NUMERIC = (
+    "posts_count", "deals_posted", "merchants_featured", "views_total",
+    "views_avg", "views_median", "views_max", "views_min",
+    "reactions_total", "forwards_total", "engagement_rate", "subs_net",
+)
+
+
+def _report_to_dict(r) -> dict:
+    return {
+        "report_date": r.report_date.isoformat() if r.report_date else None,
+        "source_type": r.source_type,
+        "posts_count": r.posts_count, "deals_posted": r.deals_posted,
+        "merchants_featured": r.merchants_featured,
+        "views_total": r.views_total, "views_avg": r.views_avg,
+        "views_median": r.views_median, "views_max": r.views_max, "views_min": r.views_min,
+        "reactions_total": r.reactions_total, "forwards_total": r.forwards_total,
+        "engagement_rate": r.engagement_rate,
+        "subs_start": r.subs_start, "subs_end": r.subs_end, "subs_net": r.subs_net,
+        "type_mix": r.type_mix, "category_mix": r.category_mix, "posting_hours": r.posting_hours,
+        "best_category": r.best_category, "worst_category": r.worst_category,
+        "data_completeness": r.data_completeness, "id": r.id,
+    }
+
+
+def daily_reports(s: Session, days: int = 8, source_type: str | None = None) -> list[dict]:
+    from src.db.models_report import DailyChannelReport, ReportSourceType
+    src_t = source_type or ReportSourceType.OWNED
+    rows = list(s.scalars(
+        select(DailyChannelReport)
+        .where(DailyChannelReport.source_type == src_t)
+        .order_by(DailyChannelReport.report_date.desc())
+        .limit(days)
+    ))
+    return [_report_to_dict(r) for r in rows]
+
+
+def report_baseline(s: Session, days: int = 30) -> dict:
+    rows = daily_reports(s, days=days)
+    if not rows:
+        return {}
+    out = {}
+    for k in _REPORT_NUMERIC:
+        vals = [r[k] for r in rows if r.get(k) is not None]
+        out[k] = round(sum(vals) / len(vals), 2) if vals else 0
+    return out
+
+
+def planning_context(s: Session) -> dict:
+    from src.db.models_report import ReportSourceType
+    return {
+        "channel": channel_overview(s),
+        "reports": daily_reports(s, days=8, source_type=ReportSourceType.OWNED),
+        "baseline": report_baseline(s, days=30),
+        "competitor_reports": daily_reports(s, days=8, source_type=ReportSourceType.COMPETITOR),
+        "channel_style": channel_style(s),
+        "post_type_performance": post_type_performance(s),
+    }
+
+
+def daily_report_or_live(s: Session, day) -> dict:
+    """Owned day-facts for ``day``: always computed live (avoids stale cached
+    reports). Always returns a dict; ``source`` is 'live' or 'none'."""
+    from src.services.analytics.daily_report import build_owned_report
+    live = build_owned_report(s, day)
+    d = _report_to_dict(live)
+    d["source"] = "live" if live.posts_count else "none"
+    return d
+
+
+def scheduled_count_today(s: Session, day=None) -> int:
+    """Count of `ScheduledPost` rows due on ``day`` (IST calendar date, defaulting
+    to the latest owned-post day) — i.e. what's actually queued to post that day,
+    as opposed to `posting_trajectory`'s purely historical cadence target.
+
+    `CANCELLED` rows are excluded (they were pulled from the plan); every other
+    status (queued/retry/sending/published/failed/blocked) still counts as "was
+    scheduled for that day" for reconciliation purposes against the recommended
+    cadence.
+    """
+    from src.db.models_automation import ScheduledPost, ScheduleStatus
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_day_bounds_utc
+
+    if day is None:
+        day = latest_owned_date(s)
+    if day is None:
+        return 0
+    start, end = ist_day_bounds_utc(day)
+    return s.scalar(
+        select(func.count()).select_from(ScheduledPost)
+        .where(ScheduledPost.scheduled_at >= start, ScheduledPost.scheduled_at < end,
+               ScheduledPost.status != ScheduleStatus.CANCELLED)
+    ) or 0
+
+
+def posting_trajectory(s: Session, days: int = 14, end_day=None) -> dict:
+    """Per-IST-day owned posting counts over the last ``days`` (ending at ``end_day``
+    or the latest owned day). Returns the day series plus ``recent_cadence`` (median
+    posts/day over ACTIVE days — the honest 'what you actually post') and the stale
+    ``lifetime_baseline`` from the growth blueprint, for contrast."""
+    from datetime import timedelta
+    from statistics import median
+
+    from src.db.models import Post
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.daily_report import _owned_channel
+    from src.services.analytics.periods import ist_day_bounds_utc, to_ist
+
+    if end_day is None:
+        end_day = latest_owned_date(s)
+    if end_day is None:
+        return {"days": [], "recent_cadence": 0, "lifetime_baseline": None}
+
+    first_day = end_day - timedelta(days=days - 1)
+    start_utc, _ = ist_day_bounds_utc(first_day)
+    _, end_utc = ist_day_bounds_utc(end_day)
+    ch = _owned_channel(s)
+    q = select(Post.posted_at, Post.views).where(
+        Post.posted_at >= start_utc, Post.posted_at < end_utc)
+    if ch is not None:
+        q = q.where(Post.channel_id == ch.id)
+
+    from collections import defaultdict
+    counts: dict = defaultdict(int)
+    view_sums: dict = defaultdict(float)
+    for posted_at, views in s.execute(q).all():
+        if posted_at is None:
+            continue
+        d = to_ist(posted_at).date()
+        counts[d] += 1
+        view_sums[d] += (views or 0)
+
+    series = []
+    for i in range(days):
+        d = first_day + timedelta(days=i)
+        n = counts.get(d, 0)
+        series.append({"date": d.isoformat(), "posts": n,
+                       "views_avg": round(view_sums[d] / n, 1) if n else 0.0})
+
+    active = [r["posts"] for r in series if r["posts"] > 0]
+    cadence = int(round(median(active))) if active else 0
+    bp = (growth_blueprint(s).get("blueprint") or {})
+    lifetime = bp.get("posting_frequency_baseline")
+    return {"days": series, "recent_cadence": cadence,
+            "lifetime_baseline": round(lifetime, 1) if lifetime else None}
+
+
+def clamp_recommended_posts(
+    candidate, recent_median: int, recent_max_30d: int | None = None
+) -> tuple[int, bool]:
+    """Safety-clamp the AI's own `recommended_posts` headline before it reaches a user.
+
+    `candidate=None`/unparseable is an AI-unavailable fallback, not a clamp event —
+    returns `recent_median` with `False` so the caller doesn't set `plan_clamped`.
+    Otherwise: floor of 1 while there's active recent cadence (never silently accept
+    0 unless `recent_median` itself is 0 — a genuine pause); ceiling of
+    `3 * recent_max_30d`, or `max(3 * recent_median, 5)` when `recent_max_30d` is
+    unavailable/zero.
+    """
+    if candidate is None:
+        return int(recent_median or 0), False
+    try:
+        value = int(round(float(candidate)))
+    except (TypeError, ValueError):
+        return int(recent_median or 0), False
+
+    floor = 1 if recent_median and recent_median > 0 else 0
+    ceiling = 3 * recent_max_30d if recent_max_30d else max(3 * (recent_median or 0), 5)
+
+    clamped = min(max(value, floor), ceiling)
+    return clamped, clamped != value
+
+
+def prev_week_digest(s: Session, week_start) -> str | None:
+    """Previous week's AI narrative: the WEEKLY `CampaignPlan` whose `end_date` falls
+    immediately before `week_start`, so this week's briefing can build on it instead
+    of restating from scratch. `None` when absent or not AI-generated."""
+    from datetime import timedelta
+
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+
+    prev_end = week_start - timedelta(days=1)
+    wk = s.scalar(
+        select(CampaignPlan)
+        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+               CampaignPlan.plan_type == PlanType.WEEKLY,
+               CampaignPlan.end_date == prev_end)
+        .order_by(CampaignPlan.generated_at.desc())
+    )
+    if wk and wk.is_ai_generated and wk.ai_digest:
+        return wk.ai_digest
+    return None
+
+
+def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_day) -> dict[str, dict]:
+    """Per-IST-day joined/left/net follower counts for `channel_id` over
+    [start_day, end_day], keyed by ISO date — drops in alongside `posting_trajectory`'s
+    day series for the weekly view. Days with no `DailySubscriberStat` row are simply
+    absent from the result (the caller decides the gap-fill default)."""
+    from src.db.models_growth_snapshot import DailySubscriberStat
+
+    if channel_id is None:
+        return {}
+    rows = s.scalars(
+        select(DailySubscriberStat)
+        .where(DailySubscriberStat.channel_id == channel_id,
+               DailySubscriberStat.stat_date >= start_day,
+               DailySubscriberStat.stat_date <= end_day)
+    ).all()
+    return {r.stat_date.isoformat(): {"joined": r.subs_joined or 0,
+                                       "left": r.subs_left or 0,
+                                       "net": r.subs_net or 0}
+            for r in rows}

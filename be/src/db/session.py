@@ -73,11 +73,19 @@ def init_db() -> None:
     from src.db import models_reasoning  # noqa: F401  (Phase 8 tables)
     from src.db import models_generation  # noqa: F401  (Phase 9 tables)
     from src.db import models_campaign  # noqa: F401  (Phase 10 tables)
+    from src.db import models_report  # noqa: F401  (daily aggregate report rows)
     from src.db import models_automation  # noqa: F401  (Phase 11 tables)
     from src.db import models_scheduler  # noqa: F401  (scheduler run logs)
 
     Base.metadata.create_all(get_engine())
     # create_all does not ALTER existing tables; add columns introduced after first run.
-    from src.db.migrate import add_missing_columns, backfill_channel_id
+    from src.db.migrate import (
+        add_missing_columns,
+        backfill_channel_id,
+        dedupe_and_index_campaign_plans,
+        drop_removed_tables,
+    )
     add_missing_columns(get_engine())
     backfill_channel_id(get_engine())  # attribute pre-multi-tenancy derived rows to a channel
+    drop_removed_tables(get_engine())  # drop tables whose ORM model no longer exists
+    dedupe_and_index_campaign_plans(get_engine())  # backstop the daily/weekly AI-plan cache race

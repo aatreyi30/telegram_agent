@@ -70,7 +70,7 @@ def delete_channel(channel_id: int, confirm: bool = False, org_id: int | None = 
     rows, classifications, extracted facts). Destructive + irreversible, so a preview
     is returned unless confirm=True. Deletes in FK-dependency order via subqueries
     (no large IN-lists, so it's safe for channels with many posts)."""
-    from src.db.models import ChannelStatSnapshot, PostMetricSnapshot
+    from src.db.models import PostMetricSnapshot
     from src.db.models_classification import PostClassification
     from src.db.models_normalization import (
         ExtractedCoupon, ExtractedLink, ExtractedPrice, NormalizedPost, SourceType)
@@ -112,8 +112,6 @@ def delete_channel(channel_id: int, confirm: bool = False, org_id: int | None = 
             NormalizedPost.source_id.in_(post_ids)).delete(synchronize_session=False)
         s.query(PostMetricSnapshot).filter(
             PostMetricSnapshot.post_id.in_(post_ids)).delete(synchronize_session=False)
-        s.query(ChannelStatSnapshot).filter(
-            ChannelStatSnapshot.channel_id == channel_id).delete(synchronize_session=False)
         s.query(Post).filter(Post.channel_id == channel_id).delete(synchronize_session=False)
         s.delete(ch)
         return {"ok": True, "deleted": counts}
@@ -143,6 +141,9 @@ def overview() -> dict:
         drafts = s.scalar(select(func.count()).select_from(GeneratedPost)
                           .where(GeneratedPost.status == PostStatus.DRAFT)) or 0
         ch = ctx.channel_overview(s)
+        owned = s.scalars(select(Channel).where(Channel.kind == "owned")
+                          .order_by(Channel.participants_count.desc())).first()
+        can_view_stats = bool(owned.can_view_stats) if owned else False
         queue_counts = dict(s.execute(
             select(ScheduledPost.status, func.count()).group_by(ScheduledPost.status)).all())
     return {
@@ -152,12 +153,17 @@ def overview() -> dict:
         "drafts": drafts,
         "queue_counts": queue_counts,
         "affiliate_provider": s_.affiliate_provider_name,
-        "publishing_gates": _publishing_gates(s_, queue_counts),
+        "publishing_gates": _publishing_gates(s_, queue_counts, can_view_stats),
     }
 
 
-def _publishing_gates(settings, queue_counts: dict) -> list[dict]:
-    """Plain-language status of what still stands between drafts and a live post."""
+def _publishing_gates(settings, queue_counts: dict, can_view_stats: bool) -> list[dict]:
+    """Plain-language status of what still stands between drafts and a live post.
+
+    ``can_view_stats`` reflects the real Channel.can_view_stats flag (set when a
+    collection cycle successfully calls the admin-only stats API) rather than a
+    fixed assumption, since it also determines whether follower-graph / notification
+    stats are ever populated."""
     affiliate_closed = settings.affiliate_provider_name != "generic"
     blocked = queue_counts.get(ScheduleStatus.BLOCKED, 0)
     return [
@@ -167,9 +173,10 @@ def _publishing_gates(settings, queue_counts: dict) -> list[dict]:
                     "short links." if affiliate_closed
                     else "No provider configured — links are untracked.")},
         {"name": "Channel admin rights",
-         "ok": False,
-         "detail": ("The account must be an admin with post rights on the channel. It is currently "
-                    "a member, so sends return BLOCKED"
+         "ok": can_view_stats,
+         "detail": ("Admin stats access confirmed on the last collection cycle." if can_view_stats
+                    else "The account must be an admin with post/stats rights on the channel. It is "
+                    "currently a member, so sends return BLOCKED"
                     + (f" ({blocked} in queue)." if blocked else "."))},
     ]
 
@@ -180,8 +187,9 @@ def top_actions(limit: int = 5) -> list[dict]:
     return recs
 
 
-def insights() -> dict:
+def insights(start: str | None = None, end: str | None = None) -> dict:
     from src.services.generation.strategy import PostingStrategy
+    from src.services.intelligence.growth import content_mix_from_rows
 
     with session_scope() as s:
         strat = PostingStrategy.load(s)
@@ -193,12 +201,22 @@ def insights() -> dict:
                        "sample": r.sample} for r in strat.emoji_rules],
             "window": strat.window_desc,
         }
+        blueprint = ctx.growth_blueprint(s)
+        date_filtered = bool(start or end)
+        if date_filtered:
+            su, eu = _ist_range_to_utc(start, end)
+            performance = ctx.post_type_performance_range(s, su, eu)
+            content_mix = content_mix_from_rows(performance)
+        else:
+            performance = ctx.post_type_performance(s)
+            content_mix = (blueprint.get("blueprint") or {}).get("content_mix")
         return {
             "recommendations": ctx.growth_recommendations(s, limit=20),
             "reasoning": ctx.reasoning_insights(s),
-            "learnings": ctx.learnings(s),
-            "performance": ctx.post_type_performance(s),
-            "blueprint": ctx.growth_blueprint(s),
+            "performance": performance,
+            "content_mix": content_mix,
+            "date_filtered": date_filtered,
+            "blueprint": blueprint,
             "style": ctx.channel_style(s),
             "emoji_policy": emoji_policy,
         }
@@ -208,16 +226,106 @@ def competitors() -> dict:
     with session_scope() as s:
         return {
             "profiles": ctx.competitor_profiles(s),
-            "signals": ctx.competitor_signals(s),
         }
 
 
-def merchants() -> dict:
+def competitor_dashboard(window_days: int | None = None) -> dict:
+    """Unified competitor dashboard — profiles + benchmarks, grouped by category.
+
+    ``window_days`` when set filters basic stats to the last N days (like comparison).
+    """
+    from src.services.analytics import comparison as cmp
+    from src.db.models_competitor_intel import (
+        CompetitorProfile, CompetitorBenchmark,
+        COMPETITOR_INTEL_VERSION,
+    )
+
     with session_scope() as s:
-        return {
-            "profiles": ctx.merchant_profiles(s),
-            "opportunities": ctx.merchant_opportunities(s),
+        # comparison data (owned + competitors with profiles)
+        comp = cmp.compare(s, window_days=window_days)
+        entities = comp.get("entities", [])
+
+        # raw DB rows for category + benchmark access
+        competitors_raw = {
+            c.id: c for c in s.scalars(select(Competitor)).all()
         }
+        profiles_raw = {
+            p.competitor_id: p for p in s.scalars(
+                select(CompetitorProfile).where(
+                    CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
+            ).all()
+        }
+
+        # group entities by category
+        platform_ents = []
+        channel_ents = []
+        for e in entities:
+            if e.get("is_owned"):
+                continue
+            # find category from DB
+            cid = None
+            for _cid, c in competitors_raw.items():
+                if c.username == e.get("name"):
+                    cid = _cid
+                    break
+            cat = competitors_raw[cid].category if cid and cid in competitors_raw else None
+            e["category"] = cat or "unclassified"
+            if cat == "platform":
+                platform_ents.append(e)
+            else:
+                channel_ents.append(e)
+
+        unavailable = comp.get("unavailable", [])
+        note = comp.get("note", "")
+        metrics = comp.get("metrics", [])
+
+        return {
+            "summary": {
+                "total": len(entities) - 1,  # exclude owned
+                "platform": len(platform_ents),
+                "channel": len(channel_ents),
+            },
+            "platform": platform_ents,
+            "channel": channel_ents,
+            "unavailable": unavailable,
+            "note": note,
+            "metrics": metrics,
+            "applied_window": window_days,
+        }
+
+
+def competitor_trends(competitor_id: int, days: int = 30) -> dict:
+    """Per-competitor daily trend charts (posting, views, merchant mix, etc)."""
+    from src.services.analytics import competitor_trends as ct
+
+    with session_scope() as s:
+        if s.get(Competitor, competitor_id) is None:
+            return {"ok": False, "error": "Competitor not found"}
+        return ct.all_trends(s, competitor_id, days=days)
+
+
+_COMPETITOR_CATEGORIES = ("platform", "channel")
+
+
+def create_competitor_record(username: str, category: str) -> dict:
+    """Fast half of manually adding a competitor: validate + insert only, so the
+    HTTP response doesn't block on the slow pipeline (see run_onboarding_pipeline).
+    Idempotent on a duplicate username — returns the existing row instead of
+    raising (see onboarding.insert_competitor)."""
+    from src.services.collection.onboarding import insert_competitor
+
+    if category not in _COMPETITOR_CATEGORIES:
+        raise ValueError(f"category must be one of {_COMPETITOR_CATEGORIES}")
+    return insert_competitor(username, category)
+
+
+def run_onboarding_pipeline(username: str) -> None:
+    """Slow half: run an already-inserted competitor through the existing
+    collection -> link resolution -> normalization -> intelligence pipeline.
+    Meant to be scheduled as a FastAPI BackgroundTask after create_competitor_record."""
+    from src.services.collection.onboarding import run_pipeline
+
+    run_pipeline(username)
 
 
 def plans() -> list[dict]:
@@ -227,8 +335,31 @@ def plans() -> list[dict]:
                          .order_by(CampaignPlan.plan_type)).all()
         return [{"plan_type": p.plan_type, "title": p.title,
                  "target_date": p.target_date.isoformat() if p.target_date else None,
+                 "end_date": p.end_date.isoformat() if p.end_date else None,
                  "confidence": p.confidence, "blueprint": p.blueprint,
-                 "expected_outcome": p.expected_outcome, "risks": p.risks} for p in rows]
+                 "expected_outcome": p.expected_outcome, "risks": p.risks,
+                 "evidence": p.evidence} for p in rows]
+
+
+def digest() -> dict:
+    from src.db.models_campaign import CampaignPlan, PlanType
+    with session_scope() as s:
+        p = s.scalars(
+            select(CampaignPlan)
+            .where(CampaignPlan.plan_type == PlanType.DAILY, CampaignPlan.is_ai_generated == True)  # noqa: E712
+            .order_by(CampaignPlan.generated_at.desc())
+        ).first()
+        if p is None:
+            return {"available": False, "digest": "", "plan": None,
+                    "factcheck_status": None, "reconciliation": None, "generated_at": None}
+        return {
+            "available": True,
+            "digest": p.ai_digest or "",
+            "plan": p.blueprint,
+            "factcheck_status": p.factcheck_status,
+            "reconciliation": p.reconciliation,
+            "generated_at": p.generated_at.isoformat() if p.generated_at else None,
+        }
 
 
 def _page_meta(total: int, page: int, page_size: int) -> dict:
@@ -264,6 +395,60 @@ def drafts(page: int = 1, page_size: int = 12) -> dict:
         return {"items": items, **_page_meta(total, page, page_size)}
 
 
+def create_draft(*, text: str, post_type: str = "manual",
+                 selection_bucket: str | None = None,
+                 channel_ref: str | None = None) -> dict:
+    from datetime import datetime, timezone
+    with session_scope() as s:
+        post = GeneratedPost(
+            generated_at=datetime.now(timezone.utc),
+            post_type=post_type,
+            selection_bucket=selection_bucket,
+            deal_ids=[],
+            rendered_text=text,
+            channel_ref=channel_ref,
+            status=PostStatus.DRAFT,
+        )
+        s.add(post)
+        s.flush()
+        return {"id": post.id, "status": post.status}
+
+
+def update_draft(draft_id: int, *, text: str | None = None,
+                 post_type: str | None = None,
+                 status: str | None = None,
+                 selection_bucket: str | None = None,
+                 channel_ref: str | None = None) -> dict:
+    with session_scope() as s:
+        post = s.get(GeneratedPost, draft_id)
+        if not post:
+            return {"ok": False, "error": "Draft not found"}
+        if text is not None:
+            post.rendered_text = text
+        if post_type is not None:
+            post.post_type = post_type
+        if status is not None:
+            post.status = status
+        if selection_bucket is not None:
+            post.selection_bucket = selection_bucket
+        if channel_ref is not None:
+            post.channel_ref = channel_ref
+        s.flush()
+        return {"ok": True, "id": post.id, "post_type": post.post_type,
+                "selection_bucket": post.selection_bucket, "status": post.status,
+                "channel_ref": post.channel_ref, "text": post.rendered_text}
+
+
+def delete_draft(draft_id: int) -> dict:
+    with session_scope() as s:
+        post = s.get(GeneratedPost, draft_id)
+        if not post:
+            return {"ok": False, "error": "Draft not found"}
+        s.delete(post)
+        s.flush()
+        return {"ok": True, "deleted_id": draft_id}
+
+
 def posts(page: int = 1, page_size: int = 20) -> dict:
     """Paginated raw post feed (most recent first) with views + preview."""
     page, page_size, offset = _clamp_page(page, page_size)
@@ -280,9 +465,9 @@ def posts(page: int = 1, page_size: int = 20) -> dict:
 
 def _ist_range_to_utc(start_date, end_date):
     """IST calendar dates (ISO strings/dates) -> [start_utc, end_utc) datetimes."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
-    from src.services.analytics.periods import IST
+    from src.services.analytics.periods import ist_day_bounds_utc
 
     def _d(v):
         if not v:
@@ -290,8 +475,8 @@ def _ist_range_to_utc(start_date, end_date):
         return v if hasattr(v, "year") else datetime.fromisoformat(v).date()
 
     sd, ed = _d(start_date), _d(end_date)
-    start = datetime(sd.year, sd.month, sd.day, tzinfo=IST) if sd else None
-    end = (datetime(ed.year, ed.month, ed.day, tzinfo=IST) + timedelta(days=1)) if ed else None
+    start = ist_day_bounds_utc(sd)[0] if sd else None
+    end = ist_day_bounds_utc(ed)[1] if ed else None
     return start, end
 
 
@@ -305,28 +490,29 @@ def analytics(start=None, end=None) -> dict:
 
 def data_range() -> dict:
     """Min/max IST post dates so the UI can bound its date pickers."""
-    from src.services.analytics.periods import IST, owned_window
+    from src.services.analytics.periods import owned_window, to_ist
 
     with session_scope() as s:
         w = owned_window(s)
     return {
-        "min": w["start"].astimezone(IST).date().isoformat() if w.get("start") else None,
-        "max": w["end"].astimezone(IST).date().isoformat() if w.get("end") else None,
+        "min": to_ist(w["start"]).date().isoformat() if w.get("start") else None,
+        "max": to_ist(w["end"]).date().isoformat() if w.get("end") else None,
     }
 
 
-def day_summary(day=None) -> dict:
+def day_summary(day=None, end=None) -> dict:
     from src.services.analytics import day as dd
 
     with session_scope() as s:
-        return dd.summarize(s, day)
+        return dd.summarize(s, day, end)
 
 
-def comparison() -> dict:
-    from src.services.analytics import comparison as cmp
+def growth(start: str | None = None, end: str | None = None) -> dict:
+    from src.services.analytics import growth as gw
 
+    su, eu = _ist_range_to_utc(start, end)
     with session_scope() as s:
-        return cmp.compare(s)
+        return gw.get_growth(s, su, eu)
 
 
 def weekly_report(include_ai: bool = True) -> dict:
@@ -361,6 +547,304 @@ def weekly_report(include_ai: bool = True) -> dict:
 
     return {"available": weekly is not None, "weekly_plan": weekly,
             "what_changed": reasoning, "recommendations": recs, "ai_summary": ai_summary}
+
+
+def _plan_date_bounds(s):
+    from src.services.analytics.periods import owned_window, to_ist
+    w = owned_window(s)
+    mn = to_ist(w["start"]).date() if w.get("start") else None
+    mx = to_ist(w["end"]).date() if w.get("end") else None
+    return mn, mx
+
+
+def _today_details(s, recommended_posts: int):
+    """Deterministic 'today' details (posting windows, deal-type allocation, merchant
+    mix, risks) sized to ``recommended_posts``, reusing the campaign engine's pure
+    helpers so the plan stays consistent with the recommended cadence."""
+    from datetime import datetime, timezone
+    from src.services.planning.campaign import CampaignPlanningEngine
+
+    bp = (ctx.growth_blueprint(s).get("blueprint") or {})
+    eng = CampaignPlanningEngine()
+    now = datetime.now(timezone.utc)
+    recent = eng._recent_distribution(s, now)
+    # The blueprint's posting_plan is sized to the stale baseline, so use it only for
+    # the RELATIVE shape and rescale each window to the recommended cadence — otherwise
+    # the per-window posts sum to ~18 while the headline says ~50.
+    raw = bp.get("posting_plan") or []
+    raw_sum = sum((p.get("recommended_posts_per_day") or 0) for p in raw) or 1
+    windows = [{"part": p.get("part"), "hours": p.get("hours"),
+                "posts": round((p.get("recommended_posts_per_day") or 0) * recommended_posts / raw_sum),
+                # historical day-part performance, when known — lets the AI cite a real
+                # number for WHY this window instead of generic "peak hours" filler.
+                "avg_views_per_day": p.get("avg_views_per_day")}
+               for p in raw]
+    allocation = eng._allocate_posts(bp, recommended_posts)
+    merchants = eng._merchant_allocation(s, recent, now)
+    risks = eng._risks(recent, recommended_posts)
+    return windows, allocation, merchants, (risks or None)
+
+
+def daily_brief(date: str | None = None) -> dict:
+    """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
+    recommendation grounded in the recent posting trajectory (not the stale lifetime
+    baseline). AI writes the narrative + slots best-effort; the numbers are
+    deterministic and fact-checked.
+
+    The AI-authored part (digest + slots) is cached per (day, campaign version) as a
+    `CampaignPlan` row: the first request for a given day calls the model and persists
+    the result; every subsequent request for that SAME day reuses the stored row
+    instead of re-calling the AI. A request for a different day always plans fresh."""
+    from datetime import date as date_cls, timedelta
+    from src.services.analytics.day import latest_owned_date
+    from src.services.planning.calendar import upcoming_events
+    from src.ai.planner import generate_day_plan
+    from src.ai.factcheck import check_cited_numbers
+    from src.db.models_campaign import PlanType
+    from src.services.generation.ai_execution import persist_ai_plan
+
+    with session_scope() as s:
+        mn, mx = _plan_date_bounds(s)
+        day = None
+        if date:
+            try:
+                day = date_cls.fromisoformat(date)
+            except ValueError:
+                day = None
+        if day is None:
+            day = latest_owned_date(s)
+        if day is None:
+            return {"available": False, "reason": "No owned posts yet."}
+        prev = day - timedelta(days=1)
+
+        yesterday = ctx.daily_report_or_live(s, prev)
+        traj = ctx.posting_trajectory(s, days=14, end_day=prev)
+        recommended = traj["recent_cadence"]
+        traj30 = ctx.posting_trajectory(s, days=30, end_day=prev)
+        recent_max_30d = max((d["posts"] for d in traj30["days"]), default=0)
+        windows, allocation, merchants, risks = _today_details(s, recommended)
+        scheduled_count = ctx.scheduled_count_today(s, day)
+        gap = max(recommended - scheduled_count, 0)
+
+        evt = None
+        try:
+            evs = upcoming_events(s, day, within_days=14)
+            if evs:
+                e = evs[0]
+                evt = {"name": e.name, "days_away": (e.next_date - day).days,
+                       "date_confidence": e.date_confidence}
+        except Exception:
+            evt = None
+
+        active = [d["posts"] for d in traj["days"] if d["posts"] > 0]
+        lo, hi = (min(active), max(active)) if active else (0, 0)
+        det_why = (
+            f"Your last {len(active)} active days ran ~{recommended} posts/day "
+            f"(range {lo}–{hi}); holding ~{recommended} matches that pace."
+            + (f" The old {traj['lifetime_baseline']}/day baseline is a lifetime average "
+               "dragged down by early low-activity days — don't plan against it."
+               if traj.get("lifetime_baseline") else "")
+        )
+
+        cached = s.scalars(
+            select(CampaignPlan)
+            .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                   CampaignPlan.plan_type == PlanType.DAILY,
+                   CampaignPlan.target_date == day,
+                   CampaignPlan.is_ai_generated == True)  # noqa: E712
+            .order_by(CampaignPlan.generated_at.desc())
+        ).first()
+
+        if cached is not None:
+            # Same-day repeat request — reuse the persisted AI plan instead of
+            # burning another model call. Shape matches a fresh generation below.
+            ai_ok = True
+            plan = cached.blueprint or {}
+            digest = cached.ai_digest or ""
+            fc_status = "pass" if cached.factcheck_status == "passed" else "warn"
+        else:
+            ai_res = generate_day_plan(s, day, inputs={
+                "recommended_posts": recommended,
+                "posting_windows": windows,
+                "deal_type_allocation": allocation,
+                "merchant_allocation": merchants,
+                "upcoming_event": evt,
+            })
+            ai_ok = bool(ai_res.get("available"))
+            plan = ai_res.get("plan") or {}
+            digest = ai_res.get("digest", "") if ai_ok else ""
+            fc_status = None
+            if ai_ok:
+                fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
+                fc_status = "pass" if fc["status"] == "passed" else "warn"
+                row = persist_ai_plan(s, {**ai_res, "factcheck": fc})
+                if row is not None:
+                    # Pin the cache key to the day we actually planned for — the
+                    # AI's self-reported "date" inside the plan JSON isn't reliable
+                    # enough (missing/mismatched) to key the cache lookup on.
+                    row.target_date = day
+
+        if ai_ok and plan.get("recommended_posts") is not None:
+            recommended_final, was_clamped = ctx.clamp_recommended_posts(
+                plan.get("recommended_posts"), recommended, recent_max_30d)
+            ai_why = plan.get("cadence_why")
+            cadence_why = ai_why if (not was_clamped and ai_why) else det_why
+        else:
+            recommended_final, was_clamped = recommended, False
+            cadence_why = det_why
+        slots = plan.get("post_slots", []) if ai_ok else []
+        emphasis = plan.get("emphasis") if ai_ok else None
+        watch = plan.get("watch") if ai_ok else None
+
+        return {
+            "available": True,
+            "date": day.isoformat(), "prev_date": prev.isoformat(),
+            "min_date": mn.isoformat() if mn else None,
+            "max_date": mx.isoformat() if mx else None,
+            "yesterday": yesterday,
+            "trajectory": {"days": traj["days"], "recent_cadence": recommended,
+                           "lifetime_baseline": traj["lifetime_baseline"]},
+            "today": {
+                "recommended_posts": recommended_final,
+                "cadence_why": cadence_why,
+                "posting_windows": windows,
+                "deal_type_allocation": allocation,
+                "merchant_allocation": merchants,
+                "slots": slots,
+                "emphasis": emphasis, "watch": watch,
+                "risks": risks,
+                "confidence": round(min(1.0, len(active) / 14), 3),
+                "scheduled_count": scheduled_count,
+                "gap": gap,
+                "plan_clamped": was_clamped,
+            },
+            "digest": digest,
+            "factcheck_status": fc_status,
+            "ai_available": ai_ok,
+            "upcoming_event": evt,
+        }
+
+
+def weekly_brief(end: str | None = None) -> dict:
+    """The weekly view: last 7 days of actual posting + this week's themes + an AI
+    weekly narrative (best-effort).
+
+    The week is a real IST calendar week (Monday->Sunday) containing whichever
+    date is requested (or today, if none) — NOT a trailing 7-day window ending at
+    an arbitrary date. This gives the week a stable identity: viewing any day
+    inside the same week always resolves to the same `CampaignPlan` row, so the
+    AI-authored digest is generated once per calendar week and reused, the same
+    caching contract `daily_brief()` already has. A row's `is_ai_generated`/
+    `ai_digest` being unset is literally the "no digest yet, call the AI" tag —
+    once set, every later request for that week reuses it, no matter how many
+    times the page is reopened."""
+    from datetime import date as date_cls, timedelta
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.daily_report import _owned_channel
+    from src.services.planning.calendar import upcoming_events
+    from src.services.planning.campaign import CampaignPlanningEngine
+    from src.services.generation.ai_execution import persist_weekly_plan
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+
+    with session_scope() as s:
+        anchor = None
+        if end:
+            try:
+                anchor = date_cls.fromisoformat(end)
+            except ValueError:
+                anchor = None
+        if anchor is None:
+            anchor = latest_owned_date(s)
+        if anchor is None:
+            return {"available": False, "reason": "No owned posts yet."}
+
+        # Monday->Sunday IST calendar week containing `anchor`.
+        week_start = anchor - timedelta(days=anchor.weekday())
+        week_end = week_start + timedelta(days=6)
+
+        traj = ctx.posting_trajectory(s, days=7, end_day=week_end)
+        ch = _owned_channel(s)
+        deltas = ctx.follower_deltas_by_day(s, ch.id if ch else None, week_start, week_end)
+        days = [{"date": d["date"],
+                 "weekday": date_cls.fromisoformat(d["date"]).strftime("%a"),
+                 "posts": d["posts"], "views_avg": d["views_avg"],
+                 **(deltas.get(d["date"]) or {"joined": 0, "left": 0, "net": 0})}
+                for d in traj["days"]]
+        posts_total = sum(d["posts"] for d in traj["days"])
+        views_total = round(sum(d["posts"] * d["views_avg"] for d in traj["days"]))
+        totals = {"posts": posts_total, "views_total": views_total,
+                  "avg_posts_per_day": round(posts_total / 7, 1)}
+
+        wk = s.scalar(select(CampaignPlan)
+                      .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                             CampaignPlan.plan_type == PlanType.WEEKLY,
+                             CampaignPlan.target_date == week_start)
+                      .order_by(CampaignPlan.generated_at.desc()))
+
+        evs_out = []
+        try:
+            for e in upcoming_events(s, week_end, within_days=30)[:3]:
+                evs_out.append({"name": e.name, "date": e.next_date.isoformat(),
+                                "days_away": (e.next_date - week_end).days,
+                                "date_confidence": e.date_confidence})
+        except Exception:
+            pass
+
+        if wk is not None and wk.is_ai_generated and wk.ai_digest:
+            # Already generated + persisted for this calendar week — reuse it
+            # instead of burning a Groq call on every page view (same idea as the
+            # daily cache in daily_brief()).
+            ai_summary, ai_ok = wk.ai_digest, True
+            themes = (wk.blueprint or {}).get("daily_themes") or []
+        else:
+            # No cached digest for this exact week (either never generated, or a
+            # prior attempt didn't get a usable AI response) — compute the
+            # deterministic blueprint fresh (cheap, and doesn't depend on
+            # CampaignPlanningEngine's Monday cron ever having run) and try AI once.
+            bp_growth = (ctx.growth_blueprint(s).get("blueprint") or {})
+            perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
+                    for p in ctx.post_type_performance(s)}
+            try:
+                events = upcoming_events(s, week_start, within_days=30)
+            except Exception:
+                events = []
+            event_data = [{"name": e.name, "next_date": e.next_date,
+                           "days_away": (e.next_date - week_start).days,
+                           "date_confidence": e.date_confidence} for e in events]
+            blueprint = CampaignPlanningEngine()._weekly_plan(
+                bp_growth, perf, week_start, event_data)["blueprint"]
+            themes = blueprint.get("daily_themes") or []
+
+            ai_summary, ai_ok = "", False
+            try:
+                from src.ai.briefing import BriefingGenerator
+                from src.ai.client import AIUnavailable
+                try:
+                    ai_summary = BriefingGenerator().generate(weekly=True) or ""
+                    ai_ok = bool(ai_summary)
+                except AIUnavailable:
+                    ai_summary = ""
+            except Exception:
+                ai_summary = ""
+
+            if wk is not None:
+                # Row already exists for this week (e.g. blueprint-only from a
+                # legitimate CampaignPlanningEngine run) — update it in place, no
+                # new insert, no race risk.
+                wk.blueprint = blueprint
+                if ai_ok:
+                    wk.ai_digest = ai_summary
+                    wk.is_ai_generated = True
+            else:
+                persist_weekly_plan(s, week_start, week_end, blueprint,
+                                     digest=ai_summary, is_ai_generated=ai_ok)
+
+        return {"available": True,
+                "week_start": week_start.isoformat(),
+                "week_end": week_end.isoformat(),
+                "days": days, "totals": totals, "themes": themes,
+                "recommended_posts_per_day": traj["recent_cadence"],
+                "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok}
 
 
 def queue(page: int = 1, page_size: int = 20) -> dict:

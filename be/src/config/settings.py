@@ -68,7 +68,7 @@ class Settings:
     # --- Competitor monitoring (t.me/s) ---
     competitor_channels_raw: str | None = None
     tme_request_delay_seconds: float = 2.0
-    tme_user_agent: str = "Mozilla/5.0 (compatible; TGIntelBot/1.0)"
+    tme_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     # --- Merchant enrichment (buildable merchants only) ---
     amazon_associate_tag: str | None = None
@@ -112,6 +112,8 @@ class Settings:
     owned_analytics_interval_min: int = 60
     competitor_interval_min: int = 60
     merchant_refresh_interval_min: int = 360
+    link_resolve_interval_min: int = 60
+    link_resolve_concurrency: int = 200
     metric_snapshot_offsets_raw: str = "1,4,24"
 
     # --- AI layer (Groq — OpenAI-compatible) ---
@@ -143,7 +145,7 @@ class Settings:
             owned_channels_raw=_get("OWNED_CHANNELS"),
             competitor_channels_raw=_get("COMPETITOR_CHANNELS"),
             tme_request_delay_seconds=_get_float("TME_REQUEST_DELAY_SECONDS", 2.0),
-            tme_user_agent=_get("TME_USER_AGENT", "Mozilla/5.0 (compatible; TGIntelBot/1.0)"),
+            tme_user_agent=_get("TME_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
             amazon_associate_tag=_get("AMAZON_ASSOCIATE_TAG"),
             amazon_creators_access_key=_get("AMAZON_CREATORS_ACCESS_KEY"),
             amazon_creators_secret_key=_get("AMAZON_CREATORS_SECRET_KEY"),
@@ -172,6 +174,8 @@ class Settings:
             owned_analytics_interval_min=_get_int("OWNED_ANALYTICS_INTERVAL_MIN", 60),
             competitor_interval_min=_get_int("COMPETITOR_INTERVAL_MIN", 60),
             merchant_refresh_interval_min=_get_int("MERCHANT_REFRESH_INTERVAL_MIN", 360),
+            link_resolve_interval_min=_get_int("LINK_RESOLVE_INTERVAL_MIN", 60),
+            link_resolve_concurrency=_get_int("LINK_RESOLVE_CONCURRENCY", 200),
             metric_snapshot_offsets_raw=_get("METRIC_SNAPSHOT_OFFSETS_HOURS", "1,4,24"),
             log_level=_get("LOG_LEVEL", "INFO"),
         )

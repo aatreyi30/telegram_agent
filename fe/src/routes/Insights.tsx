@@ -1,13 +1,45 @@
-import { useQuery } from "@tanstack/react-query";
 import { Async } from "@/components/Async";
 import { PageHeader } from "@/components/AppLayout";
+import { CalloutCard } from "@/components/CalloutCard";
+import { BarsChart } from "@/components/charts";
 import { Badge } from "@/components/ui/primitives";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
-import { api } from "@/services/api";
+import { useInsights } from "@/queries/queries";
+
+// The blueprint's `blueprint` field is a loosely-typed Record<string, unknown> on
+// the wire (its shape varies by mode/channel-type); `content_mix` is the one part
+// of it this page renders, so it's typed narrowly here rather than in api.ts.
+interface ContentMixRow {
+  post_type: string;
+  current_share: number | null;
+  avg_views_per_day: number | null;
+  action: "increase" | "maintain" | "decrease" | string;
+}
+
+const ACTION_BADGE: Record<string, "success" | "warning" | "default"> = {
+  increase: "success",
+  decrease: "warning",
+  maintain: "default",
+};
+
+function EvidenceList({ evidence }: { evidence: Record<string, unknown> | null | undefined }) {
+  const entries = Object.entries(evidence || {});
+  if (!entries.length) return <span>No evidence attached.</span>;
+  return (
+    <dl className="space-y-1">
+      {entries.map(([k, v]) => (
+        <div key={k} className="flex gap-2">
+          <dt className="shrink-0 font-medium text-foreground/80">{k}:</dt>
+          <dd className="truncate">{typeof v === "object" ? JSON.stringify(v) : String(v)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
 
 export function Insights() {
-  const q = useQuery({ queryKey: ["insights"], queryFn: () => api.get<any>("/api/insights") });
+  const q = useInsights();
   return (
     <div>
       <PageHeader
@@ -15,54 +47,106 @@ export function Insights() {
         sub="What the data says and why — with the calculation, time window, and sample behind each number."
       />
       <Async q={q}>
-        {(d) => (
-          <div className="space-y-8">
-            {/* Recommendations */}
-            <section>
-              <h2 className="mb-3 text-lg font-semibold">Recommendations</h2>
-              <div className="space-y-3">
-                {(d.recommendations || []).map((r: any, i: number) => (
-                  <Card key={i} className="border-l-4 border-l-primary">
-                    <CardContent className="p-4">
-                      <div className="mb-1 flex items-center gap-2">
-                        {r.priority != null && <Badge variant="primary">P{r.priority}</Badge>}
-                        {r.category && <Badge>{r.category}</Badge>}
-                      </div>
-                      <p className="font-medium">{r.recommendation}</p>
-                      {r.reasoning && <p className="mt-1 text-sm text-muted-foreground">{r.reasoning}</p>}
+        {(d) => {
+          const contentMix = (d.blueprint?.blueprint?.content_mix ?? null) as ContentMixRow[] | null;
+          return (
+            <div className="space-y-8">
+              {/* Recommendations */}
+              <section>
+                <h2 className="mb-3 text-lg font-semibold">Recommendations</h2>
+                <div className="space-y-3">
+                  {(d.recommendations || []).map((r, i) => (
+                    <CalloutCard
+                      key={i}
+                      severity="info"
+                      label={r.category || (r.priority != null ? `P${r.priority}` : undefined)}
+                      title={r.recommendation}
+                      evidence={<EvidenceList evidence={r.evidence} />}
+                    >
+                      {r.reasoning}
                       {r.expected_outcome && (
-                        <p className="mt-1 text-sm text-muted-foreground">Expected: {r.expected_outcome}</p>
+                        <div className="mt-1">Expected: {r.expected_outcome}</div>
                       )}
+                    </CalloutCard>
+                  ))}
+                  {!(d.recommendations || []).length && (
+                    <p className="text-sm text-muted-foreground">No recommendations yet.</p>
+                  )}
+                </div>
+              </section>
+
+              {/* Emoji policy */}
+              {d.emoji_policy?.rules?.length > 0 && (
+                <section>
+                  <h2 className="mb-3 text-lg font-semibold">Emoji policy</h2>
+                  <Card>
+                    <CardContent className="p-4">
+                      <p className="mb-3 text-sm text-muted-foreground">
+                        Drafts strip the avoid-emojis automatically. Based on {d.emoji_policy.window}. Lift is
+                        correlational, not causal — these emojis co-occur with your best/worst post types, not
+                        proven to cause the difference.
+                      </p>
+                      <BarsChart
+                        data={[...d.emoji_policy.rules]
+                          .sort((a, b) => b.lift_pct - a.lift_pct)
+                          .map((r) => ({ label: r.emoji, lift_pct: r.lift_pct }))}
+                        dataKey="lift_pct"
+                        unit="%"
+                        height={Math.max(180, d.emoji_policy.rules.length * 28)}
+                      />
                     </CardContent>
                   </Card>
-                ))}
-              </div>
-            </section>
+                </section>
+              )}
 
-            {/* Emoji policy */}
-            {d.emoji_policy?.rules?.length > 0 && (
+              {/* What changed & why */}
               <section>
-                <h2 className="mb-3 text-lg font-semibold">Emoji policy</h2>
+                <h2 className="mb-3 text-lg font-semibold">What changed &amp; why</h2>
+                {(d.reasoning || []).length ? (
+                  <Card>
+                    <CardContent className="p-0">
+                      <Table>
+                        <THead>
+                          <TR><TH>Metric</TH><TH>Change</TH><TH>What it means</TH></TR>
+                        </THead>
+                        <TBody>
+                          {d.reasoning.map((i, k) => (
+                            <TR key={k}>
+                              <TD className="font-medium">{i.metric}</TD>
+                              <TD>{i.direction} {i.change}{i.unit}</TD>
+                              <TD>
+                                {i.observation}
+                                <div className="text-xs text-muted-foreground">{i.why}</div>
+                                <div className="mt-0.5 text-xs text-muted-foreground">Period compared: {i.period}</div>
+                              </TD>
+                            </TR>
+                          ))}
+                        </TBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No period-over-period shifts detected.</p>
+                )}
+              </section>
+
+              {/* Performance */}
+              <section>
+                <h2 className="mb-3 text-lg font-semibold">Post-type performance</h2>
                 <Card>
-                  <CardContent className="p-4">
-                    <p className="mb-3 text-sm text-muted-foreground">
-                      Drafts strip the avoid-emojis automatically. Based on {d.emoji_policy.window} ·
-                      correlational (these emojis co-occur with your best/worst post types).
-                    </p>
+                  <CardContent className="p-0">
                     <Table>
                       <THead>
-                        <TR>
-                          <TH>Emoji</TH><TH>Policy</TH><TH>Lift vs avg</TH><TH>Views/day</TH><TH>Sample</TH>
-                        </TR>
+                        <TR><TH>Rank</TH><TH>Post type</TH><TH>Posts</TH><TH>Share</TH><TH>Views/day</TH></TR>
                       </THead>
                       <TBody>
-                        {[...d.emoji_policy.rules].sort((a: any, b: any) => b.lift_pct - a.lift_pct).map((r: any) => (
-                          <TR key={r.emoji}>
-                            <TD className="text-lg">{r.emoji}</TD>
-                            <TD>{r.lift_pct >= 0 ? <Badge variant="success">prefer</Badge> : <Badge variant="destructive">avoid</Badge>}</TD>
-                            <TD>{r.lift_pct >= 0 ? "+" : ""}{r.lift_pct}%</TD>
-                            <TD className="text-muted-foreground">{r.avg_with} vs {r.baseline}</TD>
-                            <TD className="text-muted-foreground">{r.sample.toLocaleString()}</TD>
+                        {(d.performance || []).map((p) => (
+                          <TR key={p.post_type}>
+                            <TD>#{p.rank}</TD>
+                            <TD>{p.post_type}</TD>
+                            <TD>{p.posts}</TD>
+                            <TD>{p.share != null ? Math.round(p.share * 100) + "%" : "—"}</TD>
+                            <TD>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</TD>
                           </TR>
                         ))}
                       </TBody>
@@ -70,83 +154,74 @@ export function Insights() {
                   </CardContent>
                 </Card>
               </section>
-            )}
 
-            {/* What changed & why */}
-            <section>
-              <h2 className="mb-3 text-lg font-semibold">What changed &amp; why</h2>
-              {(d.reasoning || []).length ? (
-                <Card>
-                  <CardContent className="p-0">
-                    <Table>
-                      <THead>
-                        <TR><TH>Metric</TH><TH>Change</TH><TH>What it means</TH></TR>
-                      </THead>
-                      <TBody>
-                        {d.reasoning.map((i: any, k: number) => (
-                          <TR key={k}>
-                            <TD className="font-medium">{i.metric}</TD>
-                            <TD>{i.direction} {i.change}{i.unit}</TD>
-                            <TD>
-                              {i.observation}
-                              <div className="text-xs text-muted-foreground">{i.why}</div>
-                              <div className="mt-0.5 text-xs text-muted-foreground">Period compared: {i.period}</div>
-                            </TD>
-                          </TR>
-                        ))}
-                      </TBody>
-                    </Table>
-                  </CardContent>
-                </Card>
-              ) : (
-                <p className="text-sm text-muted-foreground">No period-over-period shifts detected.</p>
-              )}
-            </section>
-
-            {/* Performance */}
-            <section>
-              <h2 className="mb-3 text-lg font-semibold">Post-type performance (age-normalized)</h2>
-              <Card>
-                <CardContent className="p-0">
-                  <Table>
-                    <THead>
-                      <TR><TH>Rank</TH><TH>Post type</TH><TH>Posts</TH><TH>Share</TH><TH>Views/day</TH></TR>
-                    </THead>
-                    <TBody>
-                      {(d.performance || []).map((p: any) => (
-                        <TR key={p.post_type}>
-                          <TD>#{p.rank}</TD>
-                          <TD>{p.post_type}</TD>
-                          <TD>{p.posts}</TD>
-                          <TD>{p.share != null ? Math.round(p.share * 100) + "%" : "—"}</TD>
-                          <TD>{p.avg_views_per_day != null ? Math.round(p.avg_views_per_day) : "—"}</TD>
-                        </TR>
-                      ))}
-                    </TBody>
-                  </Table>
-                </CardContent>
-              </Card>
-            </section>
-
-            {/* Learnings */}
-            <section>
-              <h2 className="mb-3 text-lg font-semibold">What the channel has learned</h2>
-              <div className="space-y-3">
-                {(d.learnings || []).map((l: any, i: number) => (
-                  <Card key={i} className="border-l-4 border-l-success">
+              {/* Content mix vs target */}
+              {contentMix && contentMix.length > 0 && (
+                <section>
+                  <h2 className="mb-3 text-lg font-semibold">Your content mix vs. target</h2>
+                  <Card>
                     <CardContent className="p-4">
-                      <Badge>{l.category}</Badge>
-                      <p className="mt-2">{l.statement}</p>
-                      {l.how_calculated && (
-                        <p className="mt-1 text-sm text-muted-foreground">How this is calculated: {l.how_calculated}</p>
-                      )}
+                      <p className="mb-3 text-sm text-muted-foreground">
+                        Current share of posts by type, and whether the growth blueprint says to lean in or pull back.
+                      </p>
+                      <div className="space-y-2">
+                        {contentMix.map((m) => (
+                          <div key={m.post_type} className="flex items-center gap-3">
+                            <div className="w-32 shrink-0 truncate text-sm font-medium">{m.post_type}</div>
+                            <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
+                              <div
+                                className="h-full rounded-full bg-primary"
+                                style={{ width: `${Math.min(100, Math.round((m.current_share || 0) * 100))}%` }}
+                              />
+                            </div>
+                            <div className="w-12 shrink-0 text-right text-sm text-muted-foreground">
+                              {m.current_share != null ? Math.round(m.current_share * 100) + "%" : "—"}
+                            </div>
+                            <div className="w-20 shrink-0 text-right text-xs text-muted-foreground">
+                              {m.avg_views_per_day != null ? Math.round(m.avg_views_per_day) + " views/day" : "—"}
+                            </div>
+                            <Badge variant={ACTION_BADGE[m.action] ?? "default"} className="w-20 shrink-0 justify-center">
+                              {m.action}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
                     </CardContent>
                   </Card>
-                ))}
-              </div>
-            </section>
-          </div>
-        )}
+                </section>
+              )}
+
+              {/* Learnings */}
+              <section>
+                <h2 className="mb-3 text-lg font-semibold">What the channel has learned</h2>
+                <div className="space-y-3">
+                  {(d.learnings || []).map((l, i) => (
+                    <CalloutCard
+                      key={i}
+                      severity="success"
+                      label={l.category}
+                      title={l.statement}
+                      evidence={
+                        <EvidenceList
+                          evidence={{
+                            sample_size: l.sample_size,
+                            confidence: l.confidence,
+                            period: l.period,
+                          }}
+                        />
+                      }
+                    >
+                      {l.how_calculated && <>How this is calculated: {l.how_calculated}</>}
+                    </CalloutCard>
+                  ))}
+                  {!(d.learnings || []).length && (
+                    <p className="text-sm text-muted-foreground">Nothing learned yet — check back after more data accrues.</p>
+                  )}
+                </div>
+              </section>
+            </div>
+          );
+        }}
       </Async>
     </div>
   );

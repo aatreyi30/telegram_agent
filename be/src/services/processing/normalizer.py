@@ -125,6 +125,7 @@ class PostNormalizer(BaseCollector):
             counts = Counter(known)
             primary_merchant, top = counts.most_common(1)[0]
             primary_conf = round(top / len(all_urls), 3)  # share of links that agree
+            logger.info("[normalizer] merchant detection: source_id=%d primary_merchant=%s confidence=%s known_merchants=%s", raw.id, primary_merchant, primary_conf, dict(counts))
 
         confidence = self._completeness(bool(prices), bool(all_urls), primary_merchant is not None)
 
@@ -162,6 +163,7 @@ class PostNormalizer(BaseCollector):
         )
         s.add(np)
         s.flush()
+        logger.info("[normalizer] normalized_post created: id=%d source_type=%s source_id=%d num_links=%d", np.id, source_type, raw.id, len(all_urls))
 
         for pm in prices:
             s.add(ExtractedPrice(
@@ -176,6 +178,7 @@ class PostNormalizer(BaseCollector):
                 is_shortlink=info.is_shortlink, merchant_key=mk,
                 tracking_params=info.tracking_params,
             ))
+        logger.info("[normalizer] extracted_links created: normalized_post_id=%d link_count=%d", np.id, len(all_urls))
 
         # queue events (published after commit)
         emits.append((EventType.POST_NORMALIZED, str(np.id),

@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2, UserPlus } from "lucide-react";
 import { PageHeader } from "@/components/AppLayout";
 import { Async } from "@/components/Async";
@@ -11,6 +10,12 @@ import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/services/api";
 import { useAuth } from "@/providers/auth";
+import { useChannels, useOrg, useUsers } from "@/queries/queries";
+import {
+  useAddChannel, useChangePassword, useCreateUser, useDeleteChannel,
+  useDeleteUser, useUpdateOrg, useUpdateUserRole,
+} from "@/queries/mutations";
+import type { OrgSettings } from "@/types/api";
 
 function Note({ ok, msg }: { ok: boolean; msg: string }) {
   return <p className={ok ? "text-sm text-success" : "text-sm text-destructive"}>{msg}</p>;
@@ -21,11 +26,12 @@ function ProfileTab() {
   const [oldp, setOld] = useState("");
   const [newp, setNew] = useState("");
   const [note, setNote] = useState<{ ok: boolean; msg: string } | null>(null);
+  const changePassword = useChangePassword();
 
   async function save() {
     setNote(null);
     try {
-      await api.post("/api/auth/change-password", { old_password: oldp, new_password: newp });
+      await changePassword.mutateAsync({ old_password: oldp, new_password: newp });
       setNote({ ok: true, msg: "Password updated." });
       setOld(""); setNew("");
     } catch (e) {
@@ -56,23 +62,23 @@ function ProfileTab() {
 }
 
 function OrgTab() {
-  const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["org"], queryFn: () => api.get<any>("/api/org") });
-  const [form, setForm] = useState<any>(null);
+  const q = useOrg();
+  const updateOrg = useUpdateOrg();
+  const [form, setForm] = useState<{ name: string; settings: OrgSettings } | null>(null);
   const [note, setNote] = useState<{ ok: boolean; msg: string } | null>(null);
   const data = form || (q.data ? { name: q.data.name, settings: { ...q.data.settings } } : null);
 
-  function set(k: string, v: any) {
-    setForm({ ...(data || {}), [k]: v });
+  function set(k: "name", v: string) {
+    setForm({ ...(data as { name: string; settings: OrgSettings }), [k]: v });
   }
-  function setS(k: string, v: any) {
-    setForm({ ...(data || {}), settings: { ...(data?.settings || {}), [k]: v } });
+  function setS(k: string, v: unknown) {
+    setForm({ ...(data as { name: string; settings: OrgSettings }), settings: { ...(data?.settings || {}), [k]: v } });
   }
   async function save() {
+    if (!data) return;
     setNote(null);
     try {
-      await api.patch("/api/org", { name: data.name, settings: data.settings });
-      qc.invalidateQueries({ queryKey: ["org"] });
+      await updateOrg.mutateAsync({ name: data.name, settings: data.settings });
       setNote({ ok: true, msg: "Organization saved." });
     } catch (e) {
       setNote({ ok: false, msg: (e as Error).message });
@@ -130,8 +136,10 @@ function OrgTab() {
 }
 
 function UsersTab() {
-  const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["users"], queryFn: () => api.get<any[]>("/api/users") });
+  const q = useUsers();
+  const createUser = useCreateUser();
+  const deleteUser = useDeleteUser();
+  const updateRole = useUpdateUserRole();
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({ name: "", email: "", password: "", role: "editor" });
   const [note, setNote] = useState<string | null>(null);
@@ -139,8 +147,7 @@ function UsersTab() {
   async function create() {
     setNote(null);
     try {
-      await api.post("/api/users", f);
-      qc.invalidateQueries({ queryKey: ["users"] });
+      await createUser.mutateAsync(f);
       setOpen(false);
       setF({ name: "", email: "", password: "", role: "editor" });
     } catch (e) {
@@ -149,15 +156,13 @@ function UsersTab() {
   }
   async function remove(id: number) {
     try {
-      await api.del(`/api/users/${id}`);
-      qc.invalidateQueries({ queryKey: ["users"] });
+      await deleteUser.mutateAsync(id);
     } catch (e) {
-      alert((e as Error).message);
+      setNote((e as Error).message);
     }
   }
   async function changeRole(id: number, role: string) {
-    await api.patch(`/api/users/${id}`, { role });
-    qc.invalidateQueries({ queryKey: ["users"] });
+    await updateRole.mutateAsync({ id, role });
   }
 
   return (
@@ -220,32 +225,31 @@ function UsersTab() {
 }
 
 function ChannelsTab() {
-  const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["channels"], queryFn: () => api.get<any[]>("/api/channels") });
+  const q = useChannels();
+  const addChannel = useAddChannel();
+  const deleteChannel = useDeleteChannel();
   const [handle, setHandle] = useState("");
   const [note, setNote] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; username: string | null; posts: number } | null>(null);
 
   async function add() {
     setNote(null);
     try {
-      await api.post("/api/channels", { username: handle.trim(), kind: "owned" });
+      await addChannel.mutateAsync({ username: handle.trim(), kind: "owned" });
       setHandle("");
-      qc.invalidateQueries({ queryKey: ["channels"] });
       setNote({ ok: true, msg: "Channel added. Connect Telegram (see below), then run a sync to start collecting." });
     } catch (e) {
       setNote({ ok: false, msg: (e as Error).message });
     }
   }
-  async function remove(c: any) {
-    const msg = c.posts > 0
-      ? `Delete @${c.username} and its ${c.posts} posts + all derived data? This cannot be undone.`
-      : `Remove @${c.username}?`;
-    if (!window.confirm(msg)) return;
+  async function confirmDelete() {
+    if (!deleteTarget) return;
     try {
-      await api.del(`/api/channels/${c.id}?confirm=true`);
-      qc.invalidateQueries({ queryKey: ["channels"] });
+      await deleteChannel.mutateAsync(deleteTarget.id);
+      setDeleteTarget(null);
     } catch (e) {
-      alert((e as Error).message);
+      setNote({ ok: false, msg: (e as Error).message });
+      setDeleteTarget(null);
     }
   }
 
@@ -294,21 +298,35 @@ function ChannelsTab() {
                             : "bg-muted text-muted-foreground"}>{c.status}</Badge>
                         </TD>
                         <TD>{c.posts.toLocaleString()}</TD>
-                        <TD>
-                          <Button variant="ghost" size="icon" onClick={() => remove(c)}>
-                            <Trash2 size={16} className="text-destructive" />
-                          </Button>
-                        </TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>
-              )
-            }
-          </Async>
-        </CardContent>
-      </Card>
-    </div>
+                          <TD>
+                            <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(c)}>
+                              <Trash2 size={16} className="text-destructive" />
+                            </Button>
+                          </TD>
+                        </TR>
+                      ))}
+                    </TBody>
+                  </Table>
+                )
+              }
+            </Async>
+          </CardContent>
+
+          <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete channel">
+            <div className="space-y-3">
+              <p className="text-sm">
+                {deleteTarget && (deleteTarget.posts > 0
+                  ? `Delete @${deleteTarget.username} and its ${deleteTarget.posts} posts + all derived data? This cannot be undone.`
+                  : `Remove @${deleteTarget.username}?`)}
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+                <Button variant="destructive" size="sm" onClick={confirmDelete}>Delete</Button>
+              </div>
+            </div>
+          </Dialog>
+        </Card>
+      </div>
   );
 }
 

@@ -20,13 +20,11 @@ from sqlalchemy import func, select
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.db.models import Post
-from src.db.models_classification import PostClassification, PostTypeCluster
 from collections import Counter
 
 from src.db.models_competitor_intel import (
     COMPETITOR_INTEL_VERSION,
     CompetitorProfile,
-    CompetitorSignal,
 )
 from src.db.models_growth import (
     GROWTH_VERSION,
@@ -43,6 +41,7 @@ from src.db.models_learning import (
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.session import session_scope
 from src.services.events import Event, EventType, get_event_bus
+from src.ai.insight_writer import narrate
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,14 +51,16 @@ MIN_DAYS_FOR_OPTIMIZATION = 7
 
 
 def plain_label(descriptor: str | None) -> str:
-    """Translate a learned-cluster feature signature into a human-readable post
-    type. Presentation only — describes the measured features in plain words; it
-    does not define or hardcode a category taxonomy."""
+    """Translate a post-type key into a human-readable label."""
     d = (descriptor or "").lower()
+    if d == "loot_deal":
+        return "loot / multi-deal"
+    if d == "single_deal":
+        return "single deal"
     if "coupon" in d:
         return "coupon-code deals"
     if "many-links" in d or "multi-deal" in d:
-        return "multi-product loot collections (several deal links in one post)"
+        return "loot / multi-deal"
     if "wide-price-range" in d or "many-prices" in d:
         return "mixed-price bundles"
     if "single-item" in d:
@@ -71,6 +72,34 @@ def plain_label(descriptor: str | None) -> str:
     if "baseline" in d:
         return "general/other posts"
     return descriptor or "posts"
+
+
+def content_mix_from_rows(rows: list[dict]) -> list[dict]:
+    """Build content-mix action + a real numeric target_share from plain
+    {post_type, avg_views_per_day, share} dicts — shared by the Growth Engine's
+    batch blueprint and the Insights page's live date-ranged view. `target_share`
+    is a bounded nudge off the current share (not a formal optimization): +50%
+    (capped at 30%) for above-median performers, -30% for below-median ones."""
+    vals = [r["avg_views_per_day"] for r in rows if r.get("avg_views_per_day")]
+    med = statistics.median(vals) if vals else None
+    out = []
+    for r in rows:
+        avg = r.get("avg_views_per_day")
+        share = r.get("share") or 0.0
+        action = "maintain"
+        target_share = share
+        if med and avg:
+            if avg >= 1.25 * med:
+                action = "increase"
+                target_share = min(0.30, round(share * 1.5, 3))
+            elif avg <= 0.75 * med:
+                action = "decrease"
+                target_share = round(share * 0.7, 3)
+        out.append({
+            "post_type": r["post_type"], "current_share": share,
+            "target_share": target_share, "avg_views_per_day": avg, "action": action,
+        })
+    return out
 
 
 class GrowthEngine(BaseCollector):
@@ -89,6 +118,16 @@ class GrowthEngine(BaseCollector):
                 strategy, recs = self._optimization(s, now, basis)
             else:
                 strategy, recs = self._cold_start(s, now, basis)
+
+            # AI-facing hourly posting evidence: independent of OPTIMIZATION/COLD_START —
+            # pass through whatever real hourly signal exists (however thin), tagged with
+            # its sample_size, instead of withholding it below the mode threshold.
+            if strategy is not None and not strategy["blueprint"].get("posting_plan"):
+                plan, sample_size = self._own_hourly_posting_plan(
+                    s, strategy["blueprint"].get("posting_frequency_baseline"))
+                if plan:
+                    strategy["blueprint"]["posting_plan"] = plan
+                    strategy["blueprint"]["posting_plan_sample_size"] = sample_size
 
         if strategy is None:
             result.skipped_reason = (
@@ -214,7 +253,7 @@ class GrowthEngine(BaseCollector):
                 f"Post more {label}: ~{top.avg_views_per_day:.0f} views/day vs your "
                 f"{base:.0f} channel average ({mult:.1f}x). They are only {top.share*100:.0f}% "
                 f"of your posts — grow toward ~{target*100:.0f}%.",
-                f"Highest age-normalized views of any post type, measured over {top.post_count} posts.",
+                f"Highest views/day of any post type, measured over {top.post_count} posts.",
                 {"post_type": top.post_type, "plain_label": label,
                  "avg_views_per_day": top.avg_views_per_day, "channel_avg": round(base, 1),
                  "multiple_vs_avg": round(mult, 2), "current_share": top.share,
@@ -232,7 +271,7 @@ class GrowthEngine(BaseCollector):
                 f"Cut back on {label}: only ~{bottom.avg_views_per_day:.0f} views/day "
                 f"({lift:+.0f}% vs your {base:.0f} average) yet they are {bottom.share*100:.0f}% "
                 "of everything you post.",
-                f"Consistently below-average age-normalized views over {bottom.post_count} posts; "
+                f"Consistently below-average views/day over {bottom.post_count} posts; "
                 "they consume volume that your top types would monetize better.",
                 {"post_type": bottom.post_type, "plain_label": label,
                  "avg_views_per_day": bottom.avg_views_per_day, "channel_avg": round(base, 1),
@@ -247,6 +286,7 @@ class GrowthEngine(BaseCollector):
             plan = self._build_posting_plan(style.posts_per_day, ev.get("hourly_all"))
             if plan:
                 blueprint["posting_plan"] = plan
+                blueprint["posting_plan_sample_size"] = sum(n for _, _, n in (ev.get("hourly_all") or []))
                 parts_txt = "; ".join(
                     f"{p['part']} {p['hours']} → ~{p['recommended_posts_per_day']} posts ({p['action']})"
                     for p in plan
@@ -259,70 +299,70 @@ class GrowthEngine(BaseCollector):
                     ehrs = ", ".join(f"{e[0]:02d}:00" for e in exp)
                     outcome = (f"The late-night hours ({ehrs}) show higher per-post views on small "
                                "samples — worth a controlled test, but keep the bulk in proven windows.")
-                rec("timing", text, lr.statement, {**ev, "posting_plan": plan},
-                    lr.confidence, impact=0.5, outcome=outcome)
+                rec_evidence = {**ev, "posting_plan": plan}
+                fallback = (f"You already post ~{style.posts_per_day:.0f} times a day — this doesn't ask "
+                            "you to post more, just to shift when those posts land toward the windows "
+                            "that already earn more views per post.")
+                reasoning = narrate("why to follow this posting schedule", text, rec_evidence, fallback)
+                rec("timing", text, reasoning, rec_evidence, lr.confidence, impact=0.5, outcome=outcome)
             else:
-                rec("timing", lr.statement.split(".")[0] + ".", lr.statement, ev, lr.confidence, impact=0.4)
+                text = lr.statement.split(".")[0] + "."
+                fallback = ("Shifting posts toward your proven high-performing hours raises average "
+                            "reach without changing how much you post overall.")
+                reasoning = narrate("why to follow this posting-window recommendation", text, ev, fallback)
+                rec("timing", text, reasoning, ev, lr.confidence, impact=0.4)
 
         # (4) positive emojis — with concrete lift
         for lr in sorted(by_cat.get("emoji", []), key=lambda x: (x.metric_value or 0), reverse=True)[:2]:
             if lr.metric_value and lr.comparison_value and lr.metric_value > lr.comparison_value:
                 emoji = (lr.evidence or {}).get("emoji", "")
                 emoji_lift = self._lift(lr.metric_value, lr.comparison_value)
-                rec("format",
-                    f"Include {emoji} in deal posts — posts using it average {emoji_lift:+.0f}% "
-                    "views vs your channel average.",
-                    lr.statement + " (Correlational, but a cheap, safe format tweak to adopt.)",
-                    lr.evidence or {}, lr.confidence, impact=0.5)
+                text = (f"Include {emoji} in deal posts — posts using it average {emoji_lift:+.0f}% "
+                        "views vs your channel average.")
+                fallback = (f"{emoji} costs nothing to add and already shows up disproportionately in "
+                            "your stronger posts, so it's a free, low-risk format change to confirm with "
+                            "a couple of weeks of consistent use before touching anything riskier.")
+                reasoning = narrate("why to adopt this emoji", text, lr.evidence or {}, fallback)
+                rec("format", text, reasoning, lr.evidence or {}, lr.confidence, impact=0.5)
 
         # (5) media (correlational -> phrased as preference/test)
         for lr in by_cat.get("media", []):
             if lr.metric_value and lr.comparison_value and lr.metric_value < lr.comparison_value:
                 media_lift = self._lift(lr.metric_value, lr.comparison_value)
-                rec("media",
-                    f"Favor concise text+link deal drops: media-heavy posts get {media_lift:+.0f}% "
-                    "views vs text-only in your history.",
-                    lr.statement + " (Correlational — verify with an A/B test.)",
-                    lr.evidence or {}, lr.confidence * 0.8, impact=0.5)
+                text = (f"Favor concise text+link deal drops: media-heavy posts get {media_lift:+.0f}% "
+                        "views vs text-only in your history.")
+                fallback = ("Dropping images costs nothing in production time, and the gap in your own "
+                            "history is large enough to be worth testing before you invest effort in "
+                            "better photography instead.")
+                reasoning = narrate("why to favor text-only over media posts", text, lr.evidence or {}, fallback)
+                rec("media", text, reasoning, lr.evidence or {}, lr.confidence * 0.8, impact=0.5)
 
         # (6) cta (correlational -> A/B test)
         for lr in by_cat.get("cta", []):
             if lr.metric_value and lr.comparison_value and lr.metric_value < lr.comparison_value:
-                rec("cta", "A/B test leaner call-to-action wording.",
-                    lr.statement + " (Correlational — test before removing CTAs.)",
-                    lr.evidence or {}, lr.confidence * 0.7, impact=0.3)
+                text = "A/B test leaner call-to-action wording."
+                fallback = ("This changes wording, not strategy, so the downside of testing it is small — "
+                            "run it for two weeks before deciding whether to drop CTAs for good.")
+                reasoning = narrate("why to A/B test removing the CTA", text, lr.evidence or {}, fallback)
+                rec("cta", text, reasoning, lr.evidence or {}, lr.confidence * 0.7, impact=0.3)
 
         # (7) merchant focus (only emitted by Phase 6 when >=2 merchants are comparable
         # and the best one actually outperforms — so it is safe to surface in full)
         for lr in by_cat.get("merchant", []):
-            merchant = (lr.evidence or {}).get("merchant", "the top merchant")
-            rec("merchant", f"Prioritize {merchant} deals — {lr.statement}",
-                lr.statement, lr.evidence or {}, lr.confidence, impact=0.4)
+            ev = lr.evidence or {}
+            merchant = ev.get("merchant", "the top merchant")
+            vpd = lr.metric_value
+            lift = self._lift(lr.metric_value, lr.comparison_value) if lr.comparison_value else 0.0
+            text = (f"Prioritize {merchant} deals — they average {vpd:.0f} views/day "
+                    f"({lift:+.0f}% vs your channel average)." if vpd else
+                    f"Prioritize {merchant} deals.")
+            fallback = (f"Of the merchants you can reliably compare, {merchant} is the one that clears "
+                        "your channel average, so shifting volume toward it is backed by a real "
+                        "comparison rather than a guess at an untested merchant.")
+            reasoning = narrate("why to prioritize this merchant", text, ev, fallback)
+            rec("merchant", text, reasoning, ev, lr.confidence, impact=0.4)
 
-        # (8) frequency vs competitors (Phase 5 threats)
-        threats = s.scalars(
-            select(CompetitorSignal).where(
-                CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION,
-                CompetitorSignal.signal_type == "threat",
-                CompetitorSignal.kind == "higher_posting_cadence",
-            ).order_by(CompetitorSignal.confidence.desc())
-        ).all()
-        if threats:
-            t = threats[0]
-            ev = t.evidence or {}
-            cppd = ev.get("competitor_posts_per_day")
-            oppd = ev.get("owned_posts_per_day_same_window")
-            uname = t.username or "a category leader"
-            text = (f"Raise posting cadence in peak windows: {uname} posted ~{cppd}/day vs your "
-                    f"~{oppd}/day in the same window."
-                    if cppd and oppd else
-                    "Increase posting cadence during peak windows to match category leaders.")
-            rec("frequency", text,
-                f"{t.description} Sustained higher cadence by leaders can crowd out your reach.",
-                ev, t.confidence, impact=0.6,
-                outcome="More impressions during high-competition windows.")
-
-        # (9) competitor patterns — what similar, high-sample competitors emphasize
+        # (8) competitor patterns — what similar, high-sample competitors emphasize
         #     that we underuse, CROSS-CHECKED against our own performance so we never
         #     recommend copying something our own data shows hurts us.
         own_mix = {p["post_type"]: (p.get("current_share") or 0.0) for p in (blueprint.get("content_mix") or [])}
@@ -373,7 +413,7 @@ class GrowthEngine(BaseCollector):
                 emitted += 1
                 break
 
-        # (10) content diversity (recent 30d concentration)
+        # (9) content diversity (recent 30d concentration)
         div = self._recent_diversity(s, now)
         if div and div["top_share"] > 0.7:
             rec("diversity",
@@ -459,6 +499,26 @@ class GrowthEngine(BaseCollector):
         ("Evening", "18:00–23:00", range(18, 24)),
     ]
 
+    def _own_hourly_posting_plan(self, s, fallback_posts_per_day) -> tuple[list[dict] | None, int]:
+        """Real hourly-bucketed posting evidence from owned history (Phase 6's
+        `timing` LearningRecord), looked up independent of GrowthMode — used to fill
+        in `posting_plan` when the mode-specific path above didn't already set one."""
+        timing_lr = s.scalar(
+            select(LearningRecord).where(
+                LearningRecord.learning_version == LEARNING_VERSION,
+                LearningRecord.category == "timing",
+            )
+        )
+        hourly_all = (timing_lr.evidence or {}).get("hourly_all") if timing_lr else None
+        if not hourly_all:
+            return None, 0
+        style = s.scalar(
+            select(ChannelStyleProfile).where(ChannelStyleProfile.learning_version == LEARNING_VERSION)
+        )
+        posts_per_day = (style.posts_per_day if style else None) or fallback_posts_per_day
+        plan = self._build_posting_plan(posts_per_day, hourly_all)
+        return plan, sum(n for _, _, n in hourly_all)
+
     def _build_posting_plan(self, posts_per_day, hourly_all) -> list[dict] | None:
         """Distribute the daily posting budget across day-parts, shifting volume
         toward higher-performing parts while keeping presence in every active part
@@ -481,7 +541,7 @@ class GrowthEngine(BaseCollector):
             current_share = part_n / total_n
             parts.append({
                 "part": name, "hours": label, "current_share": current_share,
-                "part_avg_views_per_day": part_avg,
+                "part_avg_views_per_day": part_avg, "sample_size": part_n,
                 # weight current volume by relative performance -> shift toward winners
                 "raw_weight": current_share * (part_avg / overall_avg),
             })
@@ -500,6 +560,7 @@ class GrowthEngine(BaseCollector):
                 "current_posts_per_day": cur_ppd,
                 "recommended_posts_per_day": rec_ppd,
                 "avg_views_per_day": round(p["part_avg_views_per_day"], 1),
+                "sample_size": p["sample_size"],
                 "action": action,
             })
         return plan
@@ -520,21 +581,9 @@ class GrowthEngine(BaseCollector):
         return None
 
     def _content_mix(self, perf) -> list[dict]:
-        vals = [p.avg_views_per_day for p in perf if p.avg_views_per_day]
-        med = statistics.median(vals) if vals else None
-        out = []
-        for p in perf:
-            action = "maintain"
-            if med and p.avg_views_per_day:
-                if p.avg_views_per_day >= 1.25 * med:
-                    action = "increase"
-                elif p.avg_views_per_day <= 0.75 * med:
-                    action = "decrease"
-            out.append({
-                "post_type": p.post_type, "current_share": p.share,
-                "avg_views_per_day": p.avg_views_per_day, "action": action,
-            })
-        return out
+        rows = [{"post_type": p.post_type, "avg_views_per_day": p.avg_views_per_day,
+                 "share": p.share} for p in perf]
+        return content_mix_from_rows(rows)
 
     def _derive_channel_type(self, perf):
         # dominant post type by volume -> channel-type label (derived, not hardcoded)
@@ -545,12 +594,12 @@ class GrowthEngine(BaseCollector):
     @staticmethod
     def _channel_type_from_descriptor(desc: str | None) -> str:
         d = (desc or "").lower()
+        if d == "loot_deal" or "multi-deal" in d or "many-links" in d:
+            return "loot-led"
+        if d == "single_deal" or "single-item" in d:
+            return "single-deal-led"
         if "coupon" in d:
             return "coupon-led"
-        if "multi-deal" in d or "many-links" in d:
-            return "loot-led"
-        if "single-item" in d:
-            return "single-deal-led"
         return "hybrid"
 
     def _channel_type_from_mix(self, mix: dict) -> str:
@@ -575,14 +624,15 @@ class GrowthEngine(BaseCollector):
 
     def _recent_diversity(self, s, now) -> dict | None:
         cutoff = now - timedelta(days=30)
+        from sqlalchemy import case
+        is_multi = NormalizedPost.is_multi_deal
+        type_label = case((is_multi == True, "loot_deal"), else_="single_deal")
         rows = s.execute(
-            select(PostTypeCluster.descriptor, func.count())
-            .select_from(PostClassification)
-            .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id)
-            .join(NormalizedPost, NormalizedPost.id == PostClassification.normalized_post_id)
+            select(type_label, func.count())
+            .select_from(NormalizedPost)
             .join(Post, Post.id == NormalizedPost.source_id)
             .where(NormalizedPost.source_type == SourceType.OWNED, Post.posted_at >= cutoff)
-            .group_by(PostTypeCluster.descriptor)
+            .group_by(type_label)
         ).all()
         total = sum(c for _, c in rows)
         if total < 20:

@@ -243,26 +243,6 @@ def collect_owned(
     _print_job(job)
 
 
-@app.command("collect-stats")
-def collect_stats(
-    channel: str = typer.Argument(None, help="Owned channel username (default: first OWNED_CHANNELS)"),
-) -> None:
-    """Pull Telegram's admin-only broadcast stats (subscriber growth, reach). Dormant
-    until the account is a channel admin — then it activates automatically."""
-    from src.services.collection.telegram_stats import ChannelStatsCollector
-
-    ch = channel or (get_settings().owned_channels or [None])[0]
-    if not ch:
-        console.print("[yellow]No channel given and OWNED_CHANNELS is empty.[/yellow]")
-        raise typer.Exit(1)
-    job = JobRunner().run_collector(
-        ChannelStatsCollector(ch), collection_type=CollectionType.ANALYTICS, target=ch)
-    _print_job(job)
-    if job.status == "skipped":
-        console.print("[dim]Expected while the account is a member (not admin). "
-                      "The views-based Analytics page works today regardless.[/dim]")
-
-
 @app.command("collect-competitor")
 def collect_competitor(
     username: str = typer.Argument(..., help="Public channel username (no @)"),
@@ -305,7 +285,7 @@ def resolve_links(
     Lifts merchant coverage: each resolved link reveals the merchant we couldn't
     know at normalization time. Re-run until coverage stops rising.
     """
-    from sqlalchemy import func, select
+    from sqlalchemy import func, or_, select
 
     from src.services.collection.link_resolution import LinkResolutionEngine
     from src.db.models_normalization import ExtractedLink
@@ -320,11 +300,11 @@ def resolve_links(
         known = s.scalar(select(func.count()).select_from(ExtractedLink).where(
             ExtractedLink.merchant_key.isnot(None)))
         pending = s.scalar(select(func.count()).select_from(ExtractedLink).where(
-            ExtractedLink.is_shortlink.is_(True), ExtractedLink.merchant_key.is_(None),
-            ExtractedLink.resolved_url.is_(None)))
+            ExtractedLink.merchant_key.is_(None), ExtractedLink.resolved_url.is_(None),
+            or_(ExtractedLink.resolution_attempts.is_(None), ExtractedLink.resolution_attempts < 5)))
     cov = (100 * known / total) if total else 0
     console.print(f"[cyan]Merchant coverage:[/cyan] {known}/{total} links ({cov:.1f}%); "
-                  f"{pending} shortlinks still pending resolution.")
+                  f"{pending} links still pending resolution.")
 
 
 @app.command("normalize")
@@ -537,7 +517,7 @@ def merchant_intel_status() -> None:
 
 @app.command("competitor-intel")
 def competitor_intel() -> None:
-    """Phase 5: build competitor profiles, benchmarks, and evidence-backed signals."""
+    """Phase 5: build competitor profiles and benchmarks."""
     from src.services.intelligence.competitor import CompetitorIntelligenceEngine
 
     job = JobRunner().run_collector(
@@ -550,13 +530,12 @@ def competitor_intel() -> None:
 
 @app.command("competitor-intel-status")
 def competitor_intel_status() -> None:
-    """Show competitor profiles, similarity to us, and threats/opportunities."""
+    """Show competitor profiles and similarity to us."""
     from sqlalchemy import select
 
     from src.db.models_competitor_intel import (
         COMPETITOR_INTEL_VERSION,
         CompetitorProfile,
-        CompetitorSignal,
     )
 
     with session_scope() as s:
@@ -587,22 +566,6 @@ def competitor_intel_status() -> None:
             "[dim]t.me/s snapshot: views are rounded/cumulative; forwards & reactions "
             "unavailable; business category not extracted. Small samples -> low confidence.[/dim]"
         )
-
-        signals = s.scalars(
-            select(CompetitorSignal)
-            .where(CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorSignal.confidence.desc())
-        ).all()
-        if signals:
-            st = Table(title="Threats & opportunities (evidence-gated, sample>=20)")
-            for col in ("type", "competitor", "kind", "conf", "description"):
-                st.add_column(col)
-            for sig in signals:
-                st.add_row(sig.signal_type, sig.username or "-", sig.kind,
-                           f"{sig.confidence:.2f}", sig.description[:64])
-            console.print(st)
-        else:
-            console.print("[dim]No signals passed the evidence/sample threshold.[/dim]")
 
 
 @app.command("learn")
@@ -654,7 +617,7 @@ def learn_status() -> None:
             .where(PostTypePerformance.learning_version == LEARNING_VERSION)
             .order_by(PostTypePerformance.rank_by_views_per_day)
         ).all()
-        pt = Table(title="Post-type performance (age-normalized)")
+        pt = Table(title="Post-type performance (views/day)")
         for col in ("rank", "post type", "posts", "share", "avg views/day", "avg fwd", "conf"):
             pt.add_column(col)
         for p in perf:

@@ -43,6 +43,7 @@ from src.db.base import Base, TimestampMixin
 # loaded in isolation (e.g. a collector that only imports Channel), so SQLAlchemy
 # can always resolve the FK. No circular import (models_org imports only base).
 from src.db import models_org  # noqa: F401,E402
+from src.db.models_growth_snapshot import ParticipantSnapshot  # noqa: F401,E402 — register on metadata
 
 # --------------------------------------------------------------------------- #
 # System-level constant vocabularies (constraints, NOT learned categories)
@@ -181,6 +182,9 @@ class Channel(Base, TimestampMixin):
     participants_count: Mapped[int | None] = mapped_column(Integer)  # last observed
     can_view_stats: Mapped[bool] = mapped_column(Boolean, default=False)
     stats_dc: Mapped[int | None] = mapped_column(Integer)  # MTProto stats datacenter
+    # last time stats.getBroadcastStats was synced for this channel (rate-limited to
+    # once/IST-day — see telegram_owned.py::_collect_broadcast_stats)
+    stats_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[dict | None] = mapped_column(JSON)
 
     first_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -259,38 +263,18 @@ class PostMetricSnapshot(Base):
     post: Mapped["Post"] = relationship(back_populates="metric_snapshots")
 
 
-class ChannelStatSnapshot(Base):
-    """MTProto broadcast stats (stats.getBroadcastStats) captured over time.
-
-    Only available when ``Channel.can_view_stats`` is true (server-side size
-    threshold). When unavailable we simply do not write rows — we never invent
-    follower/source numbers.
-    """
-
-    __tablename__ = "channel_stat_snapshots"
-    __table_args__ = (Index("ix_css_channel_time", "channel_id", "captured_at"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    followers: Mapped[int | None] = mapped_column(Integer)
-    views_per_post: Mapped[float | None] = mapped_column(Float)
-    shares_per_post: Mapped[float | None] = mapped_column(Float)
-    reactions_per_post: Mapped[float | None] = mapped_column(Float)
-    enabled_notifications_pct: Mapped[float | None] = mapped_column(Float)
-    # Raw graph JSON preserved verbatim for later parsing (growth/source graphs).
-    graphs_json: Mapped[dict | None] = mapped_column(JSON)
-    raw_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("raw_snapshots.id"))
-
-
 # --------------------------------------------------------------------------- #
 # Competitors (public, OBSERVED only via t.me/s)
 # --------------------------------------------------------------------------- #
 
 
 class Competitor(Base, TimestampMixin):
-    """A public competitor channel monitored via t.me/s (no auth, scrape)."""
+    """A public competitor channel monitored via t.me/s (no auth, scrape).
+
+    ``category`` is ``"platform"`` (has own coupon website + Telegram, e.g. Grabon)
+    or ``"channel"`` (Telegram-only deal channel). Set during discovery via web
+    search; ``None`` means not yet classified.
+    """
 
     __tablename__ = "competitors"
 
@@ -303,13 +287,19 @@ class Competitor(Base, TimestampMixin):
         String(16), default=SourceAccessStatus.AVAILABLE
     )
     discovered_via: Mapped[str | None] = mapped_column(String(64))
+    category: Mapped[str | None] = mapped_column(String(16))  # "platform" | "channel"
     last_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_confidence: Mapped[float | None] = mapped_column(Float)
+    verified_by: Mapped[str | None] = mapped_column(String(16))  # heuristic|ai|manual
 
     posts: Mapped[list["CompetitorPost"]] = relationship(back_populates="competitor")
 
 
 class CompetitorPost(Base, TimestampMixin):
-    """An observed competitor post. Only what t.me/s exposes is stored."""
+    """An observed competitor post. Rich fields (views, forwards, reactions)
+    are populated when collected via Telethon (Telegram API) — the t.me/s
+    web-preview fallback only exposes views approximately.
+    """
 
     __tablename__ = "competitor_posts"
     __table_args__ = (
@@ -326,10 +316,12 @@ class CompetitorPost(Base, TimestampMixin):
     links: Mapped[list | None] = mapped_column(JSON)
     has_media: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # t.me/s exposes views (approx) and forwards; NOT reactions reliably.
-    views_text: Mapped[str | None] = mapped_column(String(32))   # e.g. "12.3K" as shown
-    views: Mapped[int | None] = mapped_column(Integer)           # parsed best-effort
+    # Populated natively when collected via Telethon (Telegram API).
+    # The t.me/s fallback populates views_text and views (best-effort parse).
+    views_text: Mapped[str | None] = mapped_column(String(32))
+    views: Mapped[int | None] = mapped_column(Integer)
     forwards: Mapped[int | None] = mapped_column(Integer)
+    reactions_total: Mapped[int | None] = mapped_column(Integer)
 
     raw_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("raw_snapshots.id"))
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

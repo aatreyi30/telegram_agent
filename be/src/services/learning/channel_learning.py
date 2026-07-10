@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.db.models import Post
-from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_learning import (
     LEARNING_VERSION,
     ChannelStyleProfile,
@@ -139,27 +138,18 @@ class ChannelLearningEngine(BaseCollector):
                        Post.reactions_total, func.length(Post.text), Post.has_media)
             ).all()
         }
-        npids = [r[8] for r in np_rows]
-        clusters = {}
-        if npids:
-            for npid, desc in s.execute(
-                select(PostClassification.normalized_post_id, PostTypeCluster.descriptor)
-                .join(PostTypeCluster, PostTypeCluster.id == PostClassification.cluster_id)
-                .where(PostClassification.normalized_post_id.in_(npids))
-            ).all():
-                clusters[npid] = desc
-
         facts = []
         for src_id, num_links, has_coupon, multi, emojis, hashtags, cta, mkey, npid in np_rows:
             meta = post_meta.get(src_id)
             if not meta:
                 continue
             posted_at, views, forwards, reactions, tlen, media = meta
+            cluster = "loot_deal" if multi else "single_deal"
             facts.append(Fact(
                 posted_at=posted_at, views=views, forwards=forwards, reactions=reactions,
                 text_len=tlen or 0, num_links=num_links, has_coupon=has_coupon,
                 is_multi_deal=multi, has_cta=bool(cta), has_media=bool(media),
-                emojis=emojis or [], hashtags=hashtags or [], cluster=clusters.get(npid),
+                emojis=emojis or [], hashtags=hashtags or [], cluster=cluster,
                 merchant_key=mkey,
             ))
         return facts
@@ -252,7 +242,7 @@ class ChannelLearningEngine(BaseCollector):
         if eligible:
             best = eligible[0]
             add("post_type", f"Post type '{best['post_type']}' is your top performer "
-                f"({lift_pct(best['avg_views_per_day'])}% vs channel avg age-normalized views).",
+                f"({lift_pct(best['avg_views_per_day'])}% vs channel avg views/day).",
                 "avg_views_per_day", best["avg_views_per_day"], best["post_count"],
                 {"post_type": best["post_type"], "baseline_views_per_day": baseline})
             worst = eligible[-1]
@@ -268,7 +258,7 @@ class ChannelLearningEngine(BaseCollector):
         if with_cta and without_cta and n_cta >= MIN_GROUP_SAMPLE and n_no >= MIN_GROUP_SAMPLE:
             diff = round((with_cta / without_cta - 1) * 100, 1)
             add("cta", f"Posts with a call-to-action get {diff}% "
-                f"{'more' if diff >= 0 else 'less'} age-normalized views than those without.",
+                f"{'more' if diff >= 0 else 'less'} views/day than those without.",
                 "avg_views_per_day", with_cta, n_cta,
                 {"with_cta": with_cta, "without_cta": without_cta, "n_with": n_cta, "n_without": n_no})
 
@@ -278,7 +268,7 @@ class ChannelLearningEngine(BaseCollector):
         if with_m and without_m and n_m >= MIN_GROUP_SAMPLE and n_nm >= MIN_GROUP_SAMPLE:
             diff = round((with_m / without_m - 1) * 100, 1)
             add("media", f"Posts with media get {diff}% "
-                f"{'more' if diff >= 0 else 'less'} age-normalized views than text-only.",
+                f"{'more' if diff >= 0 else 'less'} views/day than text-only.",
                 "avg_views_per_day", with_m, n_m,
                 {"with_media": with_m, "without_media": without_m, "n_with": n_m, "n_without": n_nm})
 
@@ -291,8 +281,8 @@ class ChannelLearningEngine(BaseCollector):
                 continue
             v, n = subgroup_vpd(lambda f, e=emoji: e in f.emojis)
             if v:
-                add("emoji", f"Posts using {emoji} get {lift_pct(v)}% vs channel avg age-normalized "
-                    "views (correlation, not proven cause — {} tends to appear in your best-performing "
+                add("emoji", f"Posts using {emoji} get {lift_pct(v)}% vs channel avg "
+                    "views/day (correlation, not proven cause — {} tends to appear in your best-performing "
                     "post types).".format(emoji),
                     "avg_views_per_day", v, n, {"emoji": emoji, "baseline_views_per_day": baseline,
                                                 "note": "correlational, not causal"})
