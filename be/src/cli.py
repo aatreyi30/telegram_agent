@@ -19,7 +19,6 @@ from src.services.collection.affiliate import AffiliateLinkCollector
 from src.services.collection.base import JobRunner
 from src.services.collection.merchant import MerchantEnrichmentCollector
 from src.services.collection.merchants.registry import seed_merchants
-from src.services.collection.scheduler import CollectionScheduler
 from src.services.collection.telegram_competitor import CompetitorCollector
 from src.services.collection.telegram_owned import OwnedChannelCollector
 from src.config.settings import get_settings
@@ -531,19 +530,10 @@ def competitor_intel() -> None:
 @app.command("competitor-intel-status")
 def competitor_intel_status() -> None:
     """Show competitor profiles and similarity to us."""
-    from sqlalchemy import select
-
-    from src.db.models_competitor_intel import (
-        COMPETITOR_INTEL_VERSION,
-        CompetitorProfile,
-    )
+    from src.services.intelligence.competitor import latest_profiles
 
     with session_scope() as s:
-        profiles = s.scalars(
-            select(CompetitorProfile)
-            .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorProfile.post_count.desc())
-        ).all()
+        profiles = sorted(latest_profiles(s), key=lambda p: -(p.post_count or 0))
         if not profiles:
             console.print("[yellow]No competitor profiles. Run `tgagent competitor-intel`.[/yellow]")
             return
@@ -1077,9 +1067,13 @@ def coach(question: str = typer.Argument(..., help="Your growth question")) -> N
     """Ask the agentic growth coach — it queries the engines and answers, grounded."""
     from src.ai.client import AIUnavailable
     from src.ai.coach import GrowthCoach
+    from src.config.settings import get_settings
+    from src.services.ai_outputs import record_ai_output
 
     try:
-        console.print(GrowthCoach().ask(question))
+        answer = GrowthCoach().ask(question)
+        console.print(answer)
+        record_ai_output("coach_qa", f"Q: {question}\nA: {answer}", get_settings().ai_model)
     except AIUnavailable as e:
         console.print(f"[yellow]{e}[/yellow]")
         raise typer.Exit(code=1)
@@ -1130,20 +1124,6 @@ def pipeline(
             console.print("\n[bold]AI briefing:[/bold]\n" + BriefingGenerator().generate())
         except AIUnavailable as e:
             console.print(f"[dim]AI briefing skipped: {e}[/dim]")
-
-
-@app.command("run")
-def run() -> None:
-    """Start the scheduler and run continuously (Ctrl-C to stop)."""
-    scheduler = CollectionScheduler()
-    scheduler.start()
-    console.print("[green]Collection scheduler running.[/green] Press Ctrl-C to stop.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        scheduler.shutdown()
-        console.print("stopped.")
 
 
 @app.command("status")
