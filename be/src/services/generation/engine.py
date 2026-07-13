@@ -87,7 +87,9 @@ class PostGenerationEngine(BaseCollector):
 
             if self.make_collection and len(selected) >= 2:
                 deals = [d for d, _ in selected]
-                text, meta = formatter.format_collection(deals, theme="Today's Top Picks")
+                # No explicit theme -> falls back to the org's editable
+                # collection_theme_default template (Settings > Post Templates).
+                text, meta = formatter.format_collection(deals)
                 s.add(GeneratedPost(
                     generated_at=now, post_type="collection", selection_bucket="collection",
                     deal_ids=[d.deal_id for d in deals], rendered_text=text, format_meta=meta,

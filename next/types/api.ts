@@ -169,38 +169,17 @@ export interface CompetitorDashboardResponse {
   unavailable: string[]; note: string; metrics: string[]; applied_window: number | null;
 }
 
-// GET /competitors/{id}/trends — day-bucketed series for the per-competitor detail page.
-// Row/field shapes are treated loosely (index signatures) since the endpoint is being built
-// concurrently; the detail page picks whichever keys are actually present defensively.
-export interface CompetitorTrendPoint { date: string; [key: string]: any; }
-
-export interface CompetitorTopPost {
-  post_id?: number; views?: number | null; forwards?: number | null; reactions?: number | null;
-  caption?: string | null; posted_at?: string | null; [key: string]: any;
-}
-
-export interface CompetitorHistogramBucket { bucket?: string; label?: string; count?: number; [key: string]: any; }
-
 // GET /competitor-dashboard/trends — posts/day & views/day for every competitor at
 // once, sharing one calendar window, keyed by competitor name for direct MultiLineChart use.
+// Row/field shapes are treated loosely (index signatures) since the endpoint is being built
+// concurrently; consumers pick whichever keys are actually present defensively.
+export interface CompetitorTrendPoint { date: string; [key: string]: any; }
+
 export interface CompetitorDashboardTrendsResponse {
   dates: string[];
   posting_trend: CompetitorTrendPoint[];
   views_trend: CompetitorTrendPoint[];
   competitors: { id: number; name: string }[];
-}
-
-export interface CompetitorTrendsResponse {
-  posting_trend: CompetitorTrendPoint[];
-  views_trend: CompetitorTrendPoint[];
-  merchant_trend: CompetitorTrendPoint[];
-  top_posts: CompetitorTopPost[];
-  content_mix_trend: CompetitorTrendPoint[];
-  media_text_trend: CompetitorTrendPoint[];
-  link_usage_trend: CompetitorTrendPoint[];
-  caption_length_distribution: CompetitorHistogramBucket[];
-  posting_consistency: { stdev?: number | null; variance?: number | null; daily?: CompetitorTrendPoint[]; [key: string]: any };
-  [key: string]: any;
 }
 
 export interface DealTypeAllocation { deal_type: string; post_type: string; target_posts: number; avg_views_per_day: number | null; }
@@ -259,8 +238,10 @@ export interface WeeklyResponse {
 export interface PostTemplates {
   single_loot_badge?: string;
   single_price?: string;
+  single_coupon_line?: string;
   collection_theme_default?: string;
   collection_item?: string;
+  collection_footer?: string;
   category_theme_with_tier?: string;
   category_theme_no_tier?: string;
   category_item?: string;

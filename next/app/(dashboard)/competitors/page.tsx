@@ -1,9 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
-import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ArrowRight01Icon, InformationCircleIcon } from "@hugeicons/core-free-icons";
+import { InformationCircleIcon } from "@hugeicons/core-free-icons";
 import { differenceInCalendarDays } from "date-fns";
 import { Async, Empty } from "@/components/Async";
 import { CategoryBadge } from "@/components/CategoryBadge";
@@ -109,7 +108,6 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
                 </Tooltip>
               </span>
             </TableHead>
-            <TableHead className="text-right">Trends</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -126,21 +124,11 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
               <TableCell><PostsPerDayCell e={e} /></TableCell>
               <TableCell>{fmtNum(e.posts)}</TableCell>
               <TableCell>{fmtNum(e.avg_views_per_post)}</TableCell>
-              <TableCell className="text-right">
-                {e.id != null && (
-                  <Link
-                    href={`/competitors/${e.id}`}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                  >
-                    View trends <HugeiconsIcon icon={ArrowRight01Icon} size={14} />
-                  </Link>
-                )}
-              </TableCell>
             </TableRow>
           ))}
           {entities.length === 0 && (
             <TableRow>
-              <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
+              <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
                 No competitors in this category.
               </TableCell>
             </TableRow>
