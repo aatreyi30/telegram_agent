@@ -34,6 +34,27 @@ def test_allocate_posts_weights_by_growth_action():
     assert by_type["many-links · multi-deal"] >= 1
 
 
+def test_cold_start_allocation_uses_competitor_reference():
+    # No owned content_mix and no owned history: the split must come from the Growth
+    # cold-start blueprint's competitor-derived reference, not a hardcoded default.
+    e = CampaignPlanningEngine()
+    blueprint = {"content_mix_reference": {"loot_deal": 80, "single_deal": 20}}
+    alloc = e._allocate_posts(blueprint, posts=10, recent={"post_types": {}})
+    by_type = {a["post_type"]: a["target_posts"] for a in alloc}
+    assert by_type.get("loot_deal", 0) > by_type.get("single_deal", 0)   # 80/20 skew honored
+    assert sum(by_type.values()) == 10
+
+
+def test_cold_start_allocation_neutral_default_when_nothing_known():
+    # No owned history AND no competitor reference -> neutral 60/40 single/loot,
+    # never an empty allocation.
+    e = CampaignPlanningEngine()
+    alloc = e._allocate_posts({}, posts=10, recent={"post_types": {}})
+    by_type = {a["post_type"]: a["target_posts"] for a in alloc}
+    assert sum(by_type.values()) == 10
+    assert by_type.get("single_deal", 0) >= by_type.get("loot_deal", 0)
+
+
 def test_risk_flags_merchant_overuse():
     e = CampaignPlanningEngine()
     recent = {"merchants": Counter({"amazon": 18, "flipkart": 2}),

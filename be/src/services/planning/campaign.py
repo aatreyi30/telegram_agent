@@ -167,7 +167,8 @@ class CampaignPlanningEngine(BaseCollector):
         empty list."""
         mix = blueprint.get("content_mix") or []
         if not mix:
-            return self._allocate_from_recent(posts, recent, perf)
+            return self._allocate_from_recent(posts, recent, perf,
+                                              reference=blueprint.get("content_mix_reference"))
         weights = []
         for m in mix:
             base = m.get("current_share") or 0.0
@@ -185,18 +186,26 @@ class CampaignPlanningEngine(BaseCollector):
         return out
 
     def _allocate_from_recent(self, posts: int, recent: dict | None,
-                              perf: dict | None = None) -> list[dict]:
+                              perf: dict | None = None,
+                              reference: dict | None = None) -> list[dict]:
         """Split ``posts`` across deal-types by their observed recent share
         (``recent['post_types']`` — a Counter of single_deal/loot_deal from owned
-        posts in the last 45 days). Falls back to a sensible 60/40 single/loot
-        default only when there is no history at all. Emits the same entry shape
-        as the Growth content-mix path so ``_expected_outcome`` and ``plain_label``
-        consumers keep working."""
+        posts in the last 45 days). With no owned history, fall back to the Growth
+        cold-start blueprint's competitor-derived mix (``content_mix_reference``, a
+        {single_deal/loot_deal: count} Counter over comparable channels) so the split
+        is *learned* from peers rather than guessed; only when even that is absent
+        (no owned history AND no usable competitors) do we use a neutral 60/40
+        single/loot default. Emits the same entry shape as the Growth content-mix
+        path so ``_expected_outcome`` and ``plain_label`` consumers keep working."""
         perf = perf or {}
         counts = dict((recent or {}).get("post_types") or {})
         if not counts:
-            # brand-new channel with no history — default to a single/loot mix
-            # rather than degrading to an empty allocation.
+            # no owned history — prefer the competitor-derived reference mix
+            counts = {k: v for k, v in (reference or {}).items()
+                      if k in ("single_deal", "loot_deal") and v}
+        if not counts:
+            # nothing to learn from at all — neutral default rather than an
+            # empty allocation.
             counts = {"single_deal": 6, "loot_deal": 4}
         total = sum(counts.values()) or 1
         # larger share first (deterministic tie-break by name) so any rounding
