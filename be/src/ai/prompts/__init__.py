@@ -16,11 +16,12 @@ from src.ai.prompts.copywriter import COPYWRITER_INSTRUCTIONS
 from src.ai.prompts.discovery import VERIFY_CANDIDATE_SYSTEM, verify_candidate_input
 from src.ai.prompts.grounding import GROUNDING_SYSTEM
 from src.ai.prompts.insight_writer import NARRATE_SYSTEM
-from src.ai.prompts.planner import PLAN_INSTRUCTIONS
+from src.ai.prompts.planner import PLAN_INSTRUCTIONS, WEEK_PLAN_INSTRUCTIONS
 
 __all__ = [
     "GROUNDING_SYSTEM",
     "PLAN_INSTRUCTIONS",
+    "WEEK_PLAN_INSTRUCTIONS",
     "NARRATE_SYSTEM",
     "COACH_SYSTEM",
     "DAILY_INSTRUCTIONS",

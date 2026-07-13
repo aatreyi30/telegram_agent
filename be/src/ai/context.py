@@ -286,6 +286,7 @@ def top_scored_deals(s: Session, limit: int = 15) -> list[dict]:
     ).all()
     return [{
         "deal_id": deal.deal_id, "title": deal.title, "merchant_key": deal.merchant_key,
+        "category": deal.category,
         "current_price": deal.current_price, "discount_percent": deal.discount_percent,
         "url": deal.clean_url or deal.url,
         "score": ds.score, "components": ds.components,

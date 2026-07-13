@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from src.ai.client import AIClient, AIUnavailable
 from src.ai.context import planning_context, to_json
 from src.ai.prompts import PLAN_INSTRUCTIONS as _PLAN_INSTRUCTIONS
+from src.ai.prompts import WEEK_PLAN_INSTRUCTIONS as _WEEK_PLAN_INSTRUCTIONS
 
 PLAN_SCHEMA_KEYS = ("date", "recommended_posts", "cadence_why", "post_slots",
                     "emphasis", "watch", "cited_numbers")
@@ -59,10 +60,9 @@ def _yesterday_ai_plan(s: Session, prev):
     )
 
 
-def _current_week_theme(s: Session, day) -> dict | None:
-    """The current week's CampaignPlan(WEEKLY) blueprint entry for ``day``'s weekday.
-    Mirrors service.py::weekly_brief's lookup of "the current week's plan" (most
-    recent WEEKLY row for this campaign version)."""
+def _current_week_plan(s: Session) -> dict | None:
+    """The current week's WEEKLY CampaignPlan blueprint (most recent row for this
+    campaign version — the AI weekly plan when one exists, else the deterministic one)."""
     from sqlalchemy import select
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
 
@@ -72,8 +72,13 @@ def _current_week_theme(s: Session, day) -> dict | None:
                CampaignPlan.plan_type == PlanType.WEEKLY)
         .order_by(CampaignPlan.generated_at.desc())
     )
-    themes = ((wk.blueprint or {}).get("daily_themes") if wk else None) or []
-    # daily_themes stores abbreviated weekdays (campaign.py's WEEKDAYS list)
+    return (wk.blueprint or {}) if wk else None
+
+
+def _week_theme_for(day, blueprint: dict | None) -> dict | None:
+    """The weekly blueprint's daily_themes entry for ``day``'s weekday, if any.
+    daily_themes stores abbreviated weekdays (campaign.py's WEEKDAYS list)."""
+    themes = (blueprint or {}).get("daily_themes") or []
     target = day.strftime("%a").lower()
     return next((t for t in themes if (t.get("day") or "")[:3].lower() == target), None)
 
@@ -106,10 +111,21 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     # Phase 3.3 -- top-N audience-scored deals (limit = 3x today's slots), with
     # `components` included so the AI can cite/explain a specific deal's score.
     scored_deals = ctx.top_scored_deals(s, limit=max(3 * (recommended_posts or 0), 9))
+    week_bp = _current_week_plan(s)
+    week_direction = ({k: week_bp.get(k) for k in ("direction", "loot_deal_ratio", "merchant_priorities")}
+                      if week_bp else None)
+    # The real vocabulary the live deal feed uses — the plan's slot `theme`/`merchant`
+    # must come from these so the just-in-time filler can actually match an item to
+    # each slot (otherwise it silently falls back to any fresh deal).
+    available_categories = sorted({d["category"] for d in scored_deals if d.get("category")})
+    available_merchants = sorted({d["merchant_key"] for d in scored_deals if d.get("merchant_key")})
     return {
         "today": day.isoformat(),
         "day_of_week": day.strftime("%A"),
-        "this_week_theme": _current_week_theme(s, day),
+        "this_week_theme": _week_theme_for(day, week_bp),
+        "this_week_direction": week_direction,
+        "available_categories": available_categories,
+        "available_merchants": available_merchants,
         "yesterday": yesterday,
         "yesterday_digest": yesterday_plan.ai_digest if yesterday_plan else None,
         "trajectory": traj["days"],
@@ -189,3 +205,50 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         return {"available": False, "reason": "unparseable plan", "plan": None,
                 "digest": digest, "facts": facts}
     return {"available": True, "digest": digest, "plan": plan, "facts": facts}
+
+
+def _parse_week_plan(raw: str) -> dict:
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        raise ValueError("no JSON object found in model output")
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"weekly plan JSON invalid: {e}") from e
+    data.setdefault("daily_themes", [])
+    data.setdefault("cited_numbers", [])
+    if not isinstance(data["daily_themes"], list):
+        raise ValueError("daily_themes must be a list")
+    return data
+
+
+def generate_week_plan(s: Session, week_start=None) -> dict:
+    """Grounded AI WEEKLY plan. Analyses last week's evidence — which post type (loot vs
+    single) and which merchants drew traction — and sets THIS week's direction: the
+    loot:deal ratio to aim for, merchant priorities, and a per-day theme_focus. The
+    daily planner reads this week's plan (``this_week_theme``) and aligns its slots to
+    it. Returns the raw digest + parsed plan + the facts it was grounded on."""
+    from datetime import timedelta
+    from src.ai.context import full_briefing_context
+    from src.services.analytics.periods import ist_today
+
+    if week_start is None:
+        today = ist_today()
+        week_start = today - timedelta(days=today.weekday())  # IST Monday
+
+    facts_ctx = full_briefing_context(s, weekly=True)
+    ai = AIClient()
+    try:
+        user = f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n{to_json(facts_ctx)}"
+        raw = ai.complete(user, system_extra=_WEEK_PLAN_INSTRUCTIONS, max_tokens=2000)
+    except AIUnavailable as e:
+        return {"available": False, "reason": str(e), "plan": None, "digest": "",
+                "facts": [facts_ctx]}
+    digest, plan_text = _split_digest_and_plan(raw)
+    try:
+        plan = _parse_week_plan(plan_text)
+    except ValueError:
+        return {"available": False, "reason": "unparseable weekly plan", "plan": None,
+                "digest": digest, "facts": [facts_ctx]}
+    plan.setdefault("week_start", week_start.isoformat())
+    return {"available": True, "digest": digest, "plan": plan, "facts": [facts_ctx]}

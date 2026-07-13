@@ -8,9 +8,9 @@ subscriber drift so a channel that's grown since those historical posts isn't
 under-predicted.
 
 Two entry points wire this into the pipeline (Section 2.2 design note):
-  * ``predict_for_slot`` -- called from ``daily_planner.build_and_schedule_day``
-    when a draft is queued (no real post yet, so ``post_type_cluster`` is
-    unknown -- see the docstring on ``predict_for_slot``).
+  * ``predict_for_slot`` -- called from ``jit_fill.fill_due_slots`` when a draft is
+    queued (no real post yet, so ``post_type_cluster`` is unknown -- see the
+    docstring on ``predict_for_slot``).
   * ``repredict_and_link_on_publish`` -- called from
     ``publishing.Publisher.publish`` at send time; re-predicts with fresh
     data and best-effort links the ``PostPrediction`` to the real ``post_id``.

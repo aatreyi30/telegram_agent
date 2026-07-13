@@ -109,33 +109,3 @@ def persist_weekly_plan(
             .order_by(CampaignPlan.generated_at.desc())
         ).first()
         return existing
-
-
-def run_ai_daily(s: Session) -> dict:
-    from src.ai.planner import generate_day_plan
-    from src.ai.factcheck import check_cited_numbers
-    from src.ai.context import daily_reports
-
-    result = generate_day_plan(s)
-    if not result.get("available"):
-        return {"ok": False, "reason": result.get("reason", "ai unavailable")}
-    # Fact-check against the exact facts the model was given (yesterday + trajectory),
-    # falling back to persisted reports if present.
-    facts = result.get("facts") or daily_reports(s, days=8)
-    fc = check_cited_numbers(result["plan"].get("cited_numbers", []), facts)
-    result["factcheck"] = fc
-    plan_row = persist_ai_plan(s, result)
-
-    scheduled = None
-    if fc["status"] == "passed":
-        try:
-            from src.services.generation.daily_planner import build_and_schedule_day
-            scheduled = build_and_schedule_day(s)
-        except Exception as e:
-            scheduled = {"ok": False, "reason": str(e)}
-    return {
-        "ok": True,
-        "plan_id": plan_row.id if plan_row else None,
-        "factcheck": fc,
-        "scheduled": scheduled,
-    }

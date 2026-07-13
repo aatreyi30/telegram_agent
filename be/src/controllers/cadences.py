@@ -34,8 +34,11 @@ ORG_HEALTH_HOURS = 1
 LEARNING_TIME = (2, 0)
 DB_CLEANUP_TIME = (3, 0)
 DAILY_REPORT_TIME = (5, 15)
-DAILY_PLAN_TIME = (5, 30)
-GROWTH_DETECTION_TIME = (6, 0)
+# Growth detection must run BEFORE the daily plan so the plan grounds on a fresh
+# blueprint built from yesterday's posting/growth (was the reverse — plan at 5:30
+# used a day-old blueprint).
+GROWTH_DETECTION_TIME = (5, 30)
+DAILY_PLAN_TIME = (6, 0)
 COMPETITOR_DISCOVER_TIME = (6, 30)
 COMPETITOR_INTEL_TIME = (7, 0)
 AI_DAILY_SUMMARY_TIME = (8, 0)
