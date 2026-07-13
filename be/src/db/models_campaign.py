@@ -96,7 +96,7 @@ class CampaignPlan(Base, TimestampMixin):
     is_ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)
     ai_digest: Mapped[str | None] = mapped_column(Text)
     cited_numbers: Mapped[list | None] = mapped_column(JSON)
-    factcheck_status: Mapped[str | None] = mapped_column(String(16))  # passed|failed|skipped
+    factcheck_status: Mapped[str | None] = mapped_column(String(16))  # passed|warn|failed|skipped
     report_ids: Mapped[list | None] = mapped_column(JSON)             # DailyChannelReport ids fed to the model
     # --- closed-loop feedback (§3.5) ---
     adherence: Mapped[dict | None] = mapped_column(JSON)              # planned vs published (deterministic)

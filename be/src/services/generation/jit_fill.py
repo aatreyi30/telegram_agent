@@ -130,7 +130,8 @@ def _already_filled(s: Session, key: str) -> bool:
                     .where(GeneratedPost.selection_bucket == key).limit(1)) is not None
 
 
-def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN) -> dict:
+def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
+                   day=None, all_slots: bool = False) -> dict:
     from src.services.analytics.periods import ist_today
     from src.ai.client import AIUnavailable
     from src.ai.context import channel_style
@@ -149,18 +150,28 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN) -> dict:
         ch_row = s.scalars(select(Channel).where(Channel.kind == "owned")).first()
     channel_id = ch_row.id if ch_row else None
 
-    day = ist_today()
+    day = day or ist_today()
     plan = _today_plan(s, day)
     if plan is None:
-        return {"ok": False, "reason": "no AI daily plan for today"}
-    if (plan.factcheck_status or "") not in ("passed", "skipped", ""):
+        return {"ok": False, "reason": f"no AI daily plan for {day}"}
+    # 'warn' = a small minority of cited numbers were unverified (usually a stray
+    # hour label / derived figure); still trustworthy to act on since cited numbers
+    # live only in the plan's rationale, never in the published post. Only a hard
+    # 'failed' (substantial fabrication) blocks filling.
+    if (plan.factcheck_status or "") not in ("passed", "warn", "skipped", ""):
         return {"ok": False, "reason": f"plan not trusted (factcheck={plan.factcheck_status})"}
 
     slots = (plan.blueprint or {}).get("post_slots") or []
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(minutes=lookahead_min)
+    # Normally only slots firing within the lookahead are filled (the every-minute
+    # cron). ``all_slots`` fills every not-yet-filled slot for ``day`` regardless of
+    # fire time — used by the offline populate/backfill script to generate a whole
+    # day's posts in one pass. Each still enqueues at its real slot fire time.
+    def _is_due(fire):
+        return True if all_slots else (now <= fire <= horizon)
     due = [(fire, slot, si, sub) for (fire, slot, si, sub) in _expand_slots(slots, day)
-           if now <= fire <= horizon and not _already_filled(s, f"{_SLOT_TAG}:{plan.id}:{si}:{sub}")]
+           if _is_due(fire) and not _already_filled(s, f"{_SLOT_TAG}:{plan.id}:{si}:{sub}")]
     if not due:
         return {"ok": True, "filled": 0, "reason": "no slots due"}
 

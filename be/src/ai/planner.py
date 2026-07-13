@@ -182,6 +182,16 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     # under a wrapper key), same one-level-of-nesting reasoning as the retro
     # above, so a cited `score` or `components.*` value is verifiable.
     facts.extend(plan_ctx.get("scored_deals") or [])
+    # The prompt SHOWS the AI these grounded inputs and instructs it to cite them
+    # (merchant share/avg-views, per-window averages, deal-type + post-type stats).
+    # They must be in the factcheck pool too — otherwise legitimately-cited numbers
+    # like "amazon share 0.316, 48.5 views/day" are flagged as hallucinations and
+    # the whole plan is marked untrusted (so jit_fill refuses to fill it). Each is a
+    # list of dicts; check_cited_numbers flattens one level, exposing their numeric
+    # fields. This corrects an omission in the guard — it does not weaken it.
+    for _key in ("merchant_mix", "posting_windows", "deal_type_allocation",
+                 "post_type_performance"):
+        facts.extend(plan_ctx.get(_key) or [])
     ai = AIClient()
     recon_note = ""
     if yesterday_plan is not None and yesterday_plan.reconciliation:
@@ -195,7 +205,7 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         )
     try:
         user = f"DATA:\n{to_json(plan_ctx)}{recon_note}{directive_note}"
-        raw = ai.complete(user, system_extra=_PLAN_INSTRUCTIONS, max_tokens=2400)
+        raw = ai.complete(user, system_extra=_PLAN_INSTRUCTIONS, max_tokens=3200)
     except AIUnavailable as e:
         return {"available": False, "reason": str(e), "plan": None, "digest": "", "facts": facts}
     digest, plan_text = _split_digest_and_plan(raw)

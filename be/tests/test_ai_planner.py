@@ -106,3 +106,37 @@ def test_build_plan_context_this_week_theme_absent():
     with session_scope() as s:
         ctx = build_plan_context(s, other_day)
     assert ctx["this_week_theme"] is None
+
+
+def test_factcheck_pool_includes_grounded_inputs(monkeypatch):
+    """Regression: numbers the AI is shown in merchant_mix / posting_windows /
+    deal_type_allocation must be in the factcheck pool, else a legitimately-cited
+    'amazon share 0.316, 48.5 views/day' is flagged as a hallucination and the plan
+    is marked untrusted (jit_fill then refuses it). Before the fix res['facts']
+    omitted these structures and this plan failed factcheck."""
+    from src.ai import planner
+    from src.ai.factcheck import check_cited_numbers
+    from src.db.session import session_scope
+
+    canned = (
+        "Digest.\n===PLAN===\n"
+        '{"date":"2026-07-08","recommended_posts":4,'
+        '"post_slots":[{"type":"single","window_ist":"18:00-20:00","theme":"electronics",'
+        '"merchant":"amazon","why":"amazon share 0.316, 48.5 views/day, evening avg 20.2"}],'
+        '"emphasis":"x","watch":"y","cited_numbers":[0.316,48.5,20.2]}'
+    )
+    monkeypatch.setattr(planner.AIClient, "complete", lambda self, *a, **k: canned)
+
+    inputs = {
+        "recommended_posts": 4,
+        "posting_windows": [{"part": "Evening", "avg_views_per_day": 20.2}],
+        "deal_type_allocation": [{"post_type": "single_deal", "target_posts": 3}],
+        "merchant_allocation": [{"merchant_key": "amazon", "share": 0.316,
+                                 "avg_views_per_day": 48.5}],
+    }
+    with session_scope() as s:
+        res = planner.generate_day_plan(s, day=DAY, inputs=inputs)
+
+    assert res["available"]
+    fc = check_cited_numbers(res["plan"]["cited_numbers"], res["facts"])
+    assert fc["status"] == "passed", fc["unverified"]

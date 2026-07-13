@@ -34,7 +34,7 @@ def persist_ai_plan(s: Session, result: dict) -> CampaignPlan | None:
         target_date=target_date,
         blueprint=plan,
         expected_outcome={"emphasis": plan.get("emphasis"), "watch": plan.get("watch")},
-        confidence=0.6 if fc.get("status") == "passed" else 0.3,
+        confidence={"passed": 0.6, "warn": 0.45}.get(fc.get("status"), 0.3),
         generated_at=datetime.now(timezone.utc),
         is_ai_generated=True,
         ai_digest=result.get("digest", ""),

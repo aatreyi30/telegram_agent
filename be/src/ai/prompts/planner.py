@@ -39,7 +39,7 @@ PLAN_INSTRUCTIONS = (
     "present in today's live deal feed, so a slot naming anything outside these lists "
     "cannot be filled. If AVAILABLE_CATEGORIES or AVAILABLE_MERCHANTS is empty, leave "
     "that field an empty string rather than inventing a value.\n"
-    "4. For each slot, write a `why` of 2-3 sentences of real reasoning (no "
+    "4. For each slot, write a `why` of 3-4 sentences of real reasoning (no "
     "sub-bullets) covering:\n"
     "   a. TIMING — cite the actual hourly/day-part number backing this window if one "
     "is present in POSTING_WINDOWS or post-type performance; if no historical number "
@@ -47,16 +47,25 @@ PLAN_INSTRUCTIONS = (
     "this slot') instead of generic filler like 'this is a peak hour'. Use DAY_OF_WEEK "
     "when it's relevant to a weekday-vs-weekend timing pattern the DATA actually "
     "supports — don't assert a weekday/weekend effect that isn't backed by a number.\n"
-    "   b. MERCHANT FIT — cite the chosen merchant's recent_share, avg_views_per_day, "
-    "sample_size, and basis from MERCHANT_MIX; reason about whether it fits this "
-    "window's likely audience. Explicitly address rotation/freshness: if repeating the "
-    "same top merchant as a prior slot, justify why the repetition is warranted (e.g. "
-    "it is still clearly outperforming); if deliberately picking a different merchant "
-    "than the top one, say you are rotating away from it to avoid audience fatigue and "
-    "name what you picked instead and why it's a reasonable second choice "
-    "(recent_share/avg_views_per_day/basis). Never repeat the identical merchant "
-    "back-to-back across adjacent slots without stating a reason.\n"
-    "   c. EVENT, only if relevant — if an upcoming EVENT is provided and relevant to "
+    "   b. MERCHANT FIT, AS A DECISION vs THE NEXT-BEST — cite the chosen merchant's "
+    "recent_share, avg_views_per_day, sample_size, and basis from MERCHANT_MIX, AND "
+    "name the specific runner-up merchant you passed over for this slot with ITS "
+    "number, so the sentence explains why THIS one wins over that concrete alternative "
+    "— not just a stat about the pick. (Put the runner-up's cited number in "
+    "cited_numbers too.) Address rotation/freshness: if repeating the same top "
+    "merchant as a prior slot, justify why (e.g. still clearly outperforming the "
+    "runner-up); if rotating to a different merchant, say you're avoiding audience "
+    "fatigue and why the one you chose is the best remaining option. Never repeat the "
+    "identical merchant back-to-back across adjacent slots without stating a reason.\n"
+    "   c. EXPECTED OUTCOME & CONTINUITY WITH YESTERDAY — state the concrete, testable "
+    "result you expect from this slot, grounded in the cited number (e.g. 'expect "
+    "roughly this merchant's ~X views/day here'), then connect it to what ACTUALLY "
+    "happened for this same window/merchant/type YESTERDAY or in the RETRO: did the "
+    "last attempt beat or miss its expectation, and how does that shape today's pick? "
+    "Reason in continuity — a hypothesis being tested — not a restatement of raw "
+    "numbers. If there is no prior result for this slot, say so plainly rather than "
+    "inventing continuity.\n"
+    "   d. EVENT, only if relevant — if an upcoming EVENT is provided and relevant to "
     "this slot's theme/merchant/timing, reference it (name + days-away) and how this "
     "slot should prep for or ride it; if no event is relevant to this slot, omit this "
     "point rather than forcing a mention.\n"
@@ -81,7 +90,8 @@ PLAN_INSTRUCTIONS = (
     '"cadence_why":"<why this many, grounded in RECENT_CADENCE/trajectory>",'
     '"post_slots":[{"type":"single|collection","window_ist":"HH:MM-HH:MM",'
     '"count":<int>,"theme":"<category>","merchant":"<merchant>",'
-    '"why":"<2-3 sentences: timing + merchant fit + event if relevant>"}],'
+    '"why":"<3-4 sentences: timing + merchant-fit-vs-next-best + '
+    'expected-outcome/continuity-with-yesterday + event if relevant>"}],'
     '"emphasis":"<one line>","watch":"<one line>","cited_numbers":[<numbers you used>]}\n'
     "No text before the digest and no text after the closing brace.\n\n"
 
