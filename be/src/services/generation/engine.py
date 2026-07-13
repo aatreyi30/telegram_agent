@@ -69,8 +69,9 @@ class PostGenerationEngine(BaseCollector):
             ranked = DealRanker(s).rank(enriched)
             selected = StrategyAwareSelector(strategy).select(ranked, count=self.count)
             # 4) FORMAT -> draft GeneratedPosts (affiliate links + emoji policy enforced)
+            templates = (org.settings or {}).get("post_templates") if org else None
             formatter = PostFormatter(s, affiliate_provider=get_affiliate_provider(org=org),
-                                      strategy=strategy)
+                                      strategy=strategy, templates=templates)
             created = 0
 
             for deal, bucket in selected:
@@ -150,8 +151,9 @@ class LiveDealGenerationEngine(BaseCollector):
             )
             org = _default_org(s)
             strategy = PostingStrategy.load(s)
+            templates = (org.settings or {}).get("post_templates") if org else None
             formatter = PostFormatter(s, affiliate_provider=get_affiliate_provider(org=org),
-                                      strategy=strategy)
+                                      strategy=strategy, templates=templates)
             # Strategy: multi-link collections are the winning type -> prefer them; cap
             # single-deal posts (a below-average type) at ~20% of the batch.
             single_cap = max(1, self.count // 5)
@@ -234,8 +236,9 @@ class ObservedPostGenerationEngine(BaseCollector):
 
             org = _default_org(s)
             strategy = PostingStrategy.load(s)
+            templates = (org.settings or {}).get("post_templates") if org else None
             formatter = PostFormatter(s, affiliate_provider=get_affiliate_provider(org=org),
-                                      strategy=strategy)
+                                      strategy=strategy, templates=templates)
             created = 0
             for c in selected:
                 type_vpd = perf.get(c.cluster or "", 0.0)

@@ -123,7 +123,8 @@ def get_org(org_id: int) -> dict:
 
 
 _EDITABLE_SETTINGS = {"grabon_shortener_url", "grabon_amazon_tag", "grabon_flipkart_params",
-                      "grabon_shorten_all", "preferred_categories", "auto_discover_competitors"}
+                      "grabon_shorten_all", "preferred_categories", "auto_discover_competitors",
+                      "post_templates"}
 
 
 def update_org(org_id: int, *, name: str | None = None, affiliate_provider: str | None = None,
@@ -140,7 +141,16 @@ def update_org(org_id: int, *, name: str | None = None, affiliate_provider: str 
             merged = dict(o.settings or {})
             for k in _EDITABLE_SETTINGS:
                 if k in settings:
-                    merged[k] = settings[k]
+                    # post_templates is a dict of individual templates: merge the
+                    # incoming sub-keys over the existing ones so a partial update
+                    # (e.g. editing one template) never wipes the others.
+                    if k == "post_templates" and isinstance(settings[k], dict):
+                        existing = merged.get(k)
+                        base = dict(existing) if isinstance(existing, dict) else {}
+                        base.update(settings[k])
+                        merged[k] = base
+                    else:
+                        merged[k] = settings[k]
             if affiliate_provider is not None:
                 merged["affiliate_provider"] = affiliate_provider
             o.settings = merged

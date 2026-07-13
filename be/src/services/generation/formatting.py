@@ -26,6 +26,32 @@ from src.db.models_learning import LEARNING_VERSION, ChannelStyleProfile
 from src.db.models_normalization import NormalizedPost, SourceType
 
 
+# Default post-text templates. Historically these were hardcoded f-strings; they
+# now live in ``org.settings["post_templates"]`` so they can be viewed/edited in
+# Settings. These defaults reproduce the exact previous output byte-for-byte when
+# no override is set. Placeholders (user-facing, documented) per template:
+#   single_price:             {price} {mrp} {discount}
+#   collection_item:          {title} {price} {link}
+#   category_theme_with_tier: {emoji_start} {label} {tier} {emoji_end}
+#   category_theme_no_tier:   {emoji_start} {label} {emoji_end}
+#   category_item:            {title} {price} {coupon} {link}
+#   category_coupon_suffix:   {code}
+#   (the rest are plain text with no placeholders)
+DEFAULT_POST_TEMPLATES: dict[str, str] = {
+    "single_loot_badge": "🔥 Loot price — limited time",
+    "single_price": "{price}  (was {mrp}, {discount}% off)",
+    "collection_theme_default": "Top Deals Today",
+    "collection_item": "• {title}{price}\n  {link}",
+    "category_theme_with_tier": "{emoji_start} {label} Under ₹{tier} {emoji_end}",
+    "category_theme_no_tier": "{emoji_start} {label} Deals {emoji_end}",
+    "category_item": "{title}{price}{coupon} - {link}",
+    "category_coupon_suffix": " (code {code})",
+    "observed_collection_theme": "Top Loot Deals",
+    "fallback_category_label": "Top Deals",
+    "fallback_title": "Deal",
+}
+
+
 def _fmt_price(v: float | None) -> str | None:
     if v is None:
         return None
@@ -41,9 +67,9 @@ def price_tier(max_price: float | None) -> int | None:
     return next((t for t in _PRICE_TIERS if max_price <= t), None)
 
 
-def pretty_category(key: str | None) -> str:
+def pretty_category(key: str | None, fallback: str = "Top Deals") -> str:
     if not key:
-        return "Top Deals"
+        return fallback
     return key.replace("-and-", " & ").replace("_", " ").replace("-", " ").title()
 
 
@@ -62,10 +88,10 @@ def strip_emojis(text: str | None, avoid: set[str]) -> str:
     return "\n".join(lines).strip()
 
 
-def _short_title(title: str | None, max_len: int = 60) -> str:
+def _short_title(title: str | None, max_len: int = 60, fallback: str = "Deal") -> str:
     """Trim verbose retailer titles to a clean product name at a word boundary."""
     if not title:
-        return "Deal"
+        return fallback
     t = title.split("|")[0].split(" - ")[0].strip()  # drop marketing sub-clauses
     if len(t) <= max_len:
         return t
@@ -74,10 +100,14 @@ def _short_title(title: str | None, max_len: int = 60) -> str:
 
 
 class PostFormatter:
-    def __init__(self, session: Session, affiliate_provider=None, strategy=None):
+    def __init__(self, session: Session, affiliate_provider=None, strategy=None,
+                 templates: dict | None = None):
         # Optional AffiliateProvider — converts product URLs to tracked/short links.
         # None -> clean URLs are used unchanged (untracked).
         self.affiliate = affiliate_provider
+        # Post-text templates. Merge any org overrides over the defaults so a
+        # partial/absent override still resolves every key (DEFAULT_POST_TEMPLATES).
+        self.templates = {**DEFAULT_POST_TEMPLATES, **(templates or {})}
         # Optional PostingStrategy — enforces the learned emoji policy (lead + avoid).
         self.strategy = strategy
         self.avoid_emojis = set(strategy.avoid_emojis) if strategy else set()
@@ -132,6 +162,24 @@ class PostFormatter:
         footer = foot_c.most_common(1)[0][0] if foot_c else None
         return cta, footer
 
+    def _render(self, key: str, **values) -> str:
+        """Render a post template by key with ``values``, NEVER raising.
+
+        A user can edit templates in Settings, so a template may reference an
+        unknown placeholder, contain a stray brace, or not even be a string. On
+        any such failure we fall back to the hardcoded DEFAULT_POST_TEMPLATES
+        entry for that key (rendered with the same values) so post generation
+        can never be crashed by a bad edit."""
+        template = self.templates.get(key, DEFAULT_POST_TEMPLATES[key])
+        try:
+            return template.format_map(values)
+        except (KeyError, ValueError, IndexError, AttributeError, TypeError):
+            default = DEFAULT_POST_TEMPLATES[key]
+            try:
+                return default.format_map(values)
+            except (KeyError, ValueError, IndexError, AttributeError, TypeError):
+                return default
+
     def _finish(self, rendered: str, meta: dict) -> tuple[str, dict]:
         """Final guard: strip any avoid-emoji from the whole post and record the
         emoji policy that was applied (so the draft can prove it followed strategy)."""
@@ -160,7 +208,7 @@ class PostFormatter:
     def format_single(self, deal: EnrichedDeal) -> tuple[str, dict]:
         lines: list[str] = []
         emoji = " ".join(self.lead_emojis) if self.uses_emoji and self.lead_emojis else ""
-        title = deal.title or "Deal"
+        title = deal.title or self._render("fallback_title")
         lines.append(f"{emoji} {title}".strip())
 
         # price highlight (only what we actually know)
@@ -168,14 +216,15 @@ class PostFormatter:
         cur = _fmt_price(deal.current_price)
         mrp = _fmt_price(deal.original_price)
         if cur and mrp and deal.discount_percent:
-            price_bits.append(f"{cur}  (was {mrp}, {deal.discount_percent:.0f}% off)")
+            price_bits.append(self._render("single_price", price=cur, mrp=mrp,
+                                           discount=f"{deal.discount_percent:.0f}"))
         elif cur:
             price_bits.append(cur)
         if price_bits:
             lines.append(price_bits[0])
 
         if deal.is_loot_deal:
-            lines.append("🔥 Loot price — limited time")
+            lines.append(self._render("single_loot_badge"))
 
         # link: affiliate/short link if a provider is configured, else clean URL
         link, aff_meta = self._finalize_link(deal)
@@ -196,17 +245,18 @@ class PostFormatter:
 
     def format_collection(self, deals: list[EnrichedDeal], theme: str | None = None) -> tuple[str, dict]:
         emoji = " ".join(self.lead_emojis) if self.uses_emoji and self.lead_emojis else ""
-        header = f"{emoji} {theme or 'Top Deals Today'}".strip()
+        header = f"{emoji} {theme or self._render('collection_theme_default')}".strip()
         lines = [header, ""]
         shortened_any = False
         for d in deals:
             cur = _fmt_price(d.current_price)
-            title = d.title or "Deal"
+            title = d.title or self._render("fallback_title")
             link, aff_meta = self._finalize_link(d)
             shortened_any = shortened_any or aff_meta.get("affiliate_shortened", False)
             link = link or ""
             price = f" — {cur}" if cur else ""
-            lines.append(f"• {title}{price}\n  {link}".rstrip())
+            lines.append(self._render("collection_item", title=title, price=price,
+                                      link=link).rstrip())
         rendered = "\n".join(lines)
         meta = {"used_emojis": self.lead_emojis, "item_count": len(deals),
                 "affiliate_status": (f"{self.affiliate.name}_applied" if self.affiliate
@@ -220,10 +270,10 @@ class PostFormatter:
         posts them: theme line + product/link items + learned CTA + share footer.
         All links are the REAL observed grbn.in links (reachable)."""
         lines: list[str] = []
-        lines.append(candidate.theme or "Top Loot Deals")
+        lines.append(candidate.theme or self._render("observed_collection_theme"))
         lines.append("")
         for it in candidate.items:
-            name = it.name or "Deal"
+            name = it.name or self._render("fallback_title")
             lines.append(f"{name} - {it.url}")
         lines.append("")
         if self.cta_line:
@@ -241,15 +291,20 @@ class PostFormatter:
         channel's signature '<Category> Under ₹X' format, with real product links."""
         e1 = self.lead_emojis[0] if self.lead_emojis and self.uses_emoji else ""
         e2 = self.lead_emojis[1] if len(self.lead_emojis) > 1 and self.uses_emoji else ""
-        label = pretty_category(category_key)
+        label = pretty_category(category_key, self._render("fallback_category_label"))
         prices = [d.current_price for d in deals if d.current_price is not None]
         tier = price_tier(max(prices)) if prices else None
-        theme = f"{e1} {label} Under ₹{tier} {e2}".strip() if tier else f"{e1} {label} Deals {e2}".strip()
+        if tier:
+            theme = self._render("category_theme_with_tier", emoji_start=e1, label=label,
+                                 tier=tier, emoji_end=e2).strip()
+        else:
+            theme = self._render("category_theme_no_tier", emoji_start=e1, label=label,
+                                 emoji_end=e2).strip()
 
         lines = [theme, ""]
         shortened_any = False
         for d in deals:
-            title = _short_title(d.title)
+            title = _short_title(d.title, fallback=self._render("fallback_title"))
             link, aff_meta = self._finalize_link(d)
             shortened_any = shortened_any or aff_meta.get("affiliate_shortened", False)
             link = link or ""
@@ -258,8 +313,9 @@ class PostFormatter:
             coupon = ""
             for tag in (d.tags or []):
                 if isinstance(tag, str) and tag.startswith("coupon:"):
-                    coupon = f" (code {tag.split(':', 1)[1]})"
-            lines.append(f"{title}{price}{coupon} - {link}")
+                    coupon = self._render("category_coupon_suffix", code=tag.split(':', 1)[1])
+            lines.append(self._render("category_item", title=title, price=price,
+                                      coupon=coupon, link=link))
         lines.append("")
         if self.cta_line:
             lines.append(self.cta_line)
@@ -276,7 +332,7 @@ class PostFormatter:
     def format_observed_single(self, candidate) -> tuple[str, dict]:
         it = candidate.items[0]
         emoji = " ".join(self.lead_emojis) if self.uses_emoji and self.lead_emojis else ""
-        title = it.name or (candidate.theme or "Deal")
+        title = it.name or (candidate.theme or self._render("fallback_title"))
         lines = [f"{emoji} {title}".strip(), it.url]
         if self.cta_line:
             lines.append(self.cta_line)

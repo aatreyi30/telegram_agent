@@ -17,6 +17,7 @@ from src.config.settings import get_settings
 from src.db.models import Channel
 from src.db.models_org import Organization, User, UserRole
 from src.logger import get_logger
+from src.services.generation.formatting import DEFAULT_POST_TEMPLATES
 
 logger = get_logger(__name__)
 
@@ -35,6 +36,12 @@ def _org_settings(s) -> dict:
         "auto_discover_competitors": True,
         "owned_channels": s.owned_channels,
         "competitor_channels": s.competitor_channels,
+        # Editable post-text templates (viewable/editable in Settings). Seeded with
+        # the exact previous hardcoded strings so output is unchanged until edited.
+        # Because startup merge is DB-wins at the top level, an org that predates
+        # this key gets it backfilled here (merged.update() below keeps this default
+        # when the org has no "post_templates" of its own).
+        "post_templates": dict(DEFAULT_POST_TEMPLATES),
     }
 
 
