@@ -126,6 +126,9 @@ class JobManager:
                 from src.ai.client import AIUnavailable
                 try:
                     self.last_briefing = BriefingGenerator().generate()
+                    from src.config.settings import get_settings
+                    from src.services.ai_outputs import record_ai_output
+                    record_ai_output("daily_briefing", self.last_briefing, get_settings().ai_model)
                     self._emit("  ✓ briefing ready")
                 except AIUnavailable as e:
                     self._emit(f"  • briefing skipped: {e}")

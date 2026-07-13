@@ -35,6 +35,7 @@ from src.services.events import Event, EventType, get_event_bus
 from src.services.intelligence.growth import plain_label
 from src.services.metrics.merchant_metrics import compute_merchant_metrics
 from src.logger import get_logger
+from src.services.planning import posting_windows
 from src.services.planning.calendar import seed_sale_events, upcoming_events
 
 # Minimum recent-window sample size before a merchant's performance signal is
@@ -90,7 +91,7 @@ class CampaignPlanningEngine(BaseCollector):
 
             # build plans
             daily = self._daily_plan(s, now, blueprint, perf, recent, today, event_data)
-            weekly = self._weekly_plan(blueprint, perf, today, event_data)
+            weekly = self._weekly_plan(blueprint, perf, today, event_data, recent, s, now)
             evt = self._event_plan(event_data[0], blueprint, perf) if event_data else None
 
             # persist (replace this version's plans)
@@ -125,12 +126,48 @@ class CampaignPlanningEngine(BaseCollector):
             post_types[pt] += 1
         return {"total": total, "merchants": merch, "post_types": post_types}
 
-    def _allocate_posts(self, blueprint: dict, posts: int) -> list[dict]:
+    def _recent_hourly_all(self, s: Session, now: datetime) -> list[list]:
+        """Per-IST-hour posting profile from the channel's own recent history, in
+        the ``[[hour, avg_views_per_day, n], ...]`` shape ``build_posting_plan``
+        expects. Uses a 90-day window for a robust profile (independent of the
+        45-day ``_recent_distribution`` window) and the same owned-rows source as
+        the "Posts by hour" analytics chart, so the plan stays consistent with it.
+        Returns ``[]`` when there is no history to learn from."""
+        from src.services.analytics.views import _owned_rows
+        from src.services.analytics.periods import to_ist
+
+        rows = _owned_rows(s, start=now - timedelta(days=90), end=now)
+        by_hour: dict[int, list[float]] = {}
+        for r in rows:
+            posted_at, views = r[0], r[1]
+            if posted_at is None or views is None:
+                continue
+            hour = to_ist(posted_at).hour
+            acc = by_hour.setdefault(hour, [0.0, 0])
+            acc[0] += views
+            acc[1] += 1
+        return [[h, sv / n, n] for h, (sv, n) in sorted(by_hour.items()) if n > 0]
+
+    def _recent_posting_windows(self, s: Session, now: datetime,
+                                posts_per_day) -> list[dict]:
+        """History-derived posting windows sized to ``posts_per_day`` — the
+        fallback used when the Growth blueprint has no ``posting_plan`` yet
+        (cold-start / before learning has run)."""
+        return posting_windows.build_posting_plan(
+            posts_per_day, self._recent_hourly_all(s, now)) or []
+
+    def _allocate_posts(self, blueprint: dict, posts: int,
+                        recent: dict | None = None, perf: dict | None = None) -> list[dict]:
         """Distribute the daily post budget across deal-types, nudged by the Growth
-        content-mix action (increase/maintain/decrease)."""
+        content-mix action (increase/maintain/decrease).
+
+        When the Growth blueprint has no ``content_mix`` (cold-start, or no
+        GrowthStrategy row yet) we fall back to the observed recent single-vs-loot
+        split so the plan still allocates the mix we actually post rather than an
+        empty list."""
         mix = blueprint.get("content_mix") or []
         if not mix:
-            return []
+            return self._allocate_from_recent(posts, recent, perf)
         weights = []
         for m in mix:
             base = m.get("current_share") or 0.0
@@ -145,6 +182,40 @@ class CampaignPlanningEngine(BaseCollector):
             out.append({"deal_type": plain_label(m["post_type"]),
                         "post_type": m["post_type"], "target_posts": n,
                         "avg_views_per_day": m.get("avg_views_per_day")})
+        return out
+
+    def _allocate_from_recent(self, posts: int, recent: dict | None,
+                              perf: dict | None = None) -> list[dict]:
+        """Split ``posts`` across deal-types by their observed recent share
+        (``recent['post_types']`` — a Counter of single_deal/loot_deal from owned
+        posts in the last 45 days). Falls back to a sensible 60/40 single/loot
+        default only when there is no history at all. Emits the same entry shape
+        as the Growth content-mix path so ``_expected_outcome`` and ``plain_label``
+        consumers keep working."""
+        perf = perf or {}
+        counts = dict((recent or {}).get("post_types") or {})
+        if not counts:
+            # brand-new channel with no history — default to a single/loot mix
+            # rather than degrading to an empty allocation.
+            counts = {"single_deal": 6, "loot_deal": 4}
+        total = sum(counts.values()) or 1
+        # larger share first (deterministic tie-break by name) so any rounding
+        # remainder lands in the largest bucket.
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        targets = {pt: (posts * c) // total for pt, c in ordered}
+        remainder = posts - sum(targets.values())
+        for pt, _c in ordered:
+            if remainder <= 0:
+                break
+            targets[pt] += 1
+            remainder -= 1
+        out = []
+        for pt, _c in ordered:
+            n = targets[pt]
+            if n <= 0:
+                continue
+            out.append({"deal_type": plain_label(pt), "post_type": pt,
+                        "target_posts": n, "avg_views_per_day": perf.get(pt)})
         return out
 
     def _merchant_allocation(self, s: Session, recent: dict, now: datetime) -> list[dict]:
@@ -242,8 +313,11 @@ class CampaignPlanningEngine(BaseCollector):
 
     def _daily_plan(self, s: Session, now: datetime, blueprint, perf, recent, today, events) -> dict:
         posts = int(round(blueprint.get("posting_frequency_baseline") or 8))
-        allocation = self._allocate_posts(blueprint, posts)
-        schedule = blueprint.get("posting_plan") or []
+        allocation = self._allocate_posts(blueprint, posts, recent, perf)
+        # Fall back to the channel's own historical posting-hours when the Growth
+        # blueprint has no posting_plan yet (cold-start / before learning) so the
+        # plan still recommends windows instead of an empty list.
+        schedule = blueprint.get("posting_plan") or self._recent_posting_windows(s, now, posts)
         merchants = self._merchant_allocation(s, recent, now)
         risks = self._risks(recent, posts)
         near = events[0] if events and events[0]["days_away"] <= 7 else None
@@ -266,12 +340,27 @@ class CampaignPlanningEngine(BaseCollector):
                 "evidence": {"growth_version": GROWTH_VERSION, "recent_posts_45d": recent["total"]},
                 "confidence": conf}
 
-    def _weekly_plan(self, blueprint, perf, today, events) -> dict:
+    def _weekly_plan(self, blueprint, perf, today, events, recent: dict | None = None,
+                     s: Session | None = None, now: datetime | None = None) -> dict:
         posts = int(round(blueprint.get("posting_frequency_baseline") or 8))
         mix = [m for m in (blueprint.get("content_mix") or [])]
-        # rotate top deal-types across the week for variety (diversity target)
-        ordered = sorted(mix, key=lambda m: (m.get("avg_views_per_day") or 0), reverse=True)
-        top_types = [plain_label(m["post_type"]) for m in ordered[:4]] or ["mixed deals"]
+        # Same posting-window fallback as the daily plan: use the channel's own
+        # historical posting-hours when the Growth blueprint has no posting_plan
+        # yet, so the weekly plan recommends windows instead of nothing.
+        schedule = blueprint.get("posting_plan") or (
+            self._recent_posting_windows(s, now, posts) if s is not None and now is not None else [])
+        # Week-wide deal-type split: Growth content_mix when present, else the
+        # observed recent single/loot history — so we stop degrading to a bare
+        # "mixed deals" label whenever real posting history exists.
+        weekly_allocation = self._allocate_posts(blueprint, posts * 7, recent, perf)
+        if mix:
+            # rotate top deal-types across the week for variety (diversity target)
+            ordered = sorted(mix, key=lambda m: (m.get("avg_views_per_day") or 0), reverse=True)
+            top_types = [plain_label(m["post_type"]) for m in ordered[:4]]
+        else:
+            top_types = [a["deal_type"] for a in weekly_allocation]
+        if not top_types:
+            top_types = ["mixed deals"]
         days = []
         for i in range(7):
             d = today + timedelta(days=i)
@@ -283,6 +372,10 @@ class CampaignPlanningEngine(BaseCollector):
                for e in events[:3]]
         bp = {"posts_per_day": posts, "posts_per_week": posts * 7,
               "daily_themes": days, "rotation_for_diversity": top_types,
+              "posting_windows": [{"part": p["part"], "hours": p["hours"],
+                                   "posts": p["recommended_posts_per_day"],
+                                   "sample_size": p.get("sample_size")} for p in schedule],
+              "deal_type_allocation": weekly_allocation,
               "upcoming_events": evs}
         return {"plan_type": PlanType.WEEKLY,
                 "title": f"Weekly plan — week of {today.isoformat()}",

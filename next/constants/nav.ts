@@ -3,6 +3,7 @@ import {
   Analytics01Icon,
   Calendar03Icon,
   CheckListIcon,
+  Clock01Icon,
   Home01Icon,
   Sent02Icon,
   Package02Icon,
@@ -24,5 +25,6 @@ export const NAV: NavItem[] = [
   { to: "/competitors", label: "Competitors", icon: UserGroupIcon, group: "Understand" },
   { to: "/plan", label: "Plan", icon: CheckListIcon, group: "Act" },
   { to: "/drafts", label: "Drafts", icon: Sent02Icon, group: "Act" },
-  { to: "/queue", label: "Schedule", icon: Package02Icon, group: "Act" },
+  { to: "/queue", label: "Queue", icon: Package02Icon, group: "Act" },
+  { to: "/schedulers", label: "Jobs", icon: Clock01Icon, group: "System" },
 ];

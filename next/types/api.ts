@@ -149,7 +149,19 @@ export interface CompetitorEntity {
   [key: string]: any;
 }
 
-export interface CompetitorsResponse { profiles: CompetitorEntity[]; }
+// GET /competitors — Settings > Competitors tab. Raw `competitors` table rows (every
+// competitor, including freshly-added ones with no profile yet) — distinct from
+// CompetitorEntity (the comparison/dashboard entity, PROFILED competitors only).
+// Management CRUD (edit/delete) needs every row's `id`.
+export interface CompetitorRow {
+  id: number; username: string; title: string | null;
+  category: "platform" | "channel" | null; status: string;
+  last_collected_at: string | null; posts: number;
+  monitoring_enabled: boolean;
+  [key: string]: any;
+}
+
+export interface CompetitorsResponse { competitors: CompetitorRow[]; }
 
 export interface CompetitorDashboardResponse {
   summary: { total: number; platform: number; channel: number; };
@@ -157,29 +169,17 @@ export interface CompetitorDashboardResponse {
   unavailable: string[]; note: string; metrics: string[]; applied_window: number | null;
 }
 
-// GET /competitors/{id}/trends — day-bucketed series for the per-competitor detail page.
+// GET /competitor-dashboard/trends — posts/day & views/day for every competitor at
+// once, sharing one calendar window, keyed by competitor name for direct MultiLineChart use.
 // Row/field shapes are treated loosely (index signatures) since the endpoint is being built
-// concurrently; the detail page picks whichever keys are actually present defensively.
+// concurrently; consumers pick whichever keys are actually present defensively.
 export interface CompetitorTrendPoint { date: string; [key: string]: any; }
 
-export interface CompetitorTopPost {
-  post_id?: number; views?: number | null; forwards?: number | null; reactions?: number | null;
-  caption?: string | null; posted_at?: string | null; [key: string]: any;
-}
-
-export interface CompetitorHistogramBucket { bucket?: string; label?: string; count?: number; [key: string]: any; }
-
-export interface CompetitorTrendsResponse {
+export interface CompetitorDashboardTrendsResponse {
+  dates: string[];
   posting_trend: CompetitorTrendPoint[];
   views_trend: CompetitorTrendPoint[];
-  merchant_trend: CompetitorTrendPoint[];
-  top_posts: CompetitorTopPost[];
-  content_mix_trend: CompetitorTrendPoint[];
-  media_text_trend: CompetitorTrendPoint[];
-  link_usage_trend: CompetitorTrendPoint[];
-  caption_length_distribution: CompetitorHistogramBucket[];
-  posting_consistency: { stdev?: number | null; variance?: number | null; daily?: CompetitorTrendPoint[]; [key: string]: any };
-  [key: string]: any;
+  competitors: { id: number; name: string }[];
 }
 
 export interface DealTypeAllocation { deal_type: string; post_type: string; target_posts: number; avg_views_per_day: number | null; }
@@ -232,9 +232,31 @@ export interface WeeklyResponse {
   what_changed: ReasonedInsightDTO[]; recommendations: GrowthRecommendation[]; ai_summary: string | null;
 }
 
+// Editable post-text templates stored in org.settings.post_templates. Every key is
+// optional in the type (a fresh org may not have overridden them yet) but the backend
+// seeds all 11; the settings editor prefills from whatever the GET returns.
+export interface PostTemplates {
+  single_loot_badge?: string;
+  single_price?: string;
+  single_coupon_line?: string;
+  collection_theme_default?: string;
+  collection_item?: string;
+  collection_footer?: string;
+  category_theme_with_tier?: string;
+  category_theme_no_tier?: string;
+  category_item?: string;
+  category_coupon_suffix?: string;
+  observed_collection_theme?: string;
+  fallback_category_label?: string;
+  fallback_title?: string;
+}
+
+export type PostTemplateKey = keyof PostTemplates;
+
 export interface OrgSettings {
   grabon_shortener_url?: string; grabon_amazon_tag?: string; grabon_flipkart_params?: string;
-  grabon_shorten_all?: boolean; preferred_categories?: string[]; [key: string]: unknown;
+  grabon_shorten_all?: boolean; preferred_categories?: string[];
+  auto_discover_competitors?: boolean; post_templates?: PostTemplates; [key: string]: unknown;
 }
 
 export interface OrgResponse { id: number; key: string; name: string; affiliate_provider: string; settings: OrgSettings; channels: number; }
@@ -321,6 +343,8 @@ export interface DailyBrief {
   factcheck_status: "pass" | "warn" | null;
   ai_available: boolean;
   upcoming_event: UpcomingEventBrief | null;
+  operator_directive?: string | null;
+  can_regenerate?: boolean;
 }
 
 export interface WeeklyBriefDay {
@@ -342,4 +366,67 @@ export interface WeeklyBrief {
   upcoming_events: UpcomingEventRow[];
   digest: string;
   ai_available: boolean;
+  operator_directive?: string | null;
+  can_regenerate?: boolean;
 }
+
+// GET /retro/latest — Phase 2.4 weekly retro: prediction accuracy, rule-based
+// adjustments for next week's plan, and the engagement/churn readout it's based on.
+export interface RetroPrediction { mape_views_24h: number | null; n_posts: number; bias: number | null; }
+
+export interface RetroMiss {
+  post_id: number; pred: number | null; actual: number | null;
+  type: string | null; merchant: string | null;
+}
+
+export interface RetroPlanAdherence { planned: number; published: number; blocked_stale: number; skipped: number; }
+
+export interface RetroEngagement {
+  median_forward_rate: number | null; best_hour_bucket: string | null; best_type_by_engagement: string | null;
+}
+
+export interface RetroChurnVsFrequency {
+  high_leave_days_posts_per_day: number | null; low_leave_days_posts_per_day: number | null;
+}
+
+export interface RetroMetrics {
+  prediction: RetroPrediction;
+  top_over: RetroMiss[]; top_under: RetroMiss[];
+  plan_adherence: RetroPlanAdherence;
+  engagement: RetroEngagement;
+  churn_vs_frequency: RetroChurnVsFrequency;
+  adjustments: string[];
+}
+
+export type RetroLatest =
+  | { available: false; week_start: null; metrics: null; narrative: null; }
+  | { available: true; week_start: string; metrics: RetroMetrics; narrative: string | null; created_at?: string | null; };
+
+// GET /deals/scored — Phase 3.3 audience-aware deal score from the scheduled
+// DealScoringEngine, with an explainable per-component breakdown (each 0..1).
+export interface ScoredDealComponents {
+  discount_depth: number; audience_affinity: number; freshness: number;
+  time_fit: number; price_credibility: number; scarcity_of_coverage: number;
+}
+
+export interface ScoredDeal {
+  deal_id: string; title: string | null; merchant_key: string | null;
+  current_price: number | null; discount_percent: number | null; url: string | null;
+  score: number; components: ScoredDealComponents; scored_at: string | null;
+}
+
+export interface ScoredDealsResponse { items: ScoredDeal[]; }
+
+export interface SchedulerJobStatus {
+  key: string; name: string; cadence: string; priority: string;
+  last_status: string | null; last_detail: string | null; last_error: string | null;
+  last_started_at: string | null; last_duration_ms: number | null;
+  cadence_minutes: number; overdue: boolean | null;
+}
+
+export interface SchedulerRunRow {
+  key: string; status: string; detail: string | null; error: string | null;
+  processed: number; duration_ms: number | null; at: string | null;
+}
+
+export interface SchedulerRunsResponse { jobs: SchedulerJobStatus[]; runs: SchedulerRunRow[]; }

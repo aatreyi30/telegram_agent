@@ -33,6 +33,7 @@ client.interceptors.response.use(
 export const api = {
   get: <T>(path: string) => client.get(path) as unknown as Promise<T>,
   post: <T>(path: string, body?: unknown) => client.post(path, body) as unknown as Promise<T>,
+  put: <T>(path: string, body?: unknown) => client.put(path, body) as unknown as Promise<T>,
   patch: <T>(path: string, body?: unknown) => client.patch(path, body) as unknown as Promise<T>,
   del: <T>(path: string) => client.delete(path) as unknown as Promise<T>,
 };

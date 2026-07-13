@@ -59,6 +59,18 @@ class Publisher:
             self._set(post_id, PostStatus.BLOCKED, note)
             return {"ok": False, "status": PostStatus.BLOCKED, "note": note}
 
+        # Phase 0.3 — never publish a stale/dead/repriced deal: re-check every
+        # deal this post carries right before the actual send.
+        from src.services.generation.revalidate import revalidate_deals
+
+        stale_min = self.settings.prepublish_max_staleness_min
+        verdict = revalidate_deals(post.deal_ids or [], max_staleness_min=stale_min)
+        if not verdict["ok"]:
+            note = f"blocked_stale: {verdict['reason']}"
+            self._set(post_id, PostStatus.BLOCKED, note)
+            # notification_engine already flags BLOCKED posts; nothing else needed this phase
+            return {"ok": False, "status": PostStatus.BLOCKED, "note": note}
+
         ok, reason = asyncio.run(self._check_and_publish(post_id, channel_ref, confirm=True))
         status = PostStatus.PUBLISHED if ok else PostStatus.BLOCKED
         full_note = (aff_note + " " + reason).strip()
@@ -66,6 +78,16 @@ class Publisher:
         if ok:
             self.bus.publish(Event(event_type=EventType.POST_PUBLISHED, entity_type="post",
                                    entity_id=str(post_id), data={"channel": channel_ref}))
+            # Phase 2.2 -- re-predict with fresh features at publish time and
+            # best-effort backfill the PostPrediction<->post_id link. Dormant
+            # today: _check_and_publish above always resolves `ok=False`
+            # (auto-send held), so this rarely fires yet -- wired now so it
+            # activates automatically the moment publishing is enabled.
+            try:
+                from src.services.analytics.prediction import repredict_and_link_on_publish
+                repredict_and_link_on_publish(post_id, channel_ref)
+            except Exception:
+                logger.exception("[publishing] prediction hook failed for post #%s", post_id)
         return {"ok": ok, "status": status, "note": full_note}
 
     async def _check_and_publish(self, post_id: int, channel_ref: str, confirm: bool):

@@ -79,7 +79,7 @@ def _current_week_theme(s: Session, day) -> dict | None:
 
 
 def build_plan_context(s: Session, day, inputs: dict | None = None,
-                        yesterday_plan=_UNSET) -> dict:
+                        yesterday_plan=_UNSET, directive: str | None = None) -> dict:
     """Assemble the grounded facts for planning ``day``: yesterday's results (report
     or live), the 14-day posting trajectory (ending yesterday), the recent cadence,
     the stale lifetime baseline, post-type performance, the day of week, this week's
@@ -89,7 +89,10 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     Never bails on missing reports — falls back to live day-facts computed from
     posts. ``yesterday_plan`` lets callers that already fetched yesterday's
     CampaignPlan row (e.g. ``generate_day_plan``, for its reconciliation note) pass
-    it in instead of this function querying it again."""
+    it in instead of this function querying it again. ``directive`` is the Steer &
+    Regenerate operator directive (if any); it's surfaced here too (not just in the
+    prompt's appended block) so callers/tests can inspect it alongside the rest of
+    the grounding context."""
     from datetime import timedelta
     from src.ai import context as ctx
 
@@ -99,6 +102,10 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     inputs = inputs or {}
     if yesterday_plan is _UNSET:
         yesterday_plan = _yesterday_ai_plan(s, prev)
+    recommended_posts = inputs.get("recommended_posts", traj["recent_cadence"])
+    # Phase 3.3 -- top-N audience-scored deals (limit = 3x today's slots), with
+    # `components` included so the AI can cite/explain a specific deal's score.
+    scored_deals = ctx.top_scored_deals(s, limit=max(3 * (recommended_posts or 0), 9))
     return {
         "today": day.isoformat(),
         "day_of_week": day.strftime("%A"),
@@ -108,19 +115,28 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
         "trajectory": traj["days"],
         "recent_cadence": traj["recent_cadence"],
         "lifetime_baseline": traj["lifetime_baseline"],
-        "recommended_posts": inputs.get("recommended_posts", traj["recent_cadence"]),
+        "recommended_posts": recommended_posts,
         "posting_windows": inputs.get("posting_windows", []),
         "deal_type_allocation": inputs.get("deal_type_allocation", []),
         "merchant_mix": inputs.get("merchant_allocation", []),
         "post_type_performance": ctx.post_type_performance(s),
         "upcoming_event": inputs.get("upcoming_event"),
+        "retro": ctx.latest_retro(s),
+        "scored_deals": scored_deals,
+        "operator_directive": directive,
     }
 
 
-def generate_day_plan(s: Session, day=None, inputs: dict | None = None) -> dict:
+def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
+                       directive: str | None = None) -> dict:
     """Grounded AI day plan for ``day`` (default: latest owned day). Returns the raw
     digest + parsed plan and the facts it was given (so callers can fact-check).
-    ``inputs`` supplies the deterministic targets the AI expands into a slot schedule."""
+    ``inputs`` supplies the deterministic targets the AI expands into a slot schedule.
+    ``directive`` is an optional Steer & Regenerate operator directive: free-text
+    guidance injected into the prompt as a highest-priority block (mirroring the
+    yesterday's-reconciliation note below) that the AI must honor or explicitly
+    reject in the digest — it never bypasses the downstream fact-check, since the
+    plan's cited numbers are still verified against ``facts`` regardless."""
     from datetime import timedelta
 
     from src.services.analytics.day import latest_owned_date
@@ -137,15 +153,32 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None) -> dict:
     except Exception:
         yesterday_plan = None
 
-    plan_ctx = build_plan_context(s, day, inputs, yesterday_plan=yesterday_plan)
+    plan_ctx = build_plan_context(s, day, inputs, yesterday_plan=yesterday_plan, directive=directive)
     facts = [plan_ctx["yesterday"], *plan_ctx["trajectory"]]
+    retro = plan_ctx.get("retro")
+    if retro and retro.get("metrics"):
+        # Appended as its OWN top-level item (not nested under a wrapper key) --
+        # factcheck._numeric_values only flattens one level of dict nesting, so
+        # the retro's numbers (metrics.prediction.*, metrics.plan_adherence.*, ...)
+        # need to sit exactly one level below what's in `facts` to be verifiable.
+        facts.append(retro["metrics"])
+    # Phase 3.3 -- each scored deal is its own top-level fact item (not nested
+    # under a wrapper key), same one-level-of-nesting reasoning as the retro
+    # above, so a cited `score` or `components.*` value is verifiable.
+    facts.extend(plan_ctx.get("scored_deals") or [])
     ai = AIClient()
     recon_note = ""
     if yesterday_plan is not None and yesterday_plan.reconciliation:
         recon_note = ("\n\nYESTERDAY'S RECONCILIATION (adherence is fact; attribution is "
                       "correlational, not causal):\n" + to_json(yesterday_plan.reconciliation))
+    directive_note = ""
+    if directive:
+        directive_note = (
+            "\n\nOPERATOR DIRECTIVE (highest priority — honor it, or explicitly state in "
+            "the narrative why it can't be honored given the data):\n" + directive
+        )
     try:
-        user = f"DATA:\n{to_json(plan_ctx)}{recon_note}"
+        user = f"DATA:\n{to_json(plan_ctx)}{recon_note}{directive_note}"
         raw = ai.complete(user, system_extra=_PLAN_INSTRUCTIONS, max_tokens=2400)
     except AIUnavailable as e:
         return {"available": False, "reason": str(e), "plan": None, "digest": "", "facts": facts}

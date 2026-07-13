@@ -43,6 +43,7 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("report_ids", "JSON"),
         ("adherence", "JSON"),
         ("reconciliation", "JSON"),
+        ("operator_directive", "TEXT"),
     ],
     "channel_style_profiles": [("channel_id", "INTEGER")],
     "post_type_performance": [("channel_id", "INTEGER")],
@@ -55,6 +56,9 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("category", "VARCHAR(16)"),
         ("resolution_confidence", "FLOAT"),
         ("verified_by", "VARCHAR(16)"),
+        # per-competitor monitoring toggle; DEFAULT 1 keeps every existing
+        # competitor's cron behaviour unchanged after this column lands.
+        ("monitoring_enabled", "BOOLEAN DEFAULT 1"),
     ],
     # link resolution bookkeeping (async rewrite): distinguish "never attempted"
     # (NULL) from "failed" / "resolved" / "no_match", and cap retries.

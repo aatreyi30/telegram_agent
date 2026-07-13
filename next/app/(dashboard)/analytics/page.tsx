@@ -196,6 +196,12 @@ export default function AnalyticsPage() {
                 </ChartCard>
               </div>
 
+              <div className="grid gap-4 lg:grid-cols-2">
+                <ChartCard title="Posts by hour (IST)" sub="How many posts we publish in each hour of the day · all 24 hours">
+                  <BarsChart data={a.by_hour || []} unit=" posts" dataKey="n" countKey="total_views" countLabel="Views" />
+                </ChartCard>
+              </div>
+
               <div className="grid gap-6 lg:grid-cols-3">
                 <Card className="flex flex-col">
                   <CardHeader>

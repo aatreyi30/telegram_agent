@@ -121,6 +121,10 @@ class Settings:
     anthropic_api_key: str | None = None  # optional alternative provider
     ai_model: str = "llama-3.3-70b-versatile"
 
+    # --- Publishing (Phase 0.3) ---
+    # a draft older than this (or a deal that fails revalidation) is BLOCKED, not sent.
+    prepublish_max_staleness_min: int = 30
+
     # --- Runtime ---
     log_level: str = "INFO"
 
@@ -170,6 +174,7 @@ class Settings:
             groq_api_key=_get("GROQ_API_KEY"),
             anthropic_api_key=_get("ANTHROPIC_API_KEY"),
             ai_model=_get("AI_MODEL", "llama-3.3-70b-versatile"),
+            prepublish_max_staleness_min=_get_int("PREPUBLISH_MAX_STALENESS_MIN", 30),
             owned_incremental_interval_min=_get_int("OWNED_INCREMENTAL_INTERVAL_MIN", 15),
             owned_analytics_interval_min=_get_int("OWNED_ANALYTICS_INTERVAL_MIN", 60),
             competitor_interval_min=_get_int("COMPETITOR_INTERVAL_MIN", 60),

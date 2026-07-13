@@ -19,14 +19,24 @@ class BriefingGenerator:
     def __init__(self) -> None:
         self.ai = AIClient()
 
-    def generate(self, weekly: bool = False) -> str:
+    def generate(self, weekly: bool = False, directive: str | None = None) -> str:
+        """``directive`` is an optional Steer & Regenerate operator directive: free-text
+        guidance appended after DATA as a highest-priority block, same injection style
+        as ``src.ai.planner.generate_day_plan``'s directive/reconciliation notes."""
         with session_scope() as s:
             ctx = full_briefing_context(s, weekly=weekly)
         if not ctx["channel"].get("available"):
             return "No channel data yet — run collection and the intelligence engines first."
         try:
             instructions = _WEEKLY_INSTRUCTIONS if weekly else _DAILY_INSTRUCTIONS
-            user = f"{instructions}\n\nDATA:\n{to_json(ctx)}"
+            directive_note = ""
+            if directive:
+                directive_note = (
+                    "\n\nOPERATOR DIRECTIVE (highest priority — honor it, or explicitly "
+                    "state in the narrative why it can't be honored given the data):\n"
+                    + directive
+                )
+            user = f"{instructions}\n\nDATA:\n{to_json(ctx)}{directive_note}"
             return self.ai.complete(user, max_tokens=1500, effort="medium")
         except AIUnavailable:
             pass

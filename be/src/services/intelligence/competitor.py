@@ -16,7 +16,11 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
+
 from src.services.collection.base import BaseCollector, CollectorResult
+from src.db.models import Competitor
 from src.db.models_competitor_intel import (
     COMPETITOR_INTEL_VERSION,
     CompetitorBenchmark,
@@ -63,6 +67,41 @@ def _cosine(a: list[float], b: list[float]) -> float | None:
     return round(dot / (na * nb), 3)
 
 
+# --------------------------------------------------------------------------- #
+# Latest-per-competitor reads — CompetitorProfile/CompetitorBenchmark hold one
+# CURRENT row per competitor (upserted every run, see `run()` below), so a
+# plain `select(CompetitorProfile)` already returns "the latest" today. These
+# helpers exist for robustness (they still return the right thing even if a
+# row_number tie or historical leftover ever puts >1 row per competitor on
+# disk) and because existing read sites already depend on them. SQLite-safe:
+# a `row_number()` window function, no `DISTINCT ON`.
+# --------------------------------------------------------------------------- #
+def latest_profiles(s, intel_version: int = COMPETITOR_INTEL_VERSION) -> list[CompetitorProfile]:
+    """The most recent CompetitorProfile snapshot for each competitor."""
+    rn = func.row_number().over(
+        partition_by=CompetitorProfile.competitor_id,
+        order_by=CompetitorProfile.computed_at.desc(),
+    ).label("rn")
+    sub = select(CompetitorProfile, rn).where(
+        CompetitorProfile.intel_version == intel_version
+    ).subquery()
+    P = aliased(CompetitorProfile, sub)
+    return list(s.scalars(select(P).where(sub.c.rn == 1)).all())
+
+
+def latest_benchmarks(s, intel_version: int = COMPETITOR_INTEL_VERSION) -> list[CompetitorBenchmark]:
+    """The most recent CompetitorBenchmark snapshot for each (competitor, dimension)."""
+    rn = func.row_number().over(
+        partition_by=(CompetitorBenchmark.competitor_id, CompetitorBenchmark.dimension),
+        order_by=CompetitorBenchmark.computed_at.desc(),
+    ).label("rn")
+    sub = select(CompetitorBenchmark, rn).where(
+        CompetitorBenchmark.intel_version == intel_version
+    ).subquery()
+    B = aliased(CompetitorBenchmark, sub)
+    return list(s.scalars(select(B).where(sub.c.rn == 1)).all())
+
+
 class CompetitorIntelligenceEngine(BaseCollector):
     name = "competitor_intel"
     retryable = False
@@ -83,7 +122,15 @@ class CompetitorIntelligenceEngine(BaseCollector):
                 d for d in (_aware(p.posted_at) for p in owned_beh.features) if d
             )
             groups, _usernames = compute_competitor_behaviours(s)
-            comp_summaries = {cid: g.summary() for cid, g in groups.items()}
+            # gate: only profile competitors the operator has left monitoring ON
+            # (a competitor turned off just stops getting new work here -- its
+            # existing profile/benchmark rows are left as-is, not deleted).
+            enabled_ids = set(s.scalars(
+                select(Competitor.id).where(Competitor.monitoring_enabled.is_(True))
+            ))
+            comp_summaries = {
+                cid: g.summary() for cid, g in groups.items() if cid in enabled_ids
+            }
 
         result.processed = len(comp_summaries)
         if not comp_summaries:
@@ -92,21 +139,27 @@ class CompetitorIntelligenceEngine(BaseCollector):
 
         owned_style = _style_vector(owned)
 
+        # Current-state profiles: one row per (intel_version, competitor_id),
+        # upserted in place every run (get existing row or create one) rather
+        # than inserting a fresh snapshot -- so re-running never grows the
+        # table and never hits the on-disk UNIQUE(intel_version, competitor_id)
+        # index (see CompetitorProfile's docstring). Benchmarks have no such
+        # index on disk, so they're kept current the simpler way: delete this
+        # competitor's rows for this intel_version, then insert fresh ones.
         with session_scope() as s:
-            for model in (CompetitorBenchmark, CompetitorProfile):
-                s.query(model).filter(
-                    model.intel_version == COMPETITOR_INTEL_VERSION
-                ).delete()
-            s.flush()
-            logger.info("[competitor_intel] cleared old intel data for version %d", COMPETITOR_INTEL_VERSION)
-
+            existing_profiles = {
+                p.competitor_id: p
+                for p in s.scalars(select(CompetitorProfile).where(
+                    CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION,
+                    CompetitorProfile.competitor_id.in_(comp_summaries.keys()),
+                ))
+            }
             for cid, summ in comp_summaries.items():
                 n = summ["post_count"]
                 confidence = round(min(1.0, n / FULL_CONFIDENCE_N), 3)
                 similarity = _cosine(owned_style, _style_vector(summ))
                 logger.info("[competitor_intel] generating profile: competitor_id=%d username=%s post_count=%d merchant_coverage=%s merchant_mix=%s", cid, summ["label"], n, summ.get("merchant_coverage"), summ.get("merchant_mix"))
-                s.add(CompetitorProfile(
-                    intel_version=COMPETITOR_INTEL_VERSION, competitor_id=cid,
+                fields = dict(
                     username=summ["label"], post_count=n, span_days=summ["span_days"],
                     posts_per_day=summ["posts_per_day"],
                     first_posted_at=summ["first_posted_at"], last_posted_at=summ["last_posted_at"],
@@ -121,10 +174,25 @@ class CompetitorIntelligenceEngine(BaseCollector):
                     deal_mix=summ["deal_mix"], merchant_mix=summ["merchant_mix"],
                     merchant_coverage=summ["merchant_coverage"], category_available=False,
                     similarity_to_owned=similarity, confidence=confidence, computed_at=now,
-                ))
-                result.added += 1
+                )
+                row = existing_profiles.get(cid)
+                if row is None:
+                    s.add(CompetitorProfile(
+                        intel_version=COMPETITOR_INTEL_VERSION, competitor_id=cid, **fields,
+                    ))
+                    result.added += 1
+                else:
+                    for k, v in fields.items():
+                        setattr(row, k, v)
+                    result.updated += 1
 
-                # benchmark rows (only for competitors with a meaningful sample)
+                # benchmark rows: replace this competitor's rows each run (current
+                # state, not history) -- delete then insert, only for competitors
+                # with a meaningful sample.
+                s.query(CompetitorBenchmark).filter(
+                    CompetitorBenchmark.intel_version == COMPETITOR_INTEL_VERSION,
+                    CompetitorBenchmark.competitor_id == cid,
+                ).delete(synchronize_session=False)
                 if n >= MIN_SAMPLE_FOR_BENCHMARKS:
                     for dim in BENCHMARK_DIMS:
                         ov, cv = owned.get(dim), summ.get(dim)

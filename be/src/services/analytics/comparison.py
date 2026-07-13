@@ -19,11 +19,8 @@ from src.services.analytics.periods import to_ist
 from src.db.models import Competitor, CompetitorPost, Post
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.models_learning import ChannelStyleProfile, PostTypePerformance, LEARNING_VERSION
-from src.db.models_competitor_intel import (
-    CompetitorBenchmark,
-    CompetitorProfile,
-    COMPETITOR_INTEL_VERSION,
-)
+from src.db.models_competitor_intel import CompetitorProfile
+from src.services.intelligence.competitor import latest_benchmarks, latest_profiles
 
 MIN_POSTS = 10
 UNAVAILABLE = ["reach", "engagement_rate"]
@@ -193,10 +190,8 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
     # ------------------------------------------------------------------ #
     # Competitor entities
     # ------------------------------------------------------------------ #
-    # Pre-fetch benchmarks grouped by competitor_id
-    bench_rows = s.scalars(
-        select(CompetitorBenchmark).where(CompetitorBenchmark.intel_version == COMPETITOR_INTEL_VERSION)
-    ).all()
+    # Pre-fetch benchmarks grouped by competitor_id (latest snapshot per dimension)
+    bench_rows = latest_benchmarks(s)
     benchmarks_by_comp: dict[int, list[dict]] = defaultdict(list)
     for b in bench_rows:
         benchmarks_by_comp[b.competitor_id].append({
@@ -223,11 +218,8 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
             if dt:
                 comp_posts[cid].append((dt, v))
 
-        # profile lookup
-        all_profiles = {
-            p.competitor_id: p
-            for p in s.scalars(select(CompetitorProfile).where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)).all()
-        }
+        # profile lookup (latest snapshot per competitor)
+        all_profiles = {p.competitor_id: p for p in latest_profiles(s)}
 
         # sort by post count
         sorted_comps = sorted(comp_posts.items(), key=lambda x: len(x[1]), reverse=True)
@@ -274,13 +266,9 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
             entities.append(ent)
     else:
         # ------------------------------------------------------------------ #
-        # Full-window mode: use pre-computed CompetitorProfile
+        # Full-window mode: use pre-computed CompetitorProfile (latest snapshot per competitor)
         # ------------------------------------------------------------------ #
-        profiles = s.scalars(
-            select(CompetitorProfile)
-            .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorProfile.post_count.desc())
-        ).all()
+        profiles = sorted(latest_profiles(s), key=lambda p: -(p.post_count or 0))
 
         for cp in profiles[:max_competitors]:
             ent: dict = {

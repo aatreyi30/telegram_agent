@@ -29,9 +29,24 @@ COMPETITOR_INTEL_VERSION = 1
 
 
 class CompetitorProfile(Base, TimestampMixin):
+    """The CURRENT profile for one competitor -- one row per (intel_version,
+    competitor_id), upserted in place every run (see
+    ``services/intelligence/competitor.py``). ``intel_version`` tracks the
+    *computation* schema (bumped only when the scoring/behaviour logic
+    changes); ``computed_at`` is the timestamp of the most recent refresh.
+
+    A prior revision of this table briefly kept a full per-run snapshot
+    history (no unique constraint, one row inserted per run). That was
+    reverted: the on-disk ``tgagent.db`` still physically carries the unique
+    index from before that change, so re-adding the constraint here just
+    brings the model back in line with disk and gives the upsert a conflict
+    target. ``latest_profiles``/``latest_benchmarks`` (row_number-window
+    reads) still work unchanged with one row per competitor."""
+
     __tablename__ = "competitor_profiles"
     __table_args__ = (
         UniqueConstraint("intel_version", "competitor_id", name="uq_comp_profile"),
+        Index("ix_comp_profile_competitor_computed", "competitor_id", "computed_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -80,10 +95,16 @@ class CompetitorProfile(Base, TimestampMixin):
 
 class CompetitorBenchmark(Base):
     """One dimension of our-channel-vs-competitor comparison (behaviour, not a
-    single isolated metric — many rows together form the benchmark)."""
+    single isolated metric — many rows together form the benchmark). Current
+    state only: each run replaces a competitor's benchmark rows (delete then
+    insert -- see ``CompetitorIntelligenceEngine.run``), so this never grows
+    unbounded either."""
 
     __tablename__ = "competitor_benchmarks"
-    __table_args__ = (Index("ix_bench_comp", "competitor_id"),)
+    __table_args__ = (
+        Index("ix_bench_comp", "competitor_id"),
+        Index("ix_bench_comp_computed", "competitor_id", "computed_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     intel_version: Mapped[int] = mapped_column(Integer, default=COMPETITOR_INTEL_VERSION)

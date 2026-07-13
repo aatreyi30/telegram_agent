@@ -25,8 +25,6 @@ next/.next/
 next/.next
 *.next/
 
-*.md
-/*.md
 # generated build artifacts
 fe/*.tsbuildinfo
 fe/vite.config.js

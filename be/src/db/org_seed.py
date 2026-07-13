@@ -17,6 +17,7 @@ from src.config.settings import get_settings
 from src.db.models import Channel
 from src.db.models_org import Organization, User, UserRole
 from src.logger import get_logger
+from src.services.generation.formatting import DEFAULT_POST_TEMPLATES
 
 logger = get_logger(__name__)
 
@@ -28,8 +29,19 @@ def _org_settings(s) -> dict:
         "grabon_amazon_tag": s.grabon_amazon_tag,
         "grabon_flipkart_params": s.grabon_flipkart_params,
         "grabon_shorten_all": s.grabon_shorten_all,
+        # Global cron gate (not backed by .env, editable via PATCH /api/org only):
+        # once a channel's competitor set is established, this stops
+        # j_competitor_discover from auto-adding new ones. Defaults True so a
+        # fresh install keeps discovering, matching today's behaviour.
+        "auto_discover_competitors": True,
         "owned_channels": s.owned_channels,
         "competitor_channels": s.competitor_channels,
+        # Editable post-text templates (viewable/editable in Settings). Seeded with
+        # the exact previous hardcoded strings so output is unchanged until edited.
+        # Because startup merge is DB-wins at the top level, an org that predates
+        # this key gets it backfilled here (merged.update() below keeps this default
+        # when the org has no "post_templates" of its own).
+        "post_templates": dict(DEFAULT_POST_TEMPLATES),
     }
 
 
@@ -45,7 +57,14 @@ def seed_org(session: Session) -> Organization:
         logger.info("[seed-org] created org '%s'", org.key)
     else:
         org.affiliate_provider = settings.affiliate_provider_name
-        org.settings = _org_settings(settings)
+        # Merge, DB-wins: .env-derived values only seed DEFAULTS / fill keys the org
+        # doesn't have yet. Anything already set on the org (via the Settings UI /
+        # PATCH /api/org — e.g. auto_discover_competitors, affiliate tags) is
+        # PRESERVED. Previously this reassigned the whole dict from .env on every
+        # startup, silently resetting UI-edited settings.
+        merged = _org_settings(settings)
+        merged.update(org.settings or {})
+        org.settings = merged
 
     # one owner user with a login. Password from ADMIN_PASSWORD, else a random one
     # printed once (so a fresh install always has working credentials).
