@@ -1,6 +1,8 @@
 # DealWing / GrabOn — Architecture
 
-One-line version: **Telegram (ours + competitors) + merchant deal API → normalize → analyze/AI → dashboard.**
+One-line version: **Telegram (ours + competitors) + merchant deal API → normalize → analyze/AI → AI daily plan → just-in-time fresh posting → dashboard.**
+
+> The AI plan is now the **source of truth for scheduling** (not a dashboard-only artifact). Each planned slot is filled with freshly-scraped inventory ~3 minutes before it fires and written by the AI copywriter (template fallback). Publishing to Telegram is wired end-to-end but the final send is **intentionally gated** (admin-rights + operator sign-off) — see §4/§5.
 
 ---
 
@@ -51,7 +53,13 @@ flowchart LR
     subgraph AI["AI layer (ai/)"]
         CTX["context.py\n(read-only bundlers)"]
         GROQ["AIClient → Groq LLM"]
-        OUT["Planner / Briefing /\nCoach / Copywriter"]
+        OUT["Planner (day+week) /\nBriefing / Coach"]
+        COPY["Copywriter\n(write_for_item)"]
+    end
+
+    subgraph AUTO["Just-in-time posting (services/generation/, automation/)"]
+        JIT["jit_fill\n(fill slot with fresh deal\n~3 min before it fires)"]
+        PUB["Publisher\n(send gated)"]
     end
 
     subgraph API["FastAPI (routers/data.py)"]
@@ -85,10 +93,20 @@ flowchart LR
     DERIVED2 --> CTX
     T_DEALS --> CTX
     CTX --> GROQ --> OUT
-    OUT --> T_PLAN[("campaign_plans")]
+    OUT --> T_PLAN[("campaign_plans\n(AI day + week plan)")]
+
+    T_PLAN --> JIT
+    T_DEALS --> JIT
+    JIT --> COPY
+    COPY --> JIT
+    JIT --> T_GP[("generated_posts")]
+    T_GP --> T_SP[("scheduled_posts")]
+    T_SP --> PUB
+    PUB -.gated.-> TG_OWN
 
     ENGINES --> APIR
     T_PLAN --> APIR
+    T_GP --> APIR
     APIR --> PAGES
 ```
 
@@ -195,8 +213,11 @@ flowchart TB
 | | `growth_strategies`/`recommendations` | Ranked growth actions |
 | | `reasoned_insights` | "Why did this metric move" narratives |
 | | `daily_channel_reports` | Nightly aggregate per channel per day — the AI's main data diet |
-| AI/automation | `campaign_plans` | AI-generated daily/weekly posting plan, fact-checked against reports |
-| | `generated_posts`/`scheduled_posts` | Drafted → queued → published post pipeline |
+| AI/automation | `campaign_plans` | AI-generated daily **and** weekly posting plan, fact-checked against reports; the daily plan's `post_slots` drive `jit_fill` |
+| | `deal_scores` | Audience-fit score history per deal (`DealScoringEngine`); feeds planner `scored_deals` |
+| | `generated_posts`/`scheduled_posts` | JIT-filled draft → queued → published post pipeline |
+| | `post_predictions`/`post_outcomes` | Baseline view/forward prediction per draft + measured T+1h/6h/24h actuals (the latter also feed velocity-based learning) |
+| | `weekly_retros` | Last week's predictions vs actuals (weekly retro) |
 | | `scheduler_runs` | Audit log of every cron execution |
 | Org/auth | `organizations`/`users`/`channels` | Multi-tenant config |
 
@@ -211,15 +232,17 @@ flowchart TD
     A["telegram_sync (5m)\ncompetitor_sync (10m)"] --> B["normalize_posts (5m)"]
     B --> C["link_resolution (15m,\nenv-configurable)"]
     B --> D["stats_refresh (30m)"]
-    C --> E["merchant/competitor\nintelligence (daily 07:00)"]
-    B --> F["learning (daily 02:00)"]
-    E --> G["growth_detection (daily 06:00)"]
-    F --> G
-    G --> H["daily_report (daily 05:15)"]
-    H --> I["daily_plan (daily 05:30)"]
-    I --> J["ai_daily_summary (08:00)\nweekly_report (Mon 08:30)"]
-    K["merchant_feed_sync (30m)"] --> L["queue_processor (1m)\npublishes scheduled_posts"]
-    I --> L
+    C --> E["merchant/competitor\nintelligence (daily 06:30/07:00)"]
+    B --> F["learning (daily 02:00)\n(prefers T+24h velocity)"]
+    STAT["outcome_collector (15m)\nT+1h/6h/24h view snapshots"] --> F
+    F --> G["growth_detection (daily 05:30)"]
+    E --> G
+    RPT["daily_report (daily 05:15)"] --> I["daily_plan (daily 06:00)\nAI plan → per-post slots\n(window/type/theme/merchant)"]
+    G --> I
+    K["merchant_feed_sync (30m)\ndeal_ranking (30m)"] --> JIT["jit_fill (1m)\nfill each due slot with a FRESH deal\n+ AI copy → generated_posts → enqueue"]
+    I --> JIT
+    JIT --> L["queue_processor (1m)\npublish scheduled_posts\n(send gated on admin + sign-off)"]
+    I --> J["ai_daily_summary (08:00)\nweekly_report (Mon 08:30,\n+ AI weekly plan)"]
     M["db_cleanup (daily 03:00)\norg_health (1h)\nurl_health (12h)"] -.housekeeping.-> A
 ```
 
@@ -231,23 +254,54 @@ flowchart TD
 | `link_resolution` | 15 min (`LINK_RESOLVE_INTERVAL_MIN`) | Resolve shortlinks → merchant | Live |
 | `stats_refresh` | 30 min | Re-check views/forwards/reactions on recent posts | Live |
 | `merchant_feed_sync` | 30 min | Pull + enrich deal feed | Live |
+| `deal_ranking` | 30 min | `DealScoringEngine` — persist an audience-fit `DealScore` per active deal (feeds `/deals/scored` + planner `scored_deals`) | Live |
+| `outcome_collector` | 15 min | Advance `post_outcomes` through T+1h/6h/24h view snapshots (feeds prediction scoring **and** velocity-based learning) | Live |
 | `competitor_discover` | daily 06:30 | Find new competitor channels | Live |
 | `competitor_intel` | daily 07:00 | Rebuild competitor profiles/benchmarks (delete-all-then-rebuild-all each run) | Live |
-| `learning` | daily 02:00 | Build channel style/performance profile | Live |
-| `growth_detection` | daily 06:00 | Build growth strategy + recommendations | Live |
+| `learning` | daily 02:00 | Build channel style/performance profile — **prefers true first-24h velocity** (nearest T+24h snapshot), falls back to the cumulative views/age proxy per post | Live |
+| `growth_detection` | daily **05:30** | Build growth strategy + recommendations. Runs **before** `daily_plan` so the plan grounds on a fresh blueprint | Live |
 | `daily_report` | daily 05:15 | Persist `daily_channel_reports` | Live |
-| `daily_plan` | daily 05:30 | Build tomorrow's posting plan + queue drafts | Live |
+| `daily_plan` | daily **06:00** | Generate today's **AI daily plan** (per-post slots: window/type/theme/merchant) via `ensure_daily_ai_plan`. **No longer pre-renders drafts** — slots are filled just-in-time | Live |
+| `jit_fill` | 1 min | For each AI-plan slot due within a 3-min lookahead: scrape the live pool, pick a fresh item matching theme/merchant (broadens + logs on miss), AI-write the post (template fallback), write `generated_posts` + enqueue. Idempotent per slot | Live |
 | `ai_daily_summary` | daily 08:00 | Groq daily briefing (text only, not stored) | Live |
-| `weekly_report` | Mon 08:30 | Weekly plan + Groq weekly briefing | Live |
-| `queue_processor` | 1 min | Publish due `scheduled_posts` | Live (needs admin rights) |
+| `weekly_report` | Mon 08:30 | Deterministic weekly plan (`CampaignPlanningEngine`) + **AI weekly plan** (`generate_week_plan` → persisted as the WEEKLY `campaign_plans` row the daily planner reads) + Groq weekly briefing | Live |
+| `weekly_retro` | Mon 07:30 | Compare last week's predictions vs actuals (before `weekly_report`) | Live |
+| `queue_processor` | 1 min | Publish due `scheduled_posts` | Live (send gated on admin rights + sign-off) |
 | `notification_engine` | 5 min | Flag blocked posts / failed runs | Live |
 | `org_health` | 1 h | Check config completeness | Live |
 | `url_health` | 12 h | Sweep `enriched_deals` for dead links | Live |
-| `db_cleanup` | daily 03:00 | Delete old `scheduler_runs`/`collection_events` | Live |
-| `deal_monitoring`, `price_history`, `deal_ranking` | 2h / 6h / 30m | Stock/price/rank checks | **Stub — always returns "limited"** |
+| `analytics_aggregation` | 1 h | Aggregate analytics data | Live |
+| `deal_expiry` | 1 h | Mark expired deals invalid | Live |
+| `db_cleanup` | daily 03:00 | Delete old `scheduler_runs`/`collection_events` (+ 90-day competitor-intel prune) | Live |
+| `deal_monitoring`, `price_history` | 2h / 6h | Stock / price checks | **Stub — always returns "limited"** |
 | `monthly_report` | 1st @ 00:05 | 30-day post count | **Placeholder, no dedicated table** |
 
+**Why the stubs/placeholder are still registered (not deleted):** `deal_monitoring` and `price_history` need per-merchant price/stock scraping, which is blocked or has no API for most merchants today (see the `merchants` registry) — so they return an honest `"limited"` instead of fabricating stock/price data. `monthly_report` has no dedicated rollup table yet. They're kept in the registry on purpose: each **reserves its cadence slot**, still writes a `SchedulerRun` audit row every run (so the pipeline is complete and observable), and **lights up automatically** the moment the missing capability (merchant scraping / a monthly table) lands — no scheduler rewiring needed. A visible `"limited"` beats a silent gap.
+
 There's also a **legacy, unused** `CollectionScheduler` (`services/collection/scheduler.py`) that reads the old `OWNED_INCREMENTAL_INTERVAL_MIN`-style env vars — only reachable via `cli.py`, not wired into the app. Not part of the live system.
+
+### Why it runs in this order (and at these cadences)
+
+The clock times aren't arbitrary — the daily jobs form a strict **producer → consumer chain**, and each one is timed to run *after* whatever it depends on has finished. Rationale lives in `controllers/cadences.py`; the load-bearing points:
+
+**The daily chain (each step feeds the next):**
+1. `learning` **02:00** — rebuilds "what's working" from yesterday's *fully-matured* post metrics. Runs in the quiet early morning so the heavy full-history scan is done long before planning.
+2. `daily_report` **05:15** — persists yesterday's aggregates (the AI's main data diet).
+3. `growth_detection` **05:30** — turns learning + reports into the strategy *blueprint*. Deliberately moved to run **before** the plan — it used to run after, so the plan grounded on a day-old blueprint.
+4. `daily_plan` **06:00** — the AI planner is only as good as the blueprint + report beneath it, so it runs **last** in the chain.
+5. `jit_fill` **every 1 min** — executes the plan just-in-time, filling each slot ~3 min before it fires, so post content is scraped fresh at fire-time instead of pre-rendered hours stale.
+6. `queue_processor` **every 1 min** — publishes due posts (gated).
+
+**Two more ordering constraints that MUST hold:**
+- `competitor_discover` **06:30** → `competitor_intel` **07:00** — newly found channels must be *collected* before they're *profiled* (else same-tick profiling sees no posts).
+- `weekly_retro` Mon **07:30** → `weekly_report` Mon **08:30** — the report/plan must read a *fresh* retro.
+
+**Why the cadences fall into three tiers:**
+- **Near-real-time (1–5 min)** — `telegram_sync`, `normalize_posts`, `jit_fill`, `queue_processor`: freshness-critical. A slot must fill and fire on time, and new posts must be captured before their view-velocity signal decays.
+- **Periodic (10–30 min)** — competitor sync, stats refresh, link resolution, merchant feed, deal ranking, outcome collector: useful but not minute-sensitive; batched to limit load on Telegram / merchant sites / our DB.
+- **Daily / weekly / monthly** — learning, growth, intel, reports, retros: expensive *delete-all-then-rebuild-per-version* recomputes that only need to reflect a day's or week's change; running them more often would burn compute for no fresher signal.
+
+> **Don't reshuffle times blindly.** These dependencies (`learning → growth → daily_plan`, `daily_report → daily_plan`, `discover → intel`, `retro → weekly_report`, and `jit_fill` only after a plan exists) are encoded *only* by the staggered clock times. Move a time and you can silently feed a stale input downstream — nothing enforces the order at runtime.
 
 ---
 
@@ -257,23 +311,27 @@ There's also a **legacy, unused** `CollectionScheduler` (`services/collection/sc
 flowchart LR
     DB[("DB: reports, profiles,\nstrategies, insights, deals")] --> CTX["context.py\n(read-only, no LLM)"]
     CTX --> CLIENT["AIClient\n(Groq, llama-3.3-70b)"]
-    CLIENT --> PLANNER["planner.py\ngenerate_day_plan()"]
+    CLIENT --> PLANNER["planner.py\ngenerate_day_plan()\ngenerate_week_plan()"]
     CLIENT --> BRIEF["briefing.py\ndaily/weekly briefing"]
     CLIENT --> COACH["coach.py\nGrowthCoach (agentic Q&A)"]
-    CLIENT --> COPY["copywriter.py\nwrite_for_deal()"]
+    CLIENT --> COPY["copywriter.py\nwrite_for_item()"]
     PLANNER --> FC["factcheck.py\n(deterministic, no LLM)\nverifies every cited number"]
     FC --> CPLAN[("campaign_plans")]
     BRIEF --> TXT["text only\n(not persisted)"]
     COACH --> TXT
+    CPLAN --> JIT["jit_fill\n(reads plan slots +\nfresh scraped deals)"]
+    FRESH[("live deal pool")] --> JIT
+    JIT --> COPY
     COPY --> GP[("generated_posts")]
 ```
 
 - **Every AI call is grounded** — `context.py` builds the JSON bundle from real DB rows first; the LLM never sees free-form access to the database.
 - **Fact-checking is deterministic**, not AI: `factcheck.py` checks every number the planner cited against `daily_channel_reports` (2% tolerance) before the plan is marked trustworthy.
-- **Only the planner persists output** (`campaign_plans`, cached per day — see `daily_brief()` caching). Briefing and coach answers are request/log-only, not stored.
+- **The planner persists output and it drives scheduling.** `campaign_plans` holds both the AI **daily** plan (per-day, cached per day — see `daily_brief()`/`ensure_daily_ai_plan()`) and the AI **weekly** plan (`generate_week_plan`, persisted Mon 08:30 and read back by the daily planner as `this_week_theme`/`this_week_direction`). The daily plan's `post_slots` are the **source of truth** the `jit_fill` worker executes — no longer a dashboard-only artifact. Briefing and coach answers are request/log-only, not stored.
+- **Every AI call uses a real system prompt.** `AIClient.complete()` puts `GROUNDING_SYSTEM` + the call's instruction block in the *system* role. The planner, briefing, coach and copywriter all pass their instructions via `system_extra=` (the briefing previously smuggled them into the user message — fixed).
+- **Scheduled draft text is AI-first with a deterministic fallback.** `jit_fill` calls `Copywriter.write_for_item()` — it hands the model the slot's freshly-scraped deal plus the org's saved deal/loot **post template as the "winning-format" exemplar** — and only if the AI is unavailable does it fall back to `PostFormatter` template rendering. The post-text templates are **editable** and live in `organizations.settings["post_templates"]` (seeded from code defaults; safe-rendered so a bad edit can never crash generation). The older fully-deterministic engines (`engine.py`) still back the opt-in `/run/generate-live` path.
 - `insight_writer.narrate()` is a small AI-assist used *inside* the Growth/Reasoning engines to phrase a "why" sentence from evidence — always has a deterministic fallback string if AI is unavailable.
-- **Draft generation is deterministic, not AI.** The live drafts written to `generated_posts` are built by `PostFormatter` (`services/generation/formatting.py`) — plain string templating, no LLM. The post-text templates are **editable** and live in `organizations.settings["post_templates"]` (seeded from code defaults; safe-rendered so a bad edit can never crash generation). `copywriter.py` (`write_for_deal()`) exists but is **CLI-only / optional** — it is not wired into the default generation engines, so the AI diagram's `COPY → generated_posts` edge only applies to that opt-in CLI path.
-- **The planner degrades gracefully without AI.** When Groq is unavailable (`ai_available:false`), `/plan/daily` still returns a full deterministic plan — `posting_windows`, `deal_type_allocation`, and `merchant_allocation` are computed by `CampaignPlanningEngine` from real history (see §7 note on cold-start fallbacks). Only the free-text digest / AI-only slots go empty.
+- **The planner degrades gracefully without AI.** When Groq is unavailable (`ai_available:false`), `/plan/daily` still returns a full deterministic plan — `posting_windows`, `deal_type_allocation`, and `merchant_allocation` are computed by `CampaignPlanningEngine` from real history (see §7 note on cold-start fallbacks). Only the free-text digest / AI-only slots go empty, and `jit_fill` falls back to template-rendered copy.
 
 ---
 
@@ -308,9 +366,11 @@ Backend rooted at `be/`, frontend at `next/`. Only the load-bearing files are li
 | | `controllers/jobs.py` | `JobManager` — in-process pipeline/generate-live triggers behind `/run/*`. |
 | | `controllers/schedulers.py` | All cron jobs (APScheduler, IST). Off unless `SCHEDULERS_AUTOSTART=true`. |
 | | `controllers/accounts.py` | Org/user CRUD. `_EDITABLE_SETTINGS` allow-lists which `org.settings` keys `PATCH /org` may write (includes `post_templates`). |
-| **Planning** | `services/planning/campaign.py` | `CampaignPlanningEngine`: `_recent_distribution` (owned 45-day merchant/deal-type counts), `_allocate_posts`/`_allocate_from_recent` (single vs loot mix), `_recent_hourly_all`/`_recent_posting_windows` (posting-window fallback), `_daily_plan`, `_weekly_plan`, `_risks`. |
+| **Planning** | `services/planning/campaign.py` | `CampaignPlanningEngine`: `_recent_distribution` (owned 45-day merchant/deal-type counts), `_allocate_posts`/`_allocate_from_recent` (single vs loot mix — cold-start now derives the split from the Growth blueprint's competitor `content_mix_reference`, 60/40 only as last resort), `_recent_hourly_all`/`_recent_posting_windows` (posting-window fallback), `_daily_plan`, `_weekly_plan`, `_risks`. |
 | | `services/planning/posting_windows.py` | Shared pure `build_posting_plan(posts_per_day, hourly_all)` + `DAY_PARTS`. Reused by both `campaign.py` and `intelligence/growth.py` (single source of truth for day-part distribution). |
-| **Generation** | `services/generation/formatting.py` | `PostFormatter` — deterministic post text. `DEFAULT_POST_TEMPLATES`, safe `_render()` (falls back to default on any bad template). |
+| **Generation** | `services/generation/jit_fill.py` | **`fill_due_slots()`** — the just-in-time executor and the real posting path. Reads AI-plan `post_slots` due within a 3-min lookahead, scrapes the live pool, matches each slot's theme/merchant (`exact → theme → any` broadening, logged), AI-writes via `Copywriter.write_for_item` (template fallback), writes `generated_posts` + enqueues + a baseline `PostPrediction`. Idempotent per slot (`selection_bucket` tag). Has a `_selfcheck()`. |
+| | `services/generation/daily_planner.py` | **Retired** deterministic planner — only the `recently_used_urls()` 3-day dedup helper survives; the old `build_and_schedule_day()` was replaced by `jit_fill`. |
+| | `services/generation/formatting.py` | `PostFormatter` — deterministic post text (fallback path + `/run/generate-live`). `DEFAULT_POST_TEMPLATES`, safe `_render()` (falls back to default on any bad template). |
 | | `services/generation/engine.py` | `PostGenerationEngine`, `LiveDealGenerationEngine` (groups today's fresh deals by category), `ObservedPostGenerationEngine`. Pass `org.settings["post_templates"]` into `PostFormatter`. |
 | | `services/generation/deal_source.py` | `DealSourceClient` — live GrabCash feed (reads `DEAL_API_BASE`). |
 | | `services/affiliate/grabon.py` | `GrabOnAffiliateProvider` — Amazon/Flipkart affiliate params + `grbn.in` shortening. |
@@ -320,7 +380,8 @@ Backend rooted at `be/`, frontend at `next/`. Only the load-bearing files are li
 | **Analytics** | `services/analytics/views.py` | `compute()` — the `/analytics` payload (`by_hour[].n`, `golden_hours`, etc.); `_owned_rows()` + `to_ist()` are the canonical owned-post/hour source. |
 | | `services/analytics/day.py`, `comparison.py`, `competitor_trends.py` | `/day` summary, us-vs-competitor comparison, per-competitor trends. |
 | **Intelligence** | `services/intelligence/growth.py` | `GrowthEngine` — growth blueprint incl. `posting_plan` (via `build_posting_plan`), content-mix. |
-| **AI** | `ai/context.py` | Read-only DB→JSON bundlers (grounding). `ai/planner.py`, `briefing.py`, `coach.py`, `copywriter.py`, `factcheck.py`, `insight_writer.py`, `client.py` (Groq). Prompts in `ai/prompts/`. |
+| **AI** | `ai/context.py` | Read-only DB→JSON bundlers (grounding). `ai/planner.py` (`generate_day_plan` + `generate_week_plan`), `briefing.py`, `coach.py`, `copywriter.py` (`write_for_item` fill-time + `write_for_deal` CLI), `factcheck.py`, `insight_writer.py`, `client.py` (Groq — `complete()` takes `system_extra`). Prompts in `ai/prompts/`. |
+| **Learning** | `services/learning/channel_learning.py` | `ChannelLearningEngine` — `Fact.view_rate()` prefers true first-24h velocity (nearest T+24h `post_metric_snapshots`) over the cumulative views/age proxy; emits `channel_style_profiles`/`post_type_performance`/`learning_records`. |
 | **DB** | `db/models*.py` | ORM split across `models.py` + `models_*.py` by domain. `db/base.py` = `Base`. |
 | | `db/migrate.py` | `add_missing_columns(engine)` — the additive-column patcher (**no Alembic**; see §8). |
 | | `db/session.py` | `get_engine()`/`get_sessionmaker()` (lru_cache), `session_scope()`. |
@@ -345,7 +406,7 @@ Backend rooted at `be/`, frontend at `next/`. Only the load-bearing files are li
 - **No Alembic.** Schema = `Base.metadata.create_all()` + the hand-written additive patcher `db/migrate.py:add_missing_columns()`. `create_all()` only creates missing *tables*, never ALTERs existing ones — so any new model column must be added to `migrate.py`'s `_ADDITIONS`. This also applies to the dated export `.db` files (`collect_data.py` runs the patcher on them too).
 - **Envelope everywhere.** Backend returns `{success, data, error}`; the FE `api` service unwraps `data`. Don't return bare objects from routes.
 - **Schedulers off by default** (`SCHEDULERS_AUTOSTART=false`). Nothing ingests/plans automatically in dev — trigger via `scripts/collect_data.py` or the `/run/*` endpoints.
-- **Cold-start fallbacks.** The plan must never come back empty just because Growth/learning hasn't run. `deal_type_allocation` falls back to the recent single/loot split; `posting_windows` falls back to `_recent_posting_windows` (owned hour distribution weighted by views, same `_owned_rows` source as the analytics chart). Only override these fallbacks when a real growth blueprint is present.
+- **Cold-start fallbacks (tiered, not a magic constant).** The plan must never come back empty just because Growth/learning hasn't run. `deal_type_allocation` falls back in order: owned recent single/loot split → the Growth cold-start blueprint's competitor-derived `content_mix_reference` (`{single_deal/loot_deal}` counts over comparable channels) → a neutral 60/40 single/loot default **only** when there's no owned history *and* no usable competitors. `posting_windows` falls back to `_recent_posting_windows` (owned hour distribution weighted by views, same `_owned_rows` source as the analytics chart). Only override these fallbacks when a real growth blueprint is present.
 - **Editable templates are safe by construction.** `PostFormatter._render()` catches template errors and falls back to `DEFAULT_POST_TEMPLATES`. When adding a new template string, add its default there and document its placeholders.
 - **SQLite pragmas** (`db/session.py`): `foreign_keys=ON`, `journal_mode=WAL`, `busy_timeout=5000` on every connection.
 - **Sync SQLAlchemy 2.0** throughout — use `session_scope()`; engines/sessionmakers are `lru_cache`d.
