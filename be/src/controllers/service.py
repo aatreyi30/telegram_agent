@@ -259,8 +259,12 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
     from src.services.intelligence.competitor import latest_profiles
 
     with session_scope() as s:
-        # comparison data (owned + competitors with profiles)
-        comp = cmp.compare(s, window_days=window_days)
+        # comparison data (owned + competitors with profiles). Show EVERY monitored
+        # competitor, not just the top few — compare()'s default cap of 6 was hiding
+        # the rest (including manually-added ones that post less). compare() is used
+        # only here, so raising the cap affects nothing else.
+        n_comp = s.scalar(select(func.count(Competitor.id))) or 0
+        comp = cmp.compare(s, window_days=window_days, max_competitors=max(n_comp, 6))
         entities = comp.get("entities", [])
 
         # raw DB rows for category + benchmark access

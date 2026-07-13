@@ -19,7 +19,7 @@ import asyncio
 import math
 import re
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.config.settings import get_settings
 from src.db.models import Competitor, SourceAccessStatus
@@ -279,11 +279,29 @@ def _auto_discover_allowed() -> bool:
         return True
 
 
+def _competitor_target() -> int:
+    """How many competitors are 'enough' — once we have this many, stop searching
+    for new ones. Org-configurable via ``competitor_target`` (Settings > Org);
+    defaults to 6. Discovery only runs to REACH this target, never past it."""
+    from src.db.org_seed import get_default_org
+
+    try:
+        with session_scope() as sess:
+            org = get_default_org(sess)
+            val = (org.settings or {}).get("competitor_target", 6) if org else 6
+            return int(val) if val else 6
+    except Exception:
+        return 6
+
+
 def discover_competitors(max_add: int = 5) -> dict:
     """Search, rank, classify, and add the top new competitor channels.
 
-    Returns ``{"status": "disabled", ...}`` without running anything if the
-    org has turned off ``auto_discover_competitors`` (see Settings > Org)."""
+    Returns ``{"status": "disabled", ...}`` without running anything if the org has
+    turned off ``auto_discover_competitors`` (Settings > Org), or
+    ``{"status": "target_reached", ...}`` once we already have at least
+    ``competitor_target`` competitors (default 6) — we only discover UP TO the
+    target, never grow past it."""
     if not _auto_discover_allowed():
         logger.info("[discovery] auto_discover_competitors is disabled — skipping")
         return {"candidates": 0, "added": 0, "top": [], "status": "disabled"}
@@ -292,8 +310,17 @@ def discover_competitors(max_add: int = 5) -> dict:
     if not (s.telegram_api_id and s.telegram_api_hash):
         raise RuntimeError("Telegram MTProto not configured.")
 
+    target = _competitor_target()
     with session_scope() as sess:
+        current_count = sess.scalar(select(func.count(Competitor.id))) or 0
         existing = {c.username.lower() for c in sess.scalars(select(Competitor)) if c.username}
+    if current_count >= target:
+        logger.info("[discovery] already have %d competitor(s) (target=%d) — not searching "
+                    "for more", current_count, target)
+        return {"candidates": 0, "added": 0, "top": [], "status": "target_reached",
+                "current": current_count, "target": target}
+    # only ever fill UP TO the target — never overshoot in a single run
+    max_add = min(max_add, target - current_count)
     from src.services.collection.channels import owned_handles
     owned = {h.lstrip("@").lower() for h in owned_handles()}
     exclude = existing | owned

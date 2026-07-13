@@ -125,7 +125,13 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
     owned_rows = s.execute(owned_q).all()
 
     owned_dates = [d for d, _, _, _ in owned_rows if d]
-    if len(owned_dates) < min(MIN_POSTS, 2) if cutoff else MIN_POSTS:
+    # windowed views only need a couple of owned posts to compare; the full ("All")
+    # view needs MIN_POSTS. NOTE: the threshold must be computed on its own line —
+    # inlining it as `len < min(...) if cutoff else MIN_POSTS` mis-parses to
+    # `(len < min(...)) if cutoff else MIN_POSTS`, so the no-window branch returned a
+    # truthy constant and the "All" tab always short-circuited to empty.
+    min_owned = min(MIN_POSTS, 2) if cutoff else MIN_POSTS
+    if len(owned_dates) < min_owned:
         return {
             "entities": [],
             "unavailable": UNAVAILABLE,
