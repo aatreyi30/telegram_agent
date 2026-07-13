@@ -5,6 +5,7 @@ export const queryKeys = {
   analytics: (start?: string | null, end?: string | null) => ["analytics", start, end] as const,
   day: (date?: string | null, end?: string | null) => ["day", date, end] as const,
   drafts: (page: number) => ["drafts", page] as const,
+  draftsAll: () => ["drafts"] as const,
   posts: (page: number) => ["posts", page] as const,
   queue: (page: number) => ["queue", page] as const,
   competitors: () => ["competitors"] as const,

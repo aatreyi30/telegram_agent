@@ -88,7 +88,7 @@ export function useCreateDraft() {
   return useMutation({
     mutationFn: (body: { text: string; post_type?: string; selection_bucket?: string; channel_ref?: string }) => 
       api.post("/drafts", body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.drafts() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.draftsAll() }),
   });
 }
 
@@ -97,7 +97,7 @@ export function useUpdateDraft() {
   return useMutation({
     mutationFn: ({ id, ...body }: { id: number; text?: string; post_type?: string; status?: string; selection_bucket?: string; channel_ref?: string }) => 
       api.put(`/drafts/${id}`, body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.drafts() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.draftsAll() }),
   });
 }
 
@@ -105,7 +105,7 @@ export function useDeleteDraft() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del(`/drafts/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.drafts() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.draftsAll() }),
   });
 }
 
