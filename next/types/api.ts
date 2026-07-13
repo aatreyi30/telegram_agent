@@ -259,8 +259,10 @@ export interface WeeklyResponse {
 export interface PostTemplates {
   single_loot_badge?: string;
   single_price?: string;
+  single_coupon_line?: string;
   collection_theme_default?: string;
   collection_item?: string;
+  collection_footer?: string;
   category_theme_with_tier?: string;
   category_theme_no_tier?: string;
   category_item?: string;

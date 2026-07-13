@@ -24,6 +24,7 @@ from src.db.models_generation import EnrichedDeal
 from src.db.models_growth import GROWTH_VERSION, GrowthStrategy
 from src.db.models_learning import LEARNING_VERSION, ChannelStyleProfile
 from src.db.models_normalization import NormalizedPost, SourceType
+from src.services.analytics.periods import ist_today, to_ist
 
 
 # Default post-text templates. Historically these were hardcoded f-strings; they
@@ -31,17 +32,28 @@ from src.db.models_normalization import NormalizedPost, SourceType
 # Settings. These defaults reproduce the exact previous output byte-for-byte when
 # no override is set. Placeholders (user-facing, documented) per template:
 #   single_price:             {price} {mrp} {discount}
-#   collection_item:          {title} {price} {link}
+#   single_coupon_line:       {code} {time} {date}
+#   collection_theme_default: {date}
+#   collection_item:          {title} {price} {raw_price} {discount} {link} {n}
 #   category_theme_with_tier: {emoji_start} {label} {tier} {emoji_end}
 #   category_theme_no_tier:   {emoji_start} {label} {emoji_end}
 #   category_item:            {title} {price} {coupon} {link}
 #   category_coupon_suffix:   {code}
+#   collection_footer:        (none)
 #   (the rest are plain text with no placeholders)
+#
+# single_coupon_line and collection_footer are new, additive-only slots (source:
+# the ops caption playbook's "Coupon Code card" and "Anchor Ranked 10" formats).
+# They default to "" and are only appended when their rendered text is non-empty,
+# so every org's existing generated output is unchanged until an operator opts in
+# by filling them in via Settings — no silent behavior change on deploy.
 DEFAULT_POST_TEMPLATES: dict[str, str] = {
     "single_loot_badge": "🔥 Loot price — limited time",
     "single_price": "{price}  (was {mrp}, {discount}% off)",
+    "single_coupon_line": "",
     "collection_theme_default": "Top Deals Today",
     "collection_item": "• {title}{price}\n  {link}",
+    "collection_footer": "",
     "category_theme_with_tier": "{emoji_start} {label} Under ₹{tier} {emoji_end}",
     "category_theme_no_tier": "{emoji_start} {label} Deals {emoji_end}",
     "category_item": "{title}{price}{coupon} - {link}",
@@ -50,6 +62,27 @@ DEFAULT_POST_TEMPLATES: dict[str, str] = {
     "fallback_category_label": "Top Deals",
     "fallback_title": "Deal",
 }
+
+# Keycap-emoji rank markers for a numbered loot list (1️⃣…🔟), matching the
+# playbook's "Anchor — Top 10 Loot" format. Beyond 10 items, falls back to "11."
+_RANK_MARKERS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+
+def _rank_marker(index: int) -> str:
+    return _RANK_MARKERS[index] if index < len(_RANK_MARKERS) else f"{index + 1}."
+
+
+def _fmt_verified_time(dt) -> str:
+    """Human time-of-day a deal was last verified, in IST. Never fabricated —
+    falls back to the word 'today' when we don't actually have a timestamp."""
+    if not dt:
+        return "today"
+    s = to_ist(dt).strftime("%I:%M %p")
+    return s.lstrip("0") or s
+
+
+def _today_str() -> str:
+    return ist_today().strftime("%d %b")
 
 
 def _fmt_price(v: float | None) -> str | None:
@@ -226,6 +259,18 @@ class PostFormatter:
         if deal.is_loot_deal:
             lines.append(self._render("single_loot_badge"))
 
+        # coupon proof line — only when this deal actually carries a coupon tag
+        # (tags entries of the form "coupon:<code>"); never fabricated, and the
+        # template defaults to "" so this is a no-op until an operator opts in.
+        code = next((t.split(":", 1)[1] for t in (deal.tags or [])
+                    if isinstance(t, str) and t.startswith("coupon:")), None)
+        if code:
+            coupon_line = self._render("single_coupon_line", code=code,
+                                       time=_fmt_verified_time(deal.last_verified_at),
+                                       date=_today_str())
+            if coupon_line.strip():
+                lines.append(coupon_line)
+
         # link: affiliate/short link if a provider is configured, else clean URL
         link, aff_meta = self._finalize_link(deal)
         if link:
@@ -235,6 +280,7 @@ class PostFormatter:
         meta = {
             "used_emojis": self.lead_emojis,
             **aff_meta,
+            "coupon_code": code,
             "fields_omitted_unknown": [k for k, v in
                                        {"current_price": deal.current_price,
                                         "original_price": deal.original_price,
@@ -245,18 +291,26 @@ class PostFormatter:
 
     def format_collection(self, deals: list[EnrichedDeal], theme: str | None = None) -> tuple[str, dict]:
         emoji = " ".join(self.lead_emojis) if self.uses_emoji and self.lead_emojis else ""
-        header = f"{emoji} {theme or self._render('collection_theme_default')}".strip()
+        theme_text = theme or self._render("collection_theme_default", date=_today_str())
+        header = f"{emoji} {theme_text}".strip()
         lines = [header, ""]
         shortened_any = False
-        for d in deals:
+        for i, d in enumerate(deals):
             cur = _fmt_price(d.current_price)
             title = d.title or self._render("fallback_title")
             link, aff_meta = self._finalize_link(d)
             shortened_any = shortened_any or aff_meta.get("affiliate_shortened", False)
             link = link or ""
             price = f" — {cur}" if cur else ""
-            lines.append(self._render("collection_item", title=title, price=price,
+            discount = f"{d.discount_percent:.0f}" if d.discount_percent is not None else ""
+            lines.append(self._render("collection_item", n=_rank_marker(i), title=title,
+                                      price=price, raw_price=cur or "", discount=discount,
                                       link=link).rstrip())
+        # optional closing footer (e.g. "🔔 Notifications ON") — off by default
+        footer = self._render("collection_footer")
+        if footer.strip():
+            lines.append("")
+            lines.append(footer)
         rendered = "\n".join(lines)
         meta = {"used_emojis": self.lead_emojis, "item_count": len(deals),
                 "affiliate_status": (f"{self.affiliate.name}_applied" if self.affiliate
