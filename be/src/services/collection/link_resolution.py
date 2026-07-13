@@ -40,6 +40,7 @@ import ssl
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import urljoin
 
 import httpx
 import tldextract
@@ -97,6 +98,64 @@ def _is_self_domain(domain: str | None, domains: frozenset | set = _SELF_DOMAINS
         return False
     d = domain.lower()
     return d in domains or any(d.endswith("." + s) for s in domains)
+
+
+# Max number of extra hops we'll follow via meta-refresh / simple-JS redirects
+# beyond the HTTP 3xx chain (bounds the loop against redirect cycles).
+_MAX_HTML_REDIRECT_HOPS = 2
+
+# <meta http-equiv="refresh" content="N; url=...">  (case-insensitive; the delay
+# and url ordering/quoting varies, so match loosely and pull the url out after).
+_META_REFRESH_RE = re.compile(
+    r"""<meta[^>]*?http-equiv\s*=\s*["']?refresh["']?[^>]*?content\s*=\s*"""
+    r"""["']([^"']+)["'][^>]*>""",
+    re.IGNORECASE | re.DOTALL,
+)
+_META_CONTENT_URL_RE = re.compile(
+    r"""url\s*=\s*['"]?\s*([^'"\s;]+)""", re.IGNORECASE
+)
+
+# Simple JS bounces: window.location = "...", window.location.href = "...",
+# window.location.assign("..."), location.replace("...").
+_JS_REDIRECT_RE = re.compile(
+    r"""(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]"""
+    r"""|(?:window\.)?location\.(?:assign|replace)\s*\(\s*['"]([^'"]+)['"]""",
+    re.IGNORECASE,
+)
+
+
+def _extract_html_redirect(html: str, base_url: str) -> tuple[str | None, float]:
+    """Best-effort extraction of a client-side redirect target from an HTML
+    body. Handles ``<meta http-equiv="refresh">`` (honouring its delay) and a
+    few simple ``window.location`` / ``location.replace`` JS bounces.
+
+    Returns ``(absolute_url_or_None, delay_seconds)``. Relative targets are
+    resolved against ``base_url``. Never raises — a non-HTML / unparseable body
+    just yields ``(None, 0.0)``."""
+    try:
+        # meta-refresh takes precedence (it's the declarative, delay-bearing form)
+        m = _META_REFRESH_RE.search(html)
+        if m:
+            content = m.group(1)
+            delay = 0.0
+            head = content.split(";", 1)[0].strip()
+            try:
+                delay = float(head)
+            except ValueError:
+                delay = 0.0
+            u = _META_CONTENT_URL_RE.search(content)
+            if u:
+                return urljoin(base_url, u.group(1).strip()), delay
+
+        # simple JS location assignment
+        j = _JS_REDIRECT_RE.search(html)
+        if j:
+            target = j.group(1) or j.group(2)
+            if target:
+                return urljoin(base_url, target.strip()), 0.0
+    except Exception:  # pragma: no cover - parsing must never crash resolution
+        return None, 0.0
+    return None, 0.0
 
 
 @dataclass
@@ -291,13 +350,47 @@ class LinkResolutionEngine(BaseCollector):
         redirect_chain = [str(r.url) for r in response.history]
         redirect_chain.append(str(response.url))
 
-        merchant = None
-        for redirect_url in redirect_chain:
-            merchant = detect_merchant_key(redirect_url)
-            if merchant:
-                break
+        def _scan(chain: list[str]) -> str | None:
+            for redirect_url in chain:
+                m = detect_merchant_key(redirect_url)
+                if m:
+                    return m
+            return None
 
+        merchant = _scan(redirect_chain)
         final_url = str(response.url)
+
+        # The HTTP 3xx chain revealed no known merchant. Affiliate landing
+        # pages often bounce client-side via <meta http-equiv="refresh"> or a
+        # simple window.location JS hop, which httpx does NOT follow — so we'd
+        # otherwise stop on the redirector/landing domain and capture the WRONG
+        # merchant. Follow up to _MAX_HTML_REDIRECT_HOPS such hops, honouring
+        # the meta-refresh delay (capped at 2s). An extra-hop network failure
+        # degrades gracefully: we keep the best result reached so far.
+        hops = 0
+        while merchant is None and hops < _MAX_HTML_REDIRECT_HOPS:
+            content_type = response.headers.get("content-type", "")
+            if content_type and "html" not in content_type.lower():
+                break
+            next_url, delay = _extract_html_redirect(response.text, final_url)
+            if not next_url:
+                break
+            try:
+                await asyncio.sleep(min(max(delay, 0.0), 2.0))
+                response = await client.get(next_url, follow_redirects=True)
+            except _RESOLUTION_EXCEPTIONS as exc:
+                logger.warning(
+                    "[link_resolution] extra-hop failed for %s -> %s: %s",
+                    url, next_url, exc,
+                )
+                break
+            for r in response.history:
+                redirect_chain.append(str(r.url))
+            redirect_chain.append(str(response.url))
+            final_url = str(response.url)
+            merchant = _scan(redirect_chain)
+            hops += 1
+
         discovered_domain = None
         if merchant is None:
             merchant, discovered_domain = self._capture_domain(final_url)

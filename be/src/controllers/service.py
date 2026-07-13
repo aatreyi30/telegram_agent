@@ -714,7 +714,11 @@ def _today_details(s, recommended_posts: int):
     # The blueprint's posting_plan is sized to the stale baseline, so use it only for
     # the RELATIVE shape and rescale each window to the recommended cadence — otherwise
     # the per-window posts sum to ~18 while the headline says ~50.
-    raw = bp.get("posting_plan") or []
+    # Fall back to the channel's own historical posting-hours when the Growth
+    # blueprint has no posting_plan yet (cold-start / before learning). The
+    # fallback is already sized to recommended_posts, so raw_sum ≈ recommended_posts
+    # and the rescale below is effectively a no-op for it.
+    raw = bp.get("posting_plan") or eng._recent_posting_windows(s, now, recommended_posts)
     raw_sum = sum((p.get("recommended_posts_per_day") or 0) for p in raw) or 1
     windows = [{"part": p.get("part"), "hours": p.get("hours"),
                 "posts": round((p.get("recommended_posts_per_day") or 0) * recommended_posts / raw_sum),
@@ -722,7 +726,9 @@ def _today_details(s, recommended_posts: int):
                 # number for WHY this window instead of generic "peak hours" filler.
                 "avg_views_per_day": p.get("avg_views_per_day")}
                for p in raw]
-    allocation = eng._allocate_posts(bp, recommended_posts)
+    perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
+            for p in ctx.post_type_performance(s)}
+    allocation = eng._allocate_posts(bp, recommended_posts, recent, perf)
     merchants = eng._merchant_allocation(s, recent, now)
     risks = eng._risks(recent, recommended_posts)
     return windows, allocation, merchants, (risks or None)
@@ -927,8 +933,11 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
     event_data = [{"name": e.name, "next_date": e.next_date,
                    "days_away": (e.next_date - week_start).days,
                    "date_confidence": e.date_confidence} for e in events]
-    blueprint = CampaignPlanningEngine()._weekly_plan(
-        bp_growth, perf, week_start, event_data)["blueprint"]
+    from datetime import datetime, timezone
+    eng = CampaignPlanningEngine()
+    recent = eng._recent_distribution(s, datetime.now(timezone.utc))
+    blueprint = eng._weekly_plan(
+        bp_growth, perf, week_start, event_data, recent)["blueprint"]
     themes = blueprint.get("daily_themes") or []
 
     ai_summary, ai_ok = "", False
