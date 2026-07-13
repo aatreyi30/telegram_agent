@@ -1,6 +1,6 @@
 import type { IconSvgElement } from "@hugeicons/react";
 import {
-  Building01Icon, Satellite01Icon, UserGroupIcon, UserIcon,
+  Building01Icon, File01Icon, Satellite01Icon, UserGroupIcon, UserIcon,
 } from "@hugeicons/core-free-icons";
 
 export interface SettingsNavItem {
@@ -20,4 +20,5 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   { key: "org", label: "Organization", icon: Building01Icon, description: "Company details and affiliate link settings.", ownerOnly: true },
   { key: "users", label: "Users", icon: UserGroupIcon, description: "Teammates and their access level.", ownerOnly: true },
   { key: "competitors", label: "Competitors", icon: UserGroupIcon, description: "Manually track direct and indirect competitors.", ownerOnly: true },
+  { key: "templates", label: "Post Templates", icon: File01Icon, description: "Edit the text templates used to generate posts.", ownerOnly: true },
 ];

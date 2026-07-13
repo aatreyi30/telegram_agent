@@ -253,10 +253,29 @@ export interface WeeklyResponse {
   what_changed: ReasonedInsightDTO[]; recommendations: GrowthRecommendation[]; ai_summary: string | null;
 }
 
+// Editable post-text templates stored in org.settings.post_templates. Every key is
+// optional in the type (a fresh org may not have overridden them yet) but the backend
+// seeds all 11; the settings editor prefills from whatever the GET returns.
+export interface PostTemplates {
+  single_loot_badge?: string;
+  single_price?: string;
+  collection_theme_default?: string;
+  collection_item?: string;
+  category_theme_with_tier?: string;
+  category_theme_no_tier?: string;
+  category_item?: string;
+  category_coupon_suffix?: string;
+  observed_collection_theme?: string;
+  fallback_category_label?: string;
+  fallback_title?: string;
+}
+
+export type PostTemplateKey = keyof PostTemplates;
+
 export interface OrgSettings {
   grabon_shortener_url?: string; grabon_amazon_tag?: string; grabon_flipkart_params?: string;
   grabon_shorten_all?: boolean; preferred_categories?: string[];
-  auto_discover_competitors?: boolean; [key: string]: unknown;
+  auto_discover_competitors?: boolean; post_templates?: PostTemplates; [key: string]: unknown;
 }
 
 export interface OrgResponse { id: number; key: string; name: string; affiliate_provider: string; settings: OrgSettings; channels: number; }
