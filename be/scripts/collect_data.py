@@ -15,11 +15,18 @@ pipeline, not just raw collection:
   6. Classify posts into learned post-type clusters.
   7. Build merchant intelligence (profiles, metric windows, opportunities).
   8. Build competitor intelligence (profiles, benchmarks vs us).
-  9. Backfill DailyChannelReport rows for every day in the export window.
- 10. Optionally (--backtest) run a historical baseline_v1 self-eval over the
+  9. Build channel learning (style/post-type/learning records) + growth strategy
+     blueprint — so the AI plan grounds on a fresh blueprint, not a stale one.
+ 10. Backfill DailyChannelReport rows for every day in the export window.
+ 11. Generate the AI daily plan for the target day (per-post slots) and FILL every
+     slot with a fresh scraped deal + AI-written copy (jit_fill, all_slots) — i.e.
+     the real just-in-time posting path, end to end. Drafts are written to
+     generated_posts and enqueued in scheduled_posts, but NOTHING is published:
+     the Publisher/queue is never run here, and the send is gated regardless.
+ 12. Optionally (--backtest) run a historical baseline_v1 self-eval over the
      window's owned posts, so prediction accuracy is visible on the weekly
      retro / /plan immediately (see services/analytics/backtest.py).
- 11. Pull everything for "yesterday" + "today" (or one exact --date) out of
+ 13. Pull everything for "yesterday" + "today" (or one exact --date) out of
      the main operational database and mirror it into a SEPARATE, freshly
      generated .db file — channels, competitors, posts, competitor posts,
      normalized posts, extracted prices/coupons/links, classifications,
@@ -122,6 +129,15 @@ def _parse_args() -> argparse.Namespace:
                     help="Skip Phase 4 merchant intelligence (profiles/opportunities).")
     p.add_argument("--skip-competitor-intel", action="store_true",
                     help="Skip Phase 5 competitor intelligence (profiles/benchmarks).")
+    p.add_argument("--skip-learning", action="store_true",
+                    help="Skip Phase 6 channel learning (style/post-type/learning records).")
+    p.add_argument("--skip-growth", action="store_true",
+                    help="Skip Phase 7 growth strategy blueprint.")
+    p.add_argument("--skip-plan", action="store_true",
+                    help="Skip generating the AI daily plan (campaign_plans) for the target day.")
+    p.add_argument("--skip-generate", action="store_true",
+                    help="Skip filling the plan's slots into drafts (generated_posts + queue). "
+                         "Generation NEVER publishes — the Publisher/queue is not run here.")
     p.add_argument("--link-resolve-limit", type=int, default=300,
                     help="Max shortlinks to resolve this run (default 300).")
     p.add_argument("--link-resolve-concurrency", type=int, default=10,
@@ -174,6 +190,7 @@ if ARGS.export_only:
     ARGS.skip_owned = ARGS.skip_discovery = ARGS.skip_competitors = True
     ARGS.skip_normalize = ARGS.skip_link_resolution = ARGS.skip_classify = True
     ARGS.skip_merchant_intel = ARGS.skip_competitor_intel = True
+    ARGS.skip_learning = ARGS.skip_growth = ARGS.skip_plan = ARGS.skip_generate = True
 
 
 def _auto_export_db_url(days_back: int, single_date: str | None) -> str:
@@ -240,6 +257,8 @@ from src.db.models_deal_score import DealScore
 from src.db.models_ai_output import AIOutput
 from src.db.models_report import DailyChannelReport
 from src.db.models_campaign import CampaignPlan
+from src.db.models_generation import GeneratedPost
+from src.db.models_automation import ScheduledPost
 from src.db.models_growth_snapshot import DailySubscriberStat, ParticipantSnapshot
 from src.services.collection.base import JobRunner
 from src.services.collection.channels import owned_handles
@@ -262,7 +281,11 @@ class RunSummary:
     classify_job: dict | None = None
     merchant_intel_job: dict | None = None
     competitor_intel_job: dict | None = None
+    learning_job: dict | None = None
+    growth_job: dict | None = None
     daily_report_job: dict | None = None
+    ai_plan_jobs: list = field(default_factory=list)
+    generate_jobs: list = field(default_factory=list)
     backtest_job: dict | None = None
     errors: list = field(default_factory=list)
 
@@ -456,6 +479,88 @@ def run_competitor_intel(summary: RunSummary) -> None:
         summary.errors.append(f"competitor_intel: {exc}")
 
 
+def run_learning(summary: RunSummary) -> None:
+    """Phase 6: build channel style/post-type/learning records from owned history
+    (prefers true first-24h velocity where snapshots exist)."""
+    from src.services.learning.channel_learning import ChannelLearningEngine
+
+    log.info("Building channel learning dataset...")
+    try:
+        job = JobRunner().run_collector(
+            ChannelLearningEngine(), collection_type=CollectionType.MANUAL, target="learning")
+        log.info("  learning -> %s (added=%s processed=%s)",
+                  job.status, job.records_added, job.records_processed)
+        summary.learning_job = {"status": job.status, "added": job.records_added}
+    except Exception as exc:  # noqa: BLE001
+        log.error("  learning FAILED: %s", exc)
+        summary.errors.append(f"learning: {exc}")
+
+
+def run_growth(summary: RunSummary) -> None:
+    """Phase 7: build the growth strategy blueprint the AI plan grounds on."""
+    from src.services.intelligence.growth import GrowthEngine
+
+    log.info("Building growth strategy blueprint...")
+    try:
+        job = JobRunner().run_collector(
+            GrowthEngine(), collection_type=CollectionType.MANUAL, target="growth")
+        log.info("  growth -> %s (added=%s updated=%s)",
+                  job.status, job.records_added, job.records_updated)
+        summary.growth_job = {"status": job.status, "added": job.records_added}
+    except Exception as exc:  # noqa: BLE001
+        log.error("  growth FAILED: %s", exc)
+        summary.errors.append(f"growth: {exc}")
+
+
+def run_ai_plan(summary: RunSummary, plan_day: date) -> None:
+    """Phase 10+AI: generate + persist the AI daily plan (per-post slots) for
+    ``plan_day`` — the source of truth the just-in-time filler executes. Needs AI
+    (GROQ_API_KEY); logs a warning and moves on if unavailable."""
+    from src.controllers.service import ensure_daily_ai_plan
+
+    log.info("Generating AI daily plan for %s...", plan_day.isoformat())
+    try:
+        with session_scope() as s:
+            row = ensure_daily_ai_plan(s, plan_day)
+            slots = len((row.blueprint or {}).get("post_slots") or []) if row else 0
+        if row is None:
+            log.warning("  ai_plan[%s] -> no plan (AI unavailable or no owned data yet)",
+                        plan_day.isoformat())
+            summary.ai_plan_jobs.append({"day": plan_day.isoformat(), "slots": 0, "status": "limited"})
+            return
+        log.info("  ai_plan[%s] -> %d slot(s) planned", plan_day.isoformat(), slots)
+        summary.ai_plan_jobs.append({"day": plan_day.isoformat(), "slots": slots, "status": "ok"})
+    except Exception as exc:  # noqa: BLE001
+        log.error("  ai_plan[%s] FAILED: %s", plan_day.isoformat(), exc)
+        summary.errors.append(f"ai_plan[{plan_day.isoformat()}]: {exc}")
+
+
+def run_generate(summary: RunSummary, plan_day: date) -> None:
+    """Phase 11: fill EVERY slot of ``plan_day``'s AI plan with a fresh scraped deal
+    + AI-written copy (jit_fill, all_slots=True). Writes generated_posts and enqueues
+    scheduled_posts at each slot's fire time. Never publishes — the Publisher/queue
+    processor is not run here, and the send is gated regardless."""
+    from src.services.generation.jit_fill import fill_due_slots
+
+    log.info("Filling AI-plan slots for %s (fresh deals + AI copy; no publishing)...",
+              plan_day.isoformat())
+    try:
+        with session_scope() as s:
+            r = fill_due_slots(s, day=plan_day, all_slots=True)
+        if not r.get("ok"):
+            log.warning("  generate[%s] -> limited: %s", plan_day.isoformat(), r.get("reason"))
+            summary.generate_jobs.append(
+                {"day": plan_day.isoformat(), "filled": 0, "status": "limited", "reason": r.get("reason")})
+            return
+        log.info("  generate[%s] -> filled %s/%s slot(s)",
+                 plan_day.isoformat(), r.get("filled", 0), r.get("due", 0))
+        summary.generate_jobs.append(
+            {"day": plan_day.isoformat(), "filled": r.get("filled", 0), "due": r.get("due", 0)})
+    except Exception as exc:  # noqa: BLE001
+        log.error("  generate[%s] FAILED: %s", plan_day.isoformat(), exc)
+        summary.errors.append(f"generate[{plan_day.isoformat()}]: {exc}")
+
+
 def run_daily_reports_for_window(summary: RunSummary, start: datetime, end: datetime) -> None:
     """Task A.3 — backfill DailyChannelReport rows for every day the export
     window covers, so the AI/plan/report surfaces have owned-channel daily
@@ -543,6 +648,8 @@ EXPORT_TABLES = [
     DailyChannelReport.__table__,
     # Phase 10: campaign plans
     CampaignPlan.__table__,
+    # Phase 11: generated drafts + publish queue (never actually published here)
+    GeneratedPost.__table__, ScheduledPost.__table__,
     # velocity / growth data
     PostMetricSnapshot.__table__, DailySubscriberStat.__table__, ParticipantSnapshot.__table__,
 ]
@@ -572,6 +679,18 @@ def _window(days_back: int, single_date: str | None = None) -> tuple[datetime, d
     start = today_start - timedelta(days=days_back)
     end = today_start + timedelta(days=1)  # exclusive upper bound = start of tomorrow
     return start, end
+
+
+def _days_in_window(start: datetime, end: datetime) -> list[date]:
+    """Every calendar day the [start, end) window covers (``end`` is the exclusive
+    next-day boundary), oldest first. One day for --date; the whole range otherwise."""
+    days: list[date] = []
+    d = start.date()
+    last = end.date()
+    while d < last:
+        days.append(d)
+        d += timedelta(days=1)
+    return days
 
 
 def _get_export_engine(url: str) -> Engine:
@@ -728,6 +847,11 @@ def export_window(export_db_url: str, start: datetime, end: datetime) -> dict:
         ai_outputs = list(s.scalars(select(AIOutput)))
         daily_channel_reports = list(s.scalars(select(DailyChannelReport)))
         campaign_plans = list(s.scalars(select(CampaignPlan)))
+        # generated drafts + publish queue: current cumulative state (freshly filled
+        # rows are stamped "now", so mirror in full like campaign_plans rather than
+        # window-scoping them out)
+        generated_posts = list(s.scalars(select(GeneratedPost)))
+        scheduled_posts = list(s.scalars(select(ScheduledPost)))
         daily_subscriber_stats = list(s.scalars(select(DailySubscriberStat)))
         participant_snapshots = list(s.scalars(select(ParticipantSnapshot)))
 
@@ -783,6 +907,10 @@ def export_window(export_db_url: str, start: datetime, end: datetime) -> dict:
             dest_engine, DailyChannelReport.__table__, [_row_to_dict(o) for o in daily_channel_reports])
         counts["campaign_plans"] = _upsert(
             dest_engine, CampaignPlan.__table__, [_row_to_dict(o) for o in campaign_plans])
+        counts["generated_posts"] = _upsert(
+            dest_engine, GeneratedPost.__table__, [_row_to_dict(o) for o in generated_posts])
+        counts["scheduled_posts"] = _upsert(
+            dest_engine, ScheduledPost.__table__, [_row_to_dict(o) for o in scheduled_posts])
         counts["daily_subscriber_stats"] = _upsert(
             dest_engine, DailySubscriberStat.__table__, [_row_to_dict(o) for o in daily_subscriber_stats])
         counts["participant_snapshots"] = _upsert(
@@ -811,6 +939,10 @@ def main() -> int:
         log.info("[dry-run] competitors on file: %s", "yes" if comp_count else "none yet")
         log.info("[dry-run] would export window %s -> %s (UTC) into %s",
                   start.isoformat(), end.isoformat(), ARGS.export_db_url)
+        _pd = _days_in_window(start, end)
+        log.info("[dry-run] would plan + generate posts for %d day(s) %s..%s (no publishing): "
+                  "plan=%s generate=%s", len(_pd), _pd[0].isoformat(), _pd[-1].isoformat(),
+                  not ARGS.skip_plan, not ARGS.skip_generate)
         log.info("[dry-run] owned collection type: %s",
                   CollectionType.INITIAL if ARGS.initial else CollectionType.INCREMENTAL)
         log.info("[dry-run] pace_seconds=%.1f link_resolve_concurrency=%d http_timeout=%.1f",
@@ -862,9 +994,37 @@ def main() -> int:
     else:
         log.info("Skipping competitor intelligence (--skip-competitor-intel).")
 
+    if not ARGS.skip_learning:
+        run_learning(summary)
+    else:
+        log.info("Skipping channel learning (--skip-learning).")
+
+    if not ARGS.skip_growth:
+        run_growth(summary)
+    else:
+        log.info("Skipping growth strategy (--skip-growth).")
+
     # Task A.3 — backfill daily reports for the export window (idempotent,
     # runs regardless of --skip-* / --export-only).
     run_daily_reports_for_window(summary, start, end)
+
+    # New flow — AI daily plan then just-in-time fill for EVERY full day in the
+    # window (one day for --date; the whole range for --days-back). Generation
+    # scrapes the *current* live pool, so a back-dated day's posts are today's fresh
+    # deals enqueued at that day's slot times. Writes drafts + enqueues but never
+    # publishes (Publisher/queue not run here; send is gated regardless).
+    plan_days = _days_in_window(start, end)
+    if not ARGS.skip_plan:
+        for d in plan_days:
+            run_ai_plan(summary, d)
+    else:
+        log.info("Skipping AI daily plan (--skip-plan).")
+
+    if not ARGS.skip_generate:
+        for d in plan_days:
+            run_generate(summary, d)
+    else:
+        log.info("Skipping slot generation (--skip-generate).")
 
     # Task B — historical baseline_v1 self-eval, opt-in only.
     if ARGS.backtest:
@@ -887,7 +1047,13 @@ def main() -> int:
     log.info("Classify                : %s", summary.classify_job)
     log.info("Merchant intel          : %s", summary.merchant_intel_job)
     log.info("Competitor intel        : %s", summary.competitor_intel_job)
+    log.info("Learning                : %s", summary.learning_job)
+    log.info("Growth                  : %s", summary.growth_job)
     log.info("Daily reports           : %s", summary.daily_report_job)
+    log.info("AI daily plan           : %d day(s), %d slot(s) total",
+              len(summary.ai_plan_jobs), sum(j.get("slots", 0) for j in summary.ai_plan_jobs))
+    log.info("Generate (jit_fill)     : %d day(s), %d draft(s) filled (0 published)",
+              len(summary.generate_jobs), sum(j.get("filled", 0) for j in summary.generate_jobs))
     log.info("Backtest                : %s", summary.backtest_job)
     log.info("Exported -> %s : %s", ARGS.export_db_url, counts)
     if summary.errors:
