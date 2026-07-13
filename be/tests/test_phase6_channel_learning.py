@@ -24,6 +24,42 @@ def test_views_per_day_age_normalization():
     assert Fact(NOW, None, None, None, 0, 0, False, False, False, False, [], [], None, None).views_per_day(NOW) is None
 
 
+def test_view_rate_prefers_24h_velocity_over_cumulative_proxy():
+    # old post: huge cumulative views (100/day proxy) but a modest first-24h velocity
+    old = _fact(views=3000, cluster="x", days_ago=30)   # proxy = 3000/30 = 100/day
+    old.views_24h = 50
+    assert old.view_rate(NOW) == 50.0                   # velocity wins, not the proxy
+
+    # recent fast-starter: proxy understates it; velocity captures the burst
+    new = _fact(views=200, cluster="x", days_ago=1)     # proxy = 200/day
+    new.views_24h = 400
+    assert new.view_rate(NOW) == 400.0
+
+    # no snapshot captured yet -> honest fallback to the cumulative proxy
+    bare = _fact(views=1000, cluster="x", days_ago=10)  # proxy = 100/day
+    assert bare.views_24h is None
+    assert abs(bare.view_rate(NOW) - 100.0) < 1e-6
+
+
+def test_velocity_reorders_ranking_vs_cumulative():
+    # By cumulative proxy 'slow' (200/day) would beat 'fast' (100/day); by true
+    # first-24h velocity 'fast' (300) beats 'slow' (40), so ranking must flip.
+    engine = ChannelLearningEngine()
+    fast = []
+    for _ in range(25):
+        f = _fact(views=100, cluster="fast", days_ago=1)   # proxy 100/day
+        f.views_24h = 300
+        fast.append(f)
+    slow = []
+    for _ in range(25):
+        f = _fact(views=6000, cluster="slow", days_ago=30)  # proxy 200/day
+        f.views_24h = 40
+        slow.append(f)
+    perf = engine._post_type_performance(fast + slow, NOW)
+    assert perf[0]["post_type"] == "fast"
+    assert perf[0]["rank_by_views_per_day"] == 1
+
+
 def test_confidence_scales_with_sample():
     assert _conf(0) == 0.0
     assert _conf(25) == 0.5

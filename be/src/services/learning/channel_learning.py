@@ -5,11 +5,12 @@ Phase-3 clusters) and produces a style profile, per-post-type performance, and
 discrete evidence-backed learning records.
 
 Honesty:
-  * views are age-normalized (views/day) — Telegram views are cumulative totals,
-    so raw totals favour older posts (Data Validation Matrix Feature 15);
+  * the per-post metric (``Fact.view_rate``) prefers TRUE first-24h velocity from
+    the nearest ~T+24h PostMetricSnapshot — comparable across posts regardless of
+    age — and only falls back to the cumulative views/age proxy for posts with no
+    24h snapshot yet (older history); it sharpens toward pure velocity as snapshots
+    accrue (Data Validation Matrix Feature 7/15);
   * comparative learnings require a minimum sample and carry confidence;
-  * timing learnings note the velocity caveat (true T+1h/4h/24h velocity only
-    accrues going forward);
   * subscriber-growth-per-posttype and CTR are UNAVAILABLE and simply absent.
 """
 
@@ -24,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.services.collection.base import BaseCollector, CollectorResult
-from src.db.models import Post
+from src.db.models import Post, PostMetricSnapshot
 from src.db.models_learning import (
     LEARNING_VERSION,
     ChannelStyleProfile,
@@ -43,6 +44,12 @@ MIN_GROUP_SAMPLE = 20        # min posts in a subgroup to emit a comparative lea
 RELIABLE_HOUR_SAMPLE = 100   # min posts in an hour before a timing window is "proven"
 FULL_CONFIDENCE_N = 50
 
+# True first-24h velocity anchor: the nearest PostMetricSnapshot whose age_hours
+# falls in [24 - tol, 24 + tol] wins. Mirrors analytics/engagement.py so the two
+# read the same "views in the first day" quantity.
+_VELOCITY_TARGET_HOURS = 24.0
+_VELOCITY_TOLERANCE_HOURS = 2.0
+
 
 @dataclass
 class Fact:
@@ -60,6 +67,7 @@ class Fact:
     hashtags: list
     cluster: str | None
     merchant_key: str | None
+    views_24h: int | None = None   # nearest ~T+24h snapshot views (true velocity), if captured
 
     def views_per_day(self, now: datetime) -> float | None:
         if self.views is None or self.posted_at is None:
@@ -67,6 +75,18 @@ class Fact:
         pa = self.posted_at if self.posted_at.tzinfo else self.posted_at.replace(tzinfo=timezone.utc)
         age = max((now - pa).total_seconds() / 86400.0, 1.0)
         return self.views / age
+
+    def view_rate(self, now: datetime) -> float | None:
+        """The per-post engagement metric, best-available. Prefers TRUE first-24h
+        velocity (``views_24h`` from the nearest ~T+24h snapshot) — comparable across
+        posts regardless of age, so a fast-starting recent post isn't buried by an old
+        post that merely accumulated views over weeks. Falls back to the cumulative
+        views/age proxy for posts with no 24h snapshot yet (history predating snapshot
+        collection). Both are per-day view rates, so they mix into one pool honestly;
+        the dataset sharpens toward pure velocity as snapshots accrue."""
+        if self.views_24h is not None:
+            return float(self.views_24h)
+        return self.views_per_day(now)
 
 
 def _conf(n: int) -> float:
@@ -138,6 +158,7 @@ class ChannelLearningEngine(BaseCollector):
                        Post.reactions_total, func.length(Post.text), Post.has_media)
             ).all()
         }
+        velocity = self._views_24h(s, list(post_meta.keys()))
         facts = []
         for src_id, num_links, has_coupon, multi, emojis, hashtags, cta, mkey, npid in np_rows:
             meta = post_meta.get(src_id)
@@ -150,9 +171,35 @@ class ChannelLearningEngine(BaseCollector):
                 text_len=tlen or 0, num_links=num_links, has_coupon=has_coupon,
                 is_multi_deal=multi, has_cta=bool(cta), has_media=bool(media),
                 emojis=emojis or [], hashtags=hashtags or [], cluster=cluster,
-                merchant_key=mkey,
+                merchant_key=mkey, views_24h=velocity.get(src_id),
             ))
         return facts
+
+    @staticmethod
+    def _views_24h(s: Session, post_ids: list[int]) -> dict[int, int]:
+        """Map post_id -> views at its nearest ~T+24h snapshot (true first-day
+        velocity), for the posts that have one. Posts with no snapshot in the window
+        are simply absent, and fall back to the cumulative proxy in ``Fact.view_rate``."""
+        if not post_ids:
+            return {}
+        lo = _VELOCITY_TARGET_HOURS - _VELOCITY_TOLERANCE_HOURS
+        hi = _VELOCITY_TARGET_HOURS + _VELOCITY_TOLERANCE_HOURS
+        snaps = s.scalars(
+            select(PostMetricSnapshot).where(
+                PostMetricSnapshot.post_id.in_(post_ids),
+                PostMetricSnapshot.age_hours.isnot(None),
+                PostMetricSnapshot.age_hours.between(lo, hi),
+                PostMetricSnapshot.views.isnot(None),
+            )
+        ).all()
+        nearest: dict[int, PostMetricSnapshot] = {}
+        for sn in snaps:
+            cur = nearest.get(sn.post_id)
+            if cur is None or abs(sn.age_hours - _VELOCITY_TARGET_HOURS) < abs(
+                cur.age_hours - _VELOCITY_TARGET_HOURS
+            ):
+                nearest[sn.post_id] = sn
+        return {pid: sn.views for pid, sn in nearest.items()}
 
     def _style_profile(self, facts: list[Fact], now: datetime) -> dict:
         n = len(facts)
@@ -197,7 +244,7 @@ class ChannelLearningEngine(BaseCollector):
                 groups[f.cluster].append(f)
         rows = []
         for cluster, fs in groups.items():
-            vpd = [f.views_per_day(now) for f in fs if f.views_per_day(now) is not None]
+            vpd = [f.view_rate(now) for f in fs if f.view_rate(now) is not None]
             rows.append({
                 "learning_version": LEARNING_VERSION,
                 "post_type": cluster,
@@ -217,7 +264,7 @@ class ChannelLearningEngine(BaseCollector):
 
     def _learning_records(self, facts: list[Fact], now: datetime) -> list[dict]:
         recs: list[dict] = []
-        baseline = _mean([f.views_per_day(now) for f in facts if f.views_per_day(now) is not None])
+        baseline = _mean([f.view_rate(now) for f in facts if f.view_rate(now) is not None])
         if not baseline:
             return recs
 
@@ -230,7 +277,7 @@ class ChannelLearningEngine(BaseCollector):
             })
 
         def subgroup_vpd(pred) -> tuple[float | None, int]:
-            vals = [f.views_per_day(now) for f in facts if pred(f) and f.views_per_day(now) is not None]
+            vals = [f.view_rate(now) for f in facts if pred(f) and f.view_rate(now) is not None]
             return (_mean(vals), len(vals))
 
         def lift_pct(v):
@@ -292,7 +339,7 @@ class ChannelLearningEngine(BaseCollector):
         # HIGH-AVG-but-small-sample windows, and expose the full ranking as evidence.
         hour_vals: dict[int, list[float]] = defaultdict(list)
         for f in facts:
-            vpd = f.views_per_day(now)
+            vpd = f.view_rate(now)
             if vpd is not None and f.posted_at:
                 pa = f.posted_at if f.posted_at.tzinfo else f.posted_at.replace(tzinfo=timezone.utc)
                 hour_vals[pa.astimezone(IST).hour].append(vpd)
@@ -313,7 +360,9 @@ class ChannelLearningEngine(BaseCollector):
                 exp = ", ".join(f"{h:02d}:00" for h, _ in small_ranked)
                 stmt += (f" Late/low-volume hours ({exp}) show higher per-post views but on "
                          f"small samples (n<{RELIABLE_HOUR_SAMPLE}) — treat as experiments, not proven.")
-            stmt += " Note: based on a cumulative-view proxy; will sharpen as T+1h/4h/24h velocity accrues."
+            stmt += (" Note: uses each post's first-24h view velocity where a T+24h "
+                     "snapshot exists, else a cumulative-view proxy; sharpens as more "
+                     "24h snapshots accrue.")
             add("timing", stmt, "avg_views_per_day", top[0][1][0], top[0][1][1], {
                 "reliable_windows": [[h, round(avg, 1), n, round(lift_pct(avg), 1)] for h, (avg, n) in top],
                 "experimental_windows": [[h, round(avg, 1), n] for h, (avg, n) in small_ranked],
@@ -327,7 +376,7 @@ class ChannelLearningEngine(BaseCollector):
         # (6) best merchant (known merchants only)
         merch_vals: dict[str, list[float]] = defaultdict(list)
         for f in facts:
-            vpd = f.views_per_day(now)
+            vpd = f.view_rate(now)
             if f.merchant_key and vpd is not None:
                 merch_vals[f.merchant_key].append(vpd)
         merch_avgs = {m: (_mean(v), len(v)) for m, v in merch_vals.items() if len(v) >= MIN_GROUP_SAMPLE}
