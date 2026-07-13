@@ -768,6 +768,42 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
     return {"ai_ok": ai_ok, "plan": plan, "digest": digest, "fc_status": fc_status, "row": row}
 
 
+def ensure_daily_ai_plan(s, day):
+    """Generate + persist today's AI daily plan if not already cached, and return the
+    row (or None if AI/data unavailable). This is what makes the plan EXIST for the
+    just-in-time filler to execute — the plan is the source of truth for scheduling,
+    not a dashboard-only artifact. Reuses daily_brief's own input-builders so the
+    cron and the dashboard can never produce a differently-shaped plan."""
+    from datetime import timedelta
+    from src.ai import context as ctx
+    from src.services.planning.calendar import upcoming_events
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+
+    cached = s.scalars(
+        select(CampaignPlan)
+        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+               CampaignPlan.plan_type == PlanType.DAILY,
+               CampaignPlan.target_date == day,
+               CampaignPlan.is_ai_generated == True)  # noqa: E712
+        .order_by(CampaignPlan.generated_at.desc())
+    ).first()
+    if cached is not None:
+        return cached
+
+    recommended = ctx.posting_trajectory(s, days=14, end_day=day - timedelta(days=1))["recent_cadence"]
+    windows, allocation, merchants, _ = _today_details(s, recommended)
+    evt = None
+    try:
+        evs = upcoming_events(s, day, within_days=14)
+        if evs:
+            e = evs[0]
+            evt = {"name": e.name, "days_away": (e.next_date - day).days,
+                   "date_confidence": e.date_confidence}
+    except Exception:
+        evt = None
+    return _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt).get("row")
+
+
 def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
     """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
     recommendation grounded in the recent posting trajectory (not the stale lifetime

@@ -217,13 +217,34 @@ def j_ai_daily_summary() -> dict:
 
 
 def j_weekly_report() -> dict:
+    from datetime import timedelta
     from src.services.planning.campaign import CampaignPlanningEngine
-    _run_engine(CampaignPlanningEngine(), "plan")     # ensure weekly plan is fresh
+    from src.db.session import session_scope
+    _run_engine(CampaignPlanningEngine(), "plan")     # ensure deterministic weekly plan is fresh
+
+    # Structured AI weekly plan: analyses last week's merchant traction + post-type
+    # performance and directs this week's loot:deal ratio + per-day themes. Stored as
+    # the most-recent WEEKLY row so the daily planner's this_week_theme lookup picks it.
+    ai_note = "AI weekly plan skipped"
+    try:
+        from src.ai.planner import generate_week_plan
+        from src.services.generation.ai_execution import persist_weekly_plan
+        from src.services.analytics.periods import ist_today
+        with session_scope() as s:
+            ws = ist_today() - timedelta(days=ist_today().weekday())
+            res = generate_week_plan(s, ws)
+            if res.get("available"):
+                persist_weekly_plan(s, ws, ws + timedelta(days=6), res["plan"],
+                                    digest=res.get("digest", ""), is_ai_generated=True)
+                ai_note = f"AI weekly plan: {len(res['plan'].get('daily_themes') or [])} day themes"
+    except Exception as e:
+        ai_note = f"AI weekly plan skipped ({e})"
+
     try:
         _briefing(True)
-        return {"processed": 1, "detail": "weekly plan + AI summary refreshed"}
     except Exception:
-        return {"processed": 1, "detail": "weekly plan refreshed (AI summary skipped)"}
+        pass
+    return {"processed": 1, "detail": f"weekly plan refreshed — {ai_note}"}
 
 
 def j_weekly_retro() -> dict:
@@ -366,15 +387,31 @@ def j_org_health() -> dict:
 
 
 def j_daily_plan() -> dict:
-    from src.services.generation.daily_planner import build_and_schedule_day
+    """Generate today's AI daily plan (per-post slots: window/type/theme/merchant).
+    The slots are filled with fresh inventory just-in-time by `jit_fill` — this job
+    only produces the plan, it no longer pre-renders drafts (which went stale)."""
+    from src.controllers.service import ensure_daily_ai_plan
+    from src.services.analytics.periods import ist_today
     from src.db.session import session_scope
     with session_scope() as s:
-        r = build_and_schedule_day(s)
+        row = ensure_daily_ai_plan(s, ist_today())
+        n = len((row.blueprint or {}).get("post_slots") or []) if row else 0
+    if row is None:
+        return {"processed": 0, "status": "limited",
+                "detail": "no AI daily plan (AI unavailable or no owned data yet)"}
+    return {"processed": n, "detail": f"AI daily plan ready: {n} slots (filled just-in-time)"}
+
+
+def j_jit_fill() -> dict:
+    """Fill AI-plan slots due within the lookahead with fresh, just-scraped deals."""
+    from src.services.generation.jit_fill import fill_due_slots
+    from src.db.session import session_scope
+    with session_scope() as s:
+        r = fill_due_slots(s)
     if not r.get("ok"):
         return {"processed": 0, "status": "limited", "detail": f"limited: {r.get('reason')}"}
-    return {"processed": len(r["scheduled"]),
-            "detail": f"{len(r['scheduled'])} category posts queued across "
-                      f"{len(r['categories'])} categories at proven hours (deduped)"}
+    return {"processed": r.get("filled", 0),
+            "detail": f"filled {r.get('filled', 0)}/{r.get('due', 0)} due slots fresh"}
 
 
 def j_daily_report() -> dict:
@@ -455,6 +492,7 @@ JOBS: list[Job] = [
     Job("db_cleanup", "Database Cleanup", *_daily(C.DB_CLEANUP_TIME), "low", j_db_cleanup),
     Job("daily_report", "Daily Channel Report", *_daily(C.DAILY_REPORT_TIME), "high", j_daily_report),
     Job("daily_plan", "Daily Post Planner", *_daily(C.DAILY_PLAN_TIME), "high", j_daily_plan),
+    Job("jit_fill", "Just-in-Time Slot Fill", *_every_min(C.QUEUE_PROCESSOR_MIN), "high", j_jit_fill),
 ]
 
 

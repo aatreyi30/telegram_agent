@@ -2,7 +2,7 @@
 
 Two complementary paths (see upgrade.md Phase 2 design note), both permanent:
   * ``PostPrediction`` -- best-effort per post. Written when a draft is queued
-    (``daily_planner.build_and_schedule_day``) and re-written/linked at
+    (``jit_fill.fill_due_slots``) and re-written/linked at
     publish time (``publishing.Publisher.publish``). ``post_id`` starts NULL
     (the post doesn't exist yet) and is backfilled once the real send lands.
   * ``PostOutcome`` -- computed for EVERY owned post (``outcomes.py``),

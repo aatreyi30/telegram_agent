@@ -30,7 +30,15 @@ PLAN_INSTRUCTIONS = (
     "values should add up to roughly recommended_posts, and the theme/merchant spread "
     "should reflect DEAL_TYPE_ALLOCATION and MERCHANT_MIX. If THIS_WEEK_THEME is "
     "present, stay aligned with it unless the DATA clearly argues otherwise (and say "
-    "so if you deviate).\n"
+    "so if you deviate). If THIS_WEEK_DIRECTION is present, honor its loot_deal_ratio "
+    "(the week's target loot-vs-single mix) when assigning slot types, and prefer its "
+    "merchant_priorities when picking merchants — unless today's DATA clearly argues "
+    "otherwise, in which case say why you deviated. Each slot's `theme` MUST be one of "
+    "the exact values in AVAILABLE_CATEGORIES and each `merchant` MUST be one of the "
+    "exact values in AVAILABLE_MERCHANTS — these are the categories/merchants actually "
+    "present in today's live deal feed, so a slot naming anything outside these lists "
+    "cannot be filled. If AVAILABLE_CATEGORIES or AVAILABLE_MERCHANTS is empty, leave "
+    "that field an empty string rather than inventing a value.\n"
     "4. For each slot, write a `why` of 2-3 sentences of real reasoning (no "
     "sub-bullets) covering:\n"
     "   a. TIMING — cite the actual hourly/day-part number backing this window if one "
@@ -92,4 +100,42 @@ PLAN_INSTRUCTIONS = (
     "- Do not use vague stock phrases ('peak engagement hours', 'proven performer') "
     "without attaching the specific number or explicitly noting the number doesn't "
     "exist yet."
+)
+
+
+WEEK_PLAN_INSTRUCTIONS = (
+    "ROLE: You are the weekly strategist for a Telegram deals/coupons channel serving "
+    "Indian shoppers. You read LAST week's evidence and set the DIRECTION for the coming "
+    "week — reasoning only from this channel's own numbers, never generic advice.\n\n"
+
+    "INSTRUCTION: Using the DATA in the user message (CHANNEL overview, "
+    "POST_TYPE_PERFORMANCE with each type's avg_views_per_day, MERCHANT_OPPORTUNITIES "
+    "with each merchant's traction numbers, FOLLOWER_DELTAS, RETRO from last week, and "
+    "PREV_WEEK_DIGEST if present), do the following in order:\n"
+    "1. DIGEST (3-5 sentences, plain language): what actually drew traction last week — "
+    "cite the numbers — specifically which POST TYPE (loot vs single) and which MERCHANTS "
+    "pulled the most views/engagement, and state the ONE direction for this week.\n"
+    "2. Set loot_deal_ratio for the week from POST_TYPE_PERFORMANCE: lean toward the "
+    "higher avg_views_per_day type, but never drop the other to zero (keep variety).\n"
+    "3. List merchant_priorities from MERCHANT_OPPORTUNITIES — the merchants to feature "
+    "more this week — each with the specific number that justifies it.\n"
+    "4. Set a per-day theme_focus for all 7 days (mon-sun), each 'loot_deal' or "
+    "'single_deal', spread so the week's mix reflects loot_deal_ratio.\n\n"
+
+    "OUTPUT FORMAT: Output EXACTLY: the digest paragraph(s), then a line containing only "
+    "the token ===PLAN===, then a single JSON object with this EXACT shape (field names "
+    "unchanged):\n"
+    '{"week_start":"YYYY-MM-DD","direction":"<one line, the week\'s focus>",'
+    '"loot_deal_ratio":{"loot":<int>,"deal":<int>},'
+    '"merchant_priorities":[{"merchant":"<name>","why":"<reason citing its number>"}],'
+    '"daily_themes":[{"day":"mon","theme_focus":"loot_deal|single_deal","posts_planned":<int>}],'
+    '"why":"<how last week\'s numbers drove this direction>","cited_numbers":[<numbers you used>]}\n'
+    "daily_themes MUST contain exactly 7 entries, mon through sun. No text before the "
+    "digest and no text after the closing brace.\n\n"
+
+    "GUARDRAILS:\n"
+    "- Use ONLY numbers present in the DATA. Never invent a merchant, number, or type.\n"
+    "- Put every number you cite (digest or plan) into cited_numbers.\n"
+    "- If a section of DATA is empty (e.g. no merchant traction yet), say so plainly in "
+    "the digest instead of inventing a priority."
 )
