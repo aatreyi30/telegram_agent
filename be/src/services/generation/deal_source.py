@@ -141,7 +141,24 @@ class DealSourceClient:
                 logger.info("[deal_source] fetched %d items via direct API", len(items))
                 return items
             logger.warning("[deal_source] direct API returned no items; trying browser")
-        except Exception as e:  # 403 / network / schema
+        except httpx.HTTPStatusError as e:
+            # Log the ACTUAL failure, not just str(e): status, whether Cloudflare's
+            # edge WAF blocked us (common — the request never reaches the app, so the
+            # API key is irrelevant), and a short body snippet. Then fall back.
+            resp = e.response
+            body = " ".join((resp.text or "")[:300].split())
+            is_cf = "cloudflare" in resp.headers.get("server", "").lower()
+            blocked = is_cf and ("Attention Required" in resp.text
+                                 or "you have been blocked" in resp.text)
+            logger.warning(
+                "[deal_source] direct API HTTP %s at %s%s (cf-ray=%s); body[:300]=%r; "
+                "falling back to Camoufox browser",
+                resp.status_code, e.request.url,
+                " - Cloudflare bot-block (edge WAF, request never reached the app; "
+                "API key is not the issue)" if blocked else "",
+                resp.headers.get("cf-ray", "-"), body,
+            )
+        except Exception as e:  # network / schema / other
             logger.warning("[deal_source] direct API failed (%s); using Camoufox browser", e)
         from src.services.collection.deal_scraper import CamoufoxDealSource
         return CamoufoxDealSource().fetch_raw(want=want, page_size=page_size)
