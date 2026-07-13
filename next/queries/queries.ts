@@ -5,7 +5,7 @@ import { api } from "@/services/api";
 import { queryKeys } from "./keys";
 import type {
   AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorDashboardTrendsResponse,
-  CompetitorsResponse, CompetitorTrendsResponse,
+  CompetitorsResponse,
   DailyBrief, DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
   OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
   QueueResponse, RetroLatest, ScoredDealsResponse, SchedulerRunsResponse, UsersResponse, WeeklyBrief, WeeklyResponse,
@@ -66,13 +66,6 @@ export function useCompetitorDashboard(window?: number | null) {
   return useQuery({
     queryKey: queryKeys.competitorDashboard(window),
     queryFn: () => api.get<CompetitorDashboardResponse>(`/competitor-dashboard${window ? `?window=${window}` : ""}`),
-  });
-}
-export function useCompetitorTrends(competitorId: number, days: number = 30) {
-  return useQuery({
-    queryKey: queryKeys.competitorTrends(competitorId, days),
-    queryFn: () => api.get<CompetitorTrendsResponse>(`/competitors/${competitorId}/trends?days=${days}`),
-    enabled: !!competitorId,
   });
 }
 export function useCompetitorDashboardTrends(days: number = 30) {
