@@ -4,7 +4,6 @@ import { ReactNode, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  CreditCardIcon,
   Loading03Icon,
   Logout04Icon,
   MoreHorizontalIcon,
@@ -116,9 +115,6 @@ function AppSidebar() {
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent side="top" align="start" className="w-56">
-                <DropdownMenuItem onClick={() => router.push("/billing")}>
-                  <HugeiconsIcon icon={CreditCardIcon} size={16} /> Billing
-                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/settings")}>
                   <HugeiconsIcon icon={Settings02Icon} size={16} /> Settings
                 </DropdownMenuItem>
