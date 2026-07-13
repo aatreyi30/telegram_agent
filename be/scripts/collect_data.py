@@ -583,6 +583,12 @@ def _get_export_engine(url: str) -> Engine:
             parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url, echo=False, future=True, connect_args=connect_args)
     Base.metadata.create_all(engine, tables=EXPORT_TABLES)
+    # create_all() never ALTERs a table that already existed in this destination
+    # file from an earlier run (e.g. a re-used dated export .db) — run the same
+    # additive-column patcher used for the main app DB so stale export files
+    # pick up model columns added since they were first created.
+    from src.db.migrate import add_missing_columns
+    add_missing_columns(engine)
     return engine
 
 
