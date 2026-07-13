@@ -36,8 +36,9 @@ class BriefingGenerator:
                     "state in the narrative why it can't be honored given the data):\n"
                     + directive
                 )
-            user = f"{instructions}\n\nDATA:\n{to_json(ctx)}{directive_note}"
-            return self.ai.complete(user, max_tokens=1500, effort="medium")
+            user = f"DATA:\n{to_json(ctx)}{directive_note}"
+            return self.ai.complete(user, system_extra=instructions,
+                                    max_tokens=1500, effort="medium")
         except AIUnavailable:
             pass
         return self._fallback(ctx, weekly)
