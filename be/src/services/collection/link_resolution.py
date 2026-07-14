@@ -26,6 +26,13 @@ Design notes (async rewrite):
     recorded explicitly (resolution_status="failed" + resolution_error) so
     they're distinguishable from "never attempted" and can be retried up to a
     cap, instead of silently looking identical to a NULL resolved_url.
+  * Two failure modes get an extra safety net before being recorded as failed
+    (see `_fetch`): a remote server with a broken cert chain (missing
+    intermediate CA — fails identically on every attempt) gets ONE retry,
+    unverified; a connection reset/timeout (often a transient blip) gets up
+    to `_MAX_TRANSIENT_RETRIES` retries with backoff. A host that is
+    genuinely blocking us will still fail after these — this narrows false
+    "Unknown merchant" results without ever fabricating a resolution.
 
 Politeness: still a single AsyncClient with a bounded connection pool and a
 concurrency semaphore, so we don't hammer any one host arbitrarily — bounded
@@ -40,7 +47,7 @@ import ssl
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import tldextract
@@ -63,6 +70,38 @@ _RESOLUTION_EXCEPTIONS = (httpx.HTTPError, ssl.SSLError)
 # Cap on resolution_attempts before a candidate is left alone (still NULL
 # merchant/resolved_url, but no longer re-queued every run).
 _MAX_ATTEMPTS = 5
+
+# httpx/httpcore does NOT preserve ssl.SSLError as a catchable type or even as
+# `exc.__cause__` — a broken remote cert chain surfaces as a generic
+# httpx.ConnectError whose *message* happens to contain the underlying SSL
+# reason. So detection has to be by message content, not isinstance().
+_CERT_CHAIN_ERROR_MARKERS = (
+    "CERTIFICATE_VERIFY_FAILED",
+    "certificate verify failed",
+    "unable to get local issuer certificate",
+)
+
+# Bounded retry for connection-level failures (timeouts, connection resets)
+# that are frequently transient network blips rather than a permanent block.
+_MAX_TRANSIENT_RETRIES = 2
+_TRANSIENT_RETRY_BACKOFF = (1.0, 2.0)  # seconds, one per retry attempt
+
+
+def _is_cert_chain_error(exc: Exception) -> bool:
+    """True if `exc` is a TLS failure caused by the REMOTE server sending an
+    incomplete certificate chain (missing intermediate CA) rather than a
+    genuinely untrustworthy/misissued cert. Safe to retry unverified for —
+    we only ever read the redirect target of a public marketing shortlink
+    here, never send credentials or act on response content beyond a URL."""
+    text = str(exc)
+    return any(marker in text for marker in _CERT_CHAIN_ERROR_MARKERS)
+
+
+class _DeadDomainError(httpx.TransportError):
+    """Raised without any network call when this run already proved the
+    URL's host is unreachable (TCP/connection-level, not a cert issue) —
+    avoids repeating a doomed multi-attempt-with-backoff fetch for every
+    other URL on the same dead host within one run."""
 
 # The platform's own domain plus self-promo/utility domains (WhatsApp,
 # Telegram itself). A link that resolves to one of these is never a
@@ -245,16 +284,36 @@ class LinkResolutionEngine(BaseCollector):
         concurrency = self.concurrency if self.concurrency is not None else settings.link_resolve_concurrency
         timeout = self.timeout if self.timeout is not None else 30.0
         sem = asyncio.Semaphore(concurrency)
+        headers = {
+            "User-Agent": self.ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
         async with httpx.AsyncClient(
             http2=True,
             limits=httpx.Limits(max_connections=250, max_keepalive_connections=50),
             timeout=timeout,
-            headers={"User-Agent": self.ua},
-        ) as client:
+            headers=headers,
+        ) as client, httpx.AsyncClient(
+            # Fallback client used ONLY as a last resort when a remote server's
+            # cert chain is broken (see _is_cert_chain_error) — never used for
+            # a first attempt.
+            http2=True,
+            verify=False,
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
+            timeout=timeout,
+            headers=headers,
+        ) as insecure_client:
+            # per-run circuit breaker: a host proven unreachable at the
+            # connection level (not a cert issue) is skipped for every other
+            # URL on that host for the rest of this run — see `_fetch`.
+            dead_domains: set[str] = set()
 
             async def _bounded(url: str) -> _ResolveOutcome:
                 async with sem:
-                    return await self._resolve_one(client, cache, url, domain_by_url.get(url))
+                    return await self._resolve_one(
+                        client, insecure_client, cache, url, domain_by_url.get(url), dead_domains
+                    )
 
             outcomes = await asyncio.gather(*[_bounded(u) for u in by_url])
 
@@ -313,12 +372,75 @@ class LinkResolutionEngine(BaseCollector):
         return result
 
     # ------------------------------------------------------------------ #
+    async def _fetch(
+        self,
+        client: httpx.AsyncClient,
+        insecure_client: httpx.AsyncClient,
+        url: str,
+        dead_domains: set[str],
+    ) -> httpx.Response:
+        """GET `url` with two layered safety nets over the plain request:
+
+        1. Cert-chain fallback (one extra attempt): if the failure is a
+           broken remote cert chain (see `_is_cert_chain_error`), retry once,
+           unverified, ONLY for that one request. Deterministic servers with
+           this misconfiguration fail identically every time on a normal
+           request, so without this they would NEVER resolve.
+        2. Transient-failure retry (bounded, with backoff): connection resets
+           and timeouts are frequently momentary network blips, not a
+           permanent block — retried up to `_MAX_TRANSIENT_RETRIES` times
+           before being recorded as a genuine failure. A host that is
+           actually blocking us will still fail after these retries; this
+           does not (and cannot) fabricate a resolution for a real block.
+
+        A host proven unreachable at the connection level (not a cert issue)
+        is added to `dead_domains` for the rest of THIS run — every other
+        URL on that host then fails immediately with no network call, instead
+        of separately burning the full retry-with-backoff budget (which,
+        for a truly dead host, is pure wasted time held against the
+        concurrency semaphore).
+        """
+        host = urlsplit(url).hostname
+        if host and host in dead_domains:
+            raise _DeadDomainError(f"{host} already unreachable earlier this run")
+
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
+            try:
+                return await client.get(url, follow_redirects=True)
+            except _RESOLUTION_EXCEPTIONS as exc:
+                if _is_cert_chain_error(exc):
+                    try:
+                        response = await insecure_client.get(url, follow_redirects=True)
+                        logger.warning(
+                            "[link_resolution] %s has a broken cert chain "
+                            "(missing intermediate CA) — resolved via unverified fallback",
+                            url,
+                        )
+                        return response
+                    except _RESOLUTION_EXCEPTIONS as inner_exc:
+                        if host:
+                            dead_domains.add(host)
+                        raise inner_exc from exc
+                last_exc = exc
+                if attempt < _MAX_TRANSIENT_RETRIES:
+                    await asyncio.sleep(_TRANSIENT_RETRY_BACKOFF[attempt])
+                    continue
+                if host:
+                    dead_domains.add(host)
+                raise
+        if host:
+            dead_domains.add(host)
+        raise last_exc  # pragma: no cover - loop always returns or raises
+
     async def _resolve_one(
         self,
         client: httpx.AsyncClient,
+        insecure_client: httpx.AsyncClient,
         cache: dict[str, tuple[str | None, str | None]],
         url: str,
         raw_domain: str | None,
+        dead_domains: set[str],
     ) -> _ResolveOutcome:
         """Resolve a single (deduped) URL: cache hit -> direct-domain match ->
         network fetch + redirect-chain scan -> domain-capture fallback."""
@@ -342,7 +464,7 @@ class LinkResolutionEngine(BaseCollector):
                 return _ResolveOutcome(url, url, direct, "resolved")
 
         try:
-            response = await client.get(url, follow_redirects=True)
+            response = await self._fetch(client, insecure_client, url, dead_domains)
         except _RESOLUTION_EXCEPTIONS as exc:
             logger.warning("[link_resolution] failed to resolve %s: %s", url, exc)
             return _ResolveOutcome(url, None, None, "failed", error=str(exc)[:500])
@@ -377,7 +499,7 @@ class LinkResolutionEngine(BaseCollector):
                 break
             try:
                 await asyncio.sleep(min(max(delay, 0.0), 2.0))
-                response = await client.get(next_url, follow_redirects=True)
+                response = await self._fetch(client, insecure_client, next_url, dead_domains)
             except _RESOLUTION_EXCEPTIONS as exc:
                 logger.warning(
                     "[link_resolution] extra-hop failed for %s -> %s: %s",
