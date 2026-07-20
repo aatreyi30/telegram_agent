@@ -42,14 +42,21 @@ def _aware(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+# A bot-blocked link is NOT a dead link. Ajio/Amazon/Myntra answer 403 (and some 405 to
+# HEAD, or 429 when rate-limiting) to any datacentre IP while serving the page perfectly
+# to a real shopper. Treating those as dead blocks every post for those merchants —
+# which is most of them. Same list, same reason, as `j_url_health` in schedulers.py.
+_BLOCKED_NOT_BROKEN = (403, 405, 429)
+
+
 def _http_ok(url: str) -> tuple[bool, str | None]:
     """Liveness check only — no price/stock signal available here."""
     try:
         with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS, follow_redirects=True) as c:
             r = c.head(url)
-            if r.status_code >= 400 and r.status_code not in (403, 405, 429):
+            if r.status_code >= 400 and r.status_code not in _BLOCKED_NOT_BROKEN:
                 r = c.get(url)  # some merchants reject HEAD but serve GET
-            if r.status_code >= 400:
+            if r.status_code >= 400 and r.status_code not in _BLOCKED_NOT_BROKEN:
                 return False, f"dead link ({r.status_code})"
             return True, None
     except Exception as e:  # noqa: BLE001 - network is inherently unreliable

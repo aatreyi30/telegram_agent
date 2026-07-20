@@ -31,6 +31,7 @@ from src.db.models_growth import GROWTH_VERSION, GrowthStrategy
 from src.db.models_learning import LEARNING_VERSION, PostTypePerformance
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.session import session_scope
+from src.services.analytics.periods import WEEKDAYS
 from src.services.events import Event, EventType, get_event_bus
 from src.services.intelligence.growth import plain_label
 from src.services.metrics.merchant_metrics import compute_merchant_metrics
@@ -50,7 +51,6 @@ _PERFORMANCE_INDEX_CAP = 3.0
 
 logger = get_logger(__name__)
 
-WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 # posting-ramp multipliers by event type (research: channels 3–5x during GIF/BBD)
 _RAMP = {"merchant_sale": 3.0, "festival": 2.5, "shopping": 2.0}
 

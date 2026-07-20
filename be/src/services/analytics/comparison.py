@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.services.analytics.periods import to_ist
+from src.services.analytics.periods import WEEKDAYS, to_ist
 from src.db.models import Competitor, CompetitorPost, Post
 from src.db.models_normalization import NormalizedPost, SourceType
 from src.db.models_learning import ChannelStyleProfile, PostTypePerformance, LEARNING_VERSION
@@ -28,7 +28,6 @@ _UNAVAILABLE_NOTE = (
     "Reach and engagement-rate need channel admin rights; competitor data is the "
     "public t.me/s view count only. Shown as unavailable, never estimated."
 )
-WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 STYLE_METRICS = [
     "avg_text_len", "emoji_rate", "cta_rate", "coupon_rate", "multi_deal_rate",

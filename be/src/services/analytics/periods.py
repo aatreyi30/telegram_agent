@@ -18,6 +18,11 @@ from src.db.models_normalization import NormalizedPost, SourceType
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Weekday labels indexed by ``datetime.date.weekday()`` (Monday == 0). Single
+# source of truth so weekday-distribution charts, competitor stats and the
+# campaign planner's daily themes all label days identically.
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
 
 def to_ist(dt: datetime) -> datetime:
     """Safely convert any datetime — naive (assumed UTC, this project's storage

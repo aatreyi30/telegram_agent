@@ -16,12 +16,10 @@ from collections import defaultdict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.services.analytics.periods import to_ist
+from src.services.analytics.periods import WEEKDAYS, to_ist
 from src.services.analytics.growth import get_growth
 from src.db.models import Post
 from src.db.models_normalization import NormalizedPost, SourceType
-
-_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def _owned_rows(s: Session, start=None, end=None):
@@ -89,7 +87,7 @@ def compute(s: Session, start=None, end=None) -> dict:
 
         by_day[day_key].append(tup)
         by_hour[ist.hour].append(tup)
-        by_weekday[_WEEKDAYS[ist.weekday()]].append(tup)
+        by_weekday[WEEKDAYS[ist.weekday()]].append(tup)
         t = "loot_deal" if r[I_MULTI] else "single_deal"
         by_type[t].append(tup)
         mk = r[2]  # merchant_key
@@ -131,7 +129,7 @@ def compute(s: Session, start=None, end=None) -> dict:
     hour_series = [{"label": f"{h:02d}:00", **_reduce(by_hour.get(h, []))} for h in range(24)]
 
     # ------- by weekday -------
-    weekday_series = [{"label": wd, **_reduce(by_weekday.get(wd, []))} for wd in _WEEKDAYS]
+    weekday_series = [{"label": wd, **_reduce(by_weekday.get(wd, []))} for wd in WEEKDAYS]
 
     # ------- by type -------
     type_series = sorted(

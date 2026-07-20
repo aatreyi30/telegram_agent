@@ -18,7 +18,6 @@ from __future__ import annotations
 import time as _time
 from datetime import datetime, timedelta, timezone
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import or_, select
 
 from src.db.models_automation import ScheduledPost, ScheduleStatus
@@ -48,7 +47,6 @@ class PostingScheduler:
         self.poll_interval_seconds = poll_interval_seconds
         self.send_pacing_seconds = send_pacing_seconds
         self.bus = get_event_bus()
-        self.scheduler = BackgroundScheduler(job_defaults={"coalesce": True, "max_instances": 1})
 
     # ------------------------------------------------------------------ #
     def _due_ids(self, now: datetime) -> list[int]:
@@ -150,14 +148,3 @@ class PostingScheduler:
         logger.info("[automation] processed %(due)d due: %(published)d published, "
                     "%(blocked)d blocked, %(retried)d retry, %(failed)d failed", stats)
         return stats
-
-    # ------------------------------------------------------------------ #
-    def start(self) -> None:
-        self.scheduler.add_job(self.process_due, "interval",
-                               seconds=self.poll_interval_seconds, id="posting_queue")
-        self.scheduler.start()
-        logger.info("posting scheduler started (poll every %ds)", self.poll_interval_seconds)
-
-    def shutdown(self) -> None:
-        self.scheduler.shutdown(wait=False)
-        logger.info("posting scheduler stopped")
