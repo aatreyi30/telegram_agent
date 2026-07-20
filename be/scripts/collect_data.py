@@ -168,6 +168,18 @@ def _parse_args() -> argparse.Namespace:
                     help="Posts per commit chunk during --backtest (default 200) — keeps the "
                          "backtest from building one giant transaction or loading the whole posts "
                          "table into memory.")
+    p.add_argument("--dev-chat", default=os.environ.get("DEV_CHAT"),
+                    help="DEV ONLY: after jit_fill drafts a day's slots, immediately send each "
+                         "draft's rendered text to this chat (a personal test chat/group your "
+                         "logged-in Telegram session can already see, e.g. from `tgagent dev-chats`). "
+                         "Bypasses the production Publisher entirely -- never point this at the "
+                         "real owned channel. Off by default; ignored if --skip-generate is set.")
+    p.add_argument("--dev-chat-pace-seconds", type=float, default=1.5,
+                    help="Delay between dev-chat sends (default 1.5s, be polite to Telegram's rate limits).")
+    p.add_argument("--per-type-cap", type=int, default=None,
+                    help="TEST: fill at most this many LOOT and this many DEAL posts per day "
+                         "regardless of how many the AI plan produced (e.g. --per-type-cap 5 -> "
+                         "up to 5 loots + 5 deals). Off by default (fills every slot).")
     p.add_argument("--export-only", action="store_true",
                     help="Skip ALL collection/discovery/normalization/intel stages, just export "
                          "whatever is already in the database (daily-report backfill + --backtest, "
@@ -253,7 +265,6 @@ from src.db.models_classification import PostClassification, PostTypeCluster
 from src.db.models_intelligence import MerchantMetricWindow, MerchantOpportunity, MerchantProfile
 from src.db.models_competitor_intel import CompetitorBenchmark, CompetitorProfile
 from src.db.models_prediction import PostOutcome, PostPrediction, WeeklyRetro
-from src.db.models_deal_score import DealScore
 from src.db.models_ai_output import AIOutput
 from src.db.models_report import DailyChannelReport
 from src.db.models_campaign import CampaignPlan
@@ -286,6 +297,7 @@ class RunSummary:
     daily_report_job: dict | None = None
     ai_plan_jobs: list = field(default_factory=list)
     generate_jobs: list = field(default_factory=list)
+    dev_publish_jobs: list = field(default_factory=list)
     backtest_job: dict | None = None
     errors: list = field(default_factory=list)
 
@@ -535,18 +547,24 @@ def run_ai_plan(summary: RunSummary, plan_day: date) -> None:
         summary.errors.append(f"ai_plan[{plan_day.isoformat()}]: {exc}")
 
 
-def run_generate(summary: RunSummary, plan_day: date) -> None:
+def run_generate(summary: RunSummary, plan_day: date, dev_chat: str | None = None,
+                 dev_chat_pace_seconds: float = 1.5, cap_per_type: int | None = None) -> None:
     """Phase 11: fill EVERY slot of ``plan_day``'s AI plan with a fresh scraped deal
     + AI-written copy (jit_fill, all_slots=True). Writes generated_posts and enqueues
-    scheduled_posts at each slot's fire time. Never publishes — the Publisher/queue
-    processor is not run here, and the send is gated regardless."""
+    scheduled_posts at each slot's fire time. Never publishes to the real owned
+    channel — the Publisher/queue processor is not run here, and that send is gated
+    regardless.
+
+    If ``dev_chat`` is set (DEV ONLY), every draft filled THIS run is immediately sent
+    to that chat via ``dev_send.publish_drafts`` — a separate, unguarded path that
+    bypasses the production Publisher. Intended for a personal test chat/group only."""
     from src.services.generation.jit_fill import fill_due_slots
 
-    log.info("Filling AI-plan slots for %s (fresh deals + AI copy; no publishing)...",
-              plan_day.isoformat())
+    log.info("Filling AI-plan slots for %s (fresh deals + AI copy%s)...",
+              plan_day.isoformat(), "" if not dev_chat else f"; dev-sending to {dev_chat!r}")
     try:
         with session_scope() as s:
-            r = fill_due_slots(s, day=plan_day, all_slots=True)
+            r = fill_due_slots(s, day=plan_day, all_slots=True, cap_per_type=cap_per_type)
         if not r.get("ok"):
             log.warning("  generate[%s] -> limited: %s", plan_day.isoformat(), r.get("reason"))
             summary.generate_jobs.append(
@@ -559,6 +577,30 @@ def run_generate(summary: RunSummary, plan_day: date) -> None:
     except Exception as exc:  # noqa: BLE001
         log.error("  generate[%s] FAILED: %s", plan_day.isoformat(), exc)
         summary.errors.append(f"generate[{plan_day.isoformat()}]: {exc}")
+        return
+
+    if not dev_chat:
+        return
+    draft_ids = [d["draft_id"] for d in r.get("scheduled", [])]
+    if not draft_ids:
+        log.info("  dev-publish[%s] -> nothing to send (0 drafts filled)", plan_day.isoformat())
+        return
+    log.info("  dev-publish[%s] -> sending %d draft(s) to %s...",
+             plan_day.isoformat(), len(draft_ids), dev_chat)
+    try:
+        from src.services.generation.dev_send import publish_drafts
+
+        results = publish_drafts(draft_ids, dev_chat, pace_seconds=dev_chat_pace_seconds)
+        ok = sum(1 for x in results if x["ok"])
+        for x in results:
+            if not x["ok"]:
+                log.warning("    draft #%s dev-send FAILED: %s", x["draft_id"], x["note"])
+        log.info("  dev-publish[%s] -> sent %d/%d", plan_day.isoformat(), ok, len(results))
+        summary.dev_publish_jobs.append(
+            {"day": plan_day.isoformat(), "sent": ok, "attempted": len(results), "chat": dev_chat})
+    except Exception as exc:  # noqa: BLE001
+        log.error("  dev-publish[%s] FAILED: %s", plan_day.isoformat(), exc)
+        summary.errors.append(f"dev_publish[{plan_day.isoformat()}]: {exc}")
 
 
 def run_daily_reports_for_window(summary: RunSummary, start: datetime, end: datetime) -> None:
@@ -640,8 +682,6 @@ EXPORT_TABLES = [
     CompetitorProfile.__table__, CompetitorBenchmark.__table__,
     # upgrade.md Phase 2: predict -> outcome -> retro loop
     PostPrediction.__table__, PostOutcome.__table__, WeeklyRetro.__table__,
-    # upgrade.md Phase 3: deal scoring history
-    DealScore.__table__,
     # upgrade.md Phase 0.2: persisted AI outputs
     AIOutput.__table__,
     # daily aggregate report rows
@@ -843,7 +883,6 @@ def export_window(export_db_url: str, start: datetime, end: datetime) -> dict:
         competitor_profiles = list(s.scalars(select(CompetitorProfile)))
         competitor_benchmarks = list(s.scalars(select(CompetitorBenchmark)))
         weekly_retros = list(s.scalars(select(WeeklyRetro)))
-        deal_scores = list(s.scalars(select(DealScore)))
         ai_outputs = list(s.scalars(select(AIOutput)))
         daily_channel_reports = list(s.scalars(select(DailyChannelReport)))
         campaign_plans = list(s.scalars(select(CampaignPlan)))
@@ -899,8 +938,6 @@ def export_window(export_db_url: str, start: datetime, end: datetime) -> dict:
             dest_engine, PostMetricSnapshot.__table__, [_row_to_dict(o) for o in post_metric_snapshots])
         counts["weekly_retros"] = _upsert(
             dest_engine, WeeklyRetro.__table__, [_row_to_dict(o) for o in weekly_retros])
-        counts["deal_scores"] = _upsert(
-            dest_engine, DealScore.__table__, [_row_to_dict(o) for o in deal_scores])
         counts["ai_outputs"] = _upsert(
             dest_engine, AIOutput.__table__, [_row_to_dict(o) for o in ai_outputs])
         counts["daily_channel_reports"] = _upsert(
@@ -1022,7 +1059,9 @@ def main() -> int:
 
     if not ARGS.skip_generate:
         for d in plan_days:
-            run_generate(summary, d)
+            run_generate(summary, d, dev_chat=ARGS.dev_chat,
+                        dev_chat_pace_seconds=ARGS.dev_chat_pace_seconds,
+                        cap_per_type=ARGS.per_type_cap)
     else:
         log.info("Skipping slot generation (--skip-generate).")
 
@@ -1052,8 +1091,13 @@ def main() -> int:
     log.info("Daily reports           : %s", summary.daily_report_job)
     log.info("AI daily plan           : %d day(s), %d slot(s) total",
               len(summary.ai_plan_jobs), sum(j.get("slots", 0) for j in summary.ai_plan_jobs))
-    log.info("Generate (jit_fill)     : %d day(s), %d draft(s) filled (0 published)",
+    log.info("Generate (jit_fill)     : %d day(s), %d draft(s) filled (0 published to real channel)",
               len(summary.generate_jobs), sum(j.get("filled", 0) for j in summary.generate_jobs))
+    if ARGS.dev_chat:
+        log.info("Dev-chat sends          : %d day(s), %d/%d draft(s) sent to %s",
+                  len(summary.dev_publish_jobs),
+                  sum(j.get("sent", 0) for j in summary.dev_publish_jobs),
+                  sum(j.get("attempted", 0) for j in summary.dev_publish_jobs), ARGS.dev_chat)
     log.info("Backtest                : %s", summary.backtest_job)
     log.info("Exported -> %s : %s", ARGS.export_db_url, counts)
     if summary.errors:

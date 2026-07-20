@@ -1037,14 +1037,14 @@ def plan_status() -> None:
 
 @app.command("brief")
 def brief(weekly: bool = typer.Option(False, help="Weekly summary instead of daily")) -> None:
-    """AI growth briefing — plain-language, grounded in the engine outputs."""
-    from src.ai.briefing import BriefingGenerator
-    from src.ai.client import AIUnavailable
+    """Show the current plan digest — the AI plan's narrative doubles as the operator
+    briefing (win/concern/do-today). Reads the cached plan, does not regenerate."""
+    from src.controllers import service
 
-    try:
-        text = BriefingGenerator().generate(weekly=weekly)
-    except AIUnavailable as e:
-        console.print(f"[yellow]{e}[/yellow]")
+    data = service.weekly_report() if weekly else service.digest()
+    text = (data.get("ai_summary") if weekly else data.get("digest")) or ""
+    if not text:
+        console.print("[yellow]No plan digest yet — run the daily/weekly planner first.[/yellow]")
         raise typer.Exit(code=1)
     console.print(text)
 
@@ -1060,6 +1060,97 @@ def write_post(deal_id: str = typer.Argument(..., help="Enriched deal_id to writ
     except AIUnavailable as e:
         console.print(f"[yellow]{e}[/yellow]")
         raise typer.Exit(code=1)
+
+
+@app.command("dev-chats")
+def dev_chats_cmd(limit: int = typer.Option(30, help="How many recent chats to list")) -> None:
+    """DEV ONLY: list your recent Telegram chats (name, kind, chat_ref) so you can pick
+    the exact --chat value to pass to `dev-send`. Includes personal DMs, groups, and
+    channels your logged-in account can already see."""
+    from src.services.generation.dev_send import list_chats
+
+    try:
+        rows = list_chats(limit)
+    except Exception as e:  # noqa: BLE001 — surface any Telethon/config error directly to the operator
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    table = Table("name", "kind", "chat_ref", "id")
+    for r in rows:
+        table.add_row(r["name"], r["kind"], r["chat_ref"], str(r["id"]))
+    console.print(table)
+
+
+@app.command("dev-send")
+def dev_send_cmd(
+    chat: str = typer.Argument(..., help="Target chat your logged-in account can already see: "
+                                          "@username, invite-linked group, or numeric chat ID"),
+    text: str = typer.Option(None, "--text", help="Raw message text to send"),
+    deal_id: str = typer.Option(None, "--deal-id",
+                                help="AI-write the message from this enriched deal_id instead of --text"),
+) -> None:
+    """DEV ONLY: send a real message to a chat of your choosing via your own logged-in
+    Telegram session. Bypasses the production publish() gate entirely (no admin-rights
+    check, no sign-off) — for manually testing the send mechanic against a personal
+    test chat. Never point this at the production owned channel."""
+    from src.ai.client import AIUnavailable
+    from src.services.generation.dev_send import dev_send
+
+    if not text and not deal_id:
+        console.print("[red]Provide --text or --deal-id[/red]")
+        raise typer.Exit(code=1)
+    if deal_id:
+        from src.ai.copywriter import Copywriter
+        try:
+            text = Copywriter().write_for_deal(deal_id)
+        except AIUnavailable as e:
+            console.print(f"[yellow]{e}[/yellow]")
+            raise typer.Exit(code=1)
+    try:
+        result = dev_send(chat, text)
+    except Exception as e:  # noqa: BLE001 — surface any Telethon/config error directly to the operator
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]{result}[/green]")
+
+
+@app.command("dev-publish-drafts")
+def dev_publish_drafts_cmd(
+    chat: str = typer.Argument(..., help="Target chat, same as `dev-send` (use `--` before a "
+                                          "numeric/negative chat ID, e.g. -- -5291594307)"),
+    day: str = typer.Option(..., "--day", help="AI-plan day to pull existing drafts from, "
+                                               "e.g. 2026-07-13 (must match a plan's target_date)"),
+    include_sent: bool = typer.Option(False, "--include-sent",
+                                      help="Also re-send drafts already dev-sent earlier (off by default)"),
+    pace_seconds: float = typer.Option(1.5, help="Delay between sends"),
+) -> None:
+    """DEV ONLY: push ALREADY-GENERATED jit_fill drafts for --day straight to `chat`,
+    without re-running any fetching/planning/AI-copy step. Use this when drafts
+    already exist in generated_posts (e.g. from an earlier collect_data.py run or
+    manual fill_due_slots call) and you just want them delivered now."""
+    from datetime import date as date_cls
+
+    from src.services.generation.dev_send import drafts_for_day, publish_drafts
+
+    try:
+        day_obj = date_cls.fromisoformat(day)
+    except ValueError:
+        console.print(f"[red]Invalid --day {day!r}, expected YYYY-MM-DD[/red]")
+        raise typer.Exit(code=1)
+    ids = drafts_for_day(day_obj, include_already_sent=include_sent)
+    if not ids:
+        console.print(f"[yellow]No pending drafts found for {day}.[/yellow]")
+        raise typer.Exit(code=0)
+    console.print(f"Sending {len(ids)} draft(s) for {day} to {chat!r}...")
+    try:
+        results = publish_drafts(ids, chat, pace_seconds=pace_seconds)
+    except Exception as e:  # noqa: BLE001 — surface any Telethon/config error directly to the operator
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    ok = sum(1 for r in results if r["ok"])
+    for r in results:
+        if not r["ok"]:
+            console.print(f"[red]  draft #{r['draft_id']} failed: {r['note']}[/red]")
+    console.print(f"[green]Sent {ok}/{len(results)}[/green]")
 
 
 @app.command("coach")
@@ -1118,12 +1209,10 @@ def pipeline(
                       + (f" — {job.error_message}" if job.error_message else ""))
     console.print("[green]Pipeline complete.[/green]")
     if brief_after:
-        from src.ai.briefing import BriefingGenerator
-        from src.ai.client import AIUnavailable
-        try:
-            console.print("\n[bold]AI briefing:[/bold]\n" + BriefingGenerator().generate())
-        except AIUnavailable as e:
-            console.print(f"[dim]AI briefing skipped: {e}[/dim]")
+        from src.controllers.service import digest as _digest
+        d = _digest().get("digest")
+        if d:
+            console.print("\n[bold]Plan digest:[/bold]\n" + d)
 
 
 @app.command("status")
@@ -1347,13 +1436,12 @@ def automate(
             console.print("[dim]Blocked = the account lacks admin post rights, or affiliate "
                           "integration is pending. This is expected on a member account.[/dim]")
         return
-    sched.start()
-    console.print("[green]Automation running.[/green] Press Ctrl-C to stop.")
+    console.print(f"[green]Automation running[/green] (poll {poll}s). Press Ctrl-C to stop.")
     try:
         while True:
-            time.sleep(1)
+            sched.process_due()
+            time.sleep(poll)
     except KeyboardInterrupt:
-        sched.shutdown()
         console.print("stopped.")
 
 

@@ -30,7 +30,8 @@ python-dotenv>=1.0.1
 typer>=0.15.1
 rich>=13.9.4
 
-# --- AI layer (Groq — OpenAI-compatible, fast) ---
+# --- AI layer (provider-selectable: openai reasoning | groq) ---
+openai>=1.50.0
 groq>=1.5.0
 
 # --- Postgres driver (optional; only needed if DB_URL points at Postgres) ---
