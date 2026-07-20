@@ -1,21 +1,10 @@
 """Just-in-time slot fill — the fresh-posting executor.
 
-The AI daily plan (CampaignPlan.blueprint["post_slots"]) decides strategy: for each
-post, a time window, a type (single/collection), a theme (category) and a merchant.
-This worker fills those slots with FRESH inventory ~3 minutes before each fires:
-
-  every minute → find slots due within the lookahead → scrape today's live pool →
-  pick a fresh item matching the slot's theme/merchant → AI-write the post from the
-  matching deal/loot template → queue it at the slot time.
-
-Freshness + "delayed retries" are structural: the job runs every minute with a
-3-minute lookahead, so an unfilled slot is retried ~3 times before it fires (a
-scrape that fails this minute is re-attempted next minute). Idempotency: a filled
-slot leaves a GeneratedPost tagged with the slot key, so it is never filled twice.
-
-Per-slot fallback (never post stale/nothing when avoidable): if the exact merchant
-is dry, broaden to any fresh item of the slot's theme, then any fresh item at all;
-if the AI copywriter is unavailable, render the deterministic template instead.
+The AI daily plan (CampaignPlan.blueprint["post_slots"]) sets each post's window, type
+(single/loot), theme, and merchant. Every minute this worker fills slots due within a
+3-minute lookahead: scrape the live pool, pick fresh item(s) matching theme/merchant
+(broadening on a miss), AI-write single deals (deterministic template for loots and as
+fallback), then queue at the slot time. Idempotent per slot via a tagged GeneratedPost.
 """
 
 from __future__ import annotations
@@ -29,9 +18,10 @@ from sqlalchemy.orm import Session
 from src.services.affiliate import get_affiliate_provider
 from src.services.automation.queue import IST, enqueue
 from src.services.collection.deal_scraper import filter_relevant
+from src.services.generation.constants import PRICE_FIELD_ALIASES, is_loot_type
 from src.services.generation.deal_source import DealSourceClient, _map_item
 from src.services.generation.enrichment import DealEnrichmentEngine
-from src.services.generation.formatting import PostFormatter
+from src.services.generation.formatting import PostFormatter, _loot_label
 from src.services.generation.strategy import PostingStrategy
 from src.services.generation.daily_planner import recently_used_urls
 from src.config.settings import get_settings
@@ -47,6 +37,7 @@ logger = get_logger(__name__)
 LOOKAHEAD_MIN = 3      # fill a slot this many minutes before it fires
 SPACING_MIN = 2        # gap between consecutive posts sharing one window
 _SLOT_TAG = "aislot"   # GeneratedPost.selection_bucket prefix marking a filled slot
+LOOT_ITEMS_PER_POST = 10  # distinct categories bundled into one loot post
 
 _HHMM = re.compile(r"(\d{1,2}):(\d{2})")
 
@@ -95,6 +86,24 @@ def _item_merchant(it: dict) -> str | None:
     return it.get("merchant_key") or it.get("retailer_key")
 
 
+def _item_price(it: dict) -> float | None:
+    for k in PRICE_FIELD_ALIASES:
+        v = it.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _as_price(v) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _pick_fresh(pool: list[dict], theme: str | None, merchant: str | None,
                 used: set[str]) -> tuple[dict | None, str | None]:
     """Freshest attractive item for the slot + which tier matched, broadening on miss:
@@ -115,6 +124,44 @@ def _pick_fresh(pool: list[dict], theme: str | None, merchant: str | None,
     return None, None
 
 
+def _is_loot_type(slot_type: str | None) -> bool:
+    return is_loot_type(slot_type)
+
+
+def _pick_fresh_multi(pool: list[dict], merchant: str | None, used: set[str],
+                      n: int) -> list[dict]:
+    """Up to `n` freshest unused items spanning DISTINCT categories (one item per
+    category, best-first within each) — the actual shape of a real loot post: several
+    different product categories bundled together, never several products of the
+    SAME category. Prefers `merchant` when given but broadens to any merchant once
+    that one's categories are exhausted, since a loot post's defining trait is
+    category variety, not a single merchant."""
+    def unused(it):
+        return it.get("original_url") not in used
+
+    seen_cats: set[str] = set()
+    picked: list[dict] = []
+
+    def _scan(require_merchant: bool):
+        for it in pool:
+            if len(picked) >= n:
+                return
+            if not unused(it):
+                continue
+            cat = it.get("category_key") or ""
+            if cat in seen_cats:
+                continue
+            if require_merchant and not _match(_item_merchant(it), merchant):
+                continue
+            seen_cats.add(cat)
+            picked.append(it)
+
+    if merchant:
+        _scan(require_merchant=True)
+    _scan(require_merchant=False)
+    return picked
+
+
 def _today_plan(s: Session, day) -> CampaignPlan | None:
     return s.scalar(
         select(CampaignPlan)
@@ -131,7 +178,7 @@ def _already_filled(s: Session, key: str) -> bool:
 
 
 def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
-                   day=None, all_slots: bool = False) -> dict:
+                   day=None, all_slots: bool = False, cap_per_type: int | None = None) -> dict:
     from src.services.analytics.periods import ist_today
     from src.ai.client import AIUnavailable
     from src.ai.context import channel_style
@@ -139,8 +186,12 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
     from src.db.org_seed import get_default_org
 
     settings = get_settings()
+    # Where posts are QUEUED to. PUBLISH_CHANNEL (e.g. a test channel) wins over the
+    # owned channel, so the agent can keep collecting/learning from the real channel
+    # while the posts themselves land somewhere safe. The Publisher enforces the same
+    # target again at send time — this only decides what gets queued.
     channels = settings.owned_channels
-    channel = f"@{channels[0].lstrip('@')}" if channels else None
+    channel = settings.publish_channel or (f"@{channels[0].lstrip('@')}" if channels else None)
 
     # resolve the owned Channel row so filled drafts can carry a baseline prediction
     # (feeds OutcomeCollector -> weekly retro) — best effort, never blocks a fill.
@@ -154,24 +205,26 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
     plan = _today_plan(s, day)
     if plan is None:
         return {"ok": False, "reason": f"no AI daily plan for {day}"}
-    # 'warn' = a small minority of cited numbers were unverified (usually a stray
-    # hour label / derived figure); still trustworthy to act on since cited numbers
-    # live only in the plan's rationale, never in the published post. Only a hard
-    # 'failed' (substantial fabrication) blocks filling.
+    # Cited numbers live only in the plan's rationale, never in the post, so 'warn' is
+    # still actionable; only a hard 'failed' (substantial fabrication) blocks filling.
     if (plan.factcheck_status or "") not in ("passed", "warn", "skipped", ""):
         return {"ok": False, "reason": f"plan not trusted (factcheck={plan.factcheck_status})"}
 
     slots = (plan.blueprint or {}).get("post_slots") or []
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(minutes=lookahead_min)
-    # Normally only slots firing within the lookahead are filled (the every-minute
-    # cron). ``all_slots`` fills every not-yet-filled slot for ``day`` regardless of
-    # fire time — used by the offline populate/backfill script to generate a whole
-    # day's posts in one pass. Each still enqueues at its real slot fire time.
+    # all_slots (offline backfill) fills every not-yet-filled slot regardless of fire
+    # time; each still enqueues at its real slot time. Normal cron uses the lookahead.
     def _is_due(fire):
         return True if all_slots else (now <= fire <= horizon)
     due = [(fire, slot, si, sub) for (fire, slot, si, sub) in _expand_slots(slots, day)
            if _is_due(fire) and not _already_filled(s, f"{_SLOT_TAG}:{plan.id}:{si}:{sub}")]
+    # Optional hard cap (test channels): keep at most `cap_per_type` loot + `cap_per_type`
+    # deal posts regardless of how many the AI plan produced. Fire-time order preserved.
+    if cap_per_type:
+        loot = [e for e in due if _is_loot_type(e[1].get("type"))][:cap_per_type]
+        deal = [e for e in due if not _is_loot_type(e[1].get("type"))][:cap_per_type]
+        due = sorted(loot + deal, key=lambda e: e[0])
     if not due:
         return {"ok": True, "filled": 0, "reason": "no slots due"}
 
@@ -194,38 +247,91 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
     used = recently_used_urls(s)
 
     filled = []
+    # rotate the post STYLE per single deal and the banner FLAVOUR per loot board, so
+    # consecutive posts don't come out looking like the same template.
+    single_variant = loot_variant = 0
     for fire, slot, si, sub in due:
-        raw, match = _pick_fresh(pool, slot.get("theme"), slot.get("merchant"), used)
-        if raw is None:
-            continue
-        if match != "exact":
-            logger.info("[jit_fill] slot %d:%d broadened (%s): planned theme=%r merchant=%r",
-                        si, sub, match, slot.get("theme"), slot.get("merchant"))
-        enriched = [e for e in enricher.enrich_batch([_map_item(raw, client.source)])
-                    if e.deal_validity != "invalid"]
-        if not enriched:
-            continue
-        deal = enriched[0]
-        try:
-            text = writer.write_for_item(deal, slot, templates, style)
-            source = "ai_copywriter"
-        except (AIUnavailable, Exception):  # noqa: BLE001 — copy must never block a slot
-            text, _ = formatter.format_single(deal)
-            source = "template_fallback"
+        if _is_loot_type(slot.get("type")):
+            # LOOT: several distinct categories bundled under one AI-written banner, each
+            # category on its own "<Label> - <link>" line. The AI writes the catch line and
+            # labels with <LINK_n> tokens (deterministic template fallback on failure). An
+            # optional slot max_price makes it a price-tier loot ("Under ₹X").
+            cap = _as_price(slot.get("max_price"))
+            loot_pool = ([it for it in pool if (_item_price(it) or 0) <= cap and _item_price(it)]
+                         if cap else pool)
+            raws = _pick_fresh_multi(loot_pool, slot.get("merchant"), used, LOOT_ITEMS_PER_POST)
+            if len(raws) < 2:
+                continue  # not enough qualifying category variety in the live pool right now
+            enriched = [e for e in enricher.enrich_batch(
+                            [_map_item(r, client.source) for r in raws])
+                       if e.deal_validity != "invalid"]
+            if len(enriched) < 2:
+                continue
+            loot_items = []
+            for e in enriched:
+                lk, _lm = formatter._finalize_link(e)
+                loot_items.append({"label": _loot_label(e.category, "Deals"), "link": lk or ""})
+            try:
+                text = writer.write_for_loot(loot_items, slot, templates, style,
+                                             cta=formatter.cta_line,
+                                             footer=formatter.footer_line, price_cap=cap,
+                                             variant=loot_variant)
+                source = "ai_copywriter"
+            except (AIUnavailable, Exception):  # noqa: BLE001 — copy must never block a slot
+                text, _ = formatter.format_multi_category_loot(
+                    enriched, theme=slot.get("theme"), price_cap=cap)
+                source = "template_fallback"
+            loot_variant += 1
+            aff_meta = {"kind": "loot", "items": len(loot_items)}
+            match = "multi_category"
+            deal_ids = [e.deal_id for e in enriched]
+            rank_score = max((e.discount_percent or 0) for e in enriched)
+            primary_merchant = enriched[0].merchant_key
+            used_urls = [r.get("original_url") for r in raws]
+        else:
+            # DEAL: one specific product, AI-written copy (template fallback on failure).
+            raw, match = _pick_fresh(pool, slot.get("theme"), slot.get("merchant"), used)
+            if raw is None:
+                continue
+            if match != "exact":
+                logger.info("[jit_fill] slot %d:%d broadened (%s): planned theme=%r merchant=%r",
+                            si, sub, match, slot.get("theme"), slot.get("merchant"))
+            enriched_one = [e for e in enricher.enrich_batch([_map_item(raw, client.source)])
+                            if e.deal_validity != "invalid"]
+            if not enriched_one:
+                continue
+            deal = enriched_one[0]
+            # Finalize the tracked link before the copywriter runs; it writes a
+            # <link/> placeholder that assemble_post swaps for this link.
+            link, aff_meta = formatter._finalize_link(deal)
+            try:
+                text = writer.write_for_item(deal, slot, templates, style, link=link,
+                                             footer=formatter.footer_line, variant=single_variant)
+                source = "ai_copywriter"
+            except (AIUnavailable, Exception):  # noqa: BLE001 — copy must never block a slot
+                text, aff_meta = formatter.format_single(deal)
+                source = "template_fallback"
+            single_variant += 1
+            deal_ids = [deal.deal_id]
+            rank_score = deal.discount_percent or 0
+            primary_merchant = deal.merchant_key
+            used_urls = [raw.get("original_url")]
+
         key = f"{_SLOT_TAG}:{plan.id}:{si}:{sub}"
         gp = GeneratedPost(
             generated_at=now, post_type=slot.get("type") or "single", selection_bucket=key,
-            deal_ids=[deal.deal_id], rendered_text=text,
-            format_meta={"source": source, "match": match,
+            deal_ids=deal_ids, rendered_text=text,
+            format_meta={"source": source, "match": match, "affiliate": aff_meta,
+                         "primary_merchant": primary_merchant,
                          "slot": {"theme": slot.get("theme"), "merchant": slot.get("merchant")}},
-            rank_score=deal.discount_percent or 0, status=PostStatus.DRAFT,
+            rank_score=rank_score, status=PostStatus.DRAFT,
             strategy_rationale=slot.get("why") or "",
             publish_note="AI-planned slot, filled just-in-time with a fresh deal.")
         s.add(gp)
         s.flush()
         if channel_id is not None:
             try:
-                feats, pred = predict_for_slot(s, channel_id, fire, merchant_key=deal.merchant_key)
+                feats, pred = predict_for_slot(s, channel_id, fire, merchant_key=primary_merchant)
                 s.add(PostPrediction(
                     generated_post_id=gp.id, model_version=MODEL_VERSION, features=feats,
                     predicted_views_1h=pred["views_1h"], predicted_views_6h=pred["views_6h"],
@@ -233,11 +339,13 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
                     predicted_forwards_24h=pred["forwards_24h"]))
             except Exception:  # noqa: BLE001 — prediction is best-effort, never blocks a fill
                 pass
-        used.add(raw.get("original_url"))
+        for u in used_urls:
+            if u:
+                used.add(u)
         if channel:
             enqueue(s, gp.id, channel, fire)
         filled.append({"draft_id": gp.id, "slot": f"{si}:{sub}", "source": source,
-                       "at_utc": fire.isoformat(), "merchant": deal.merchant_key})
+                       "at_utc": fire.isoformat(), "merchant": primary_merchant})
 
     logger.info("[jit_fill] filled %d/%d due slots for %s", len(filled), len(due), day)
     return {"ok": True, "filled": len(filled), "due": len(due), "scheduled": filled}
