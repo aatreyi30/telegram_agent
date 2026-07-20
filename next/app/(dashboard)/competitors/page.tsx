@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { useQueryParams } from "@/lib/use-search-params";
+import { postTypeLabel, merchantLabel, istDate } from "@/lib/format";
 
 function minusDays(iso: string, days: number): string {
   const d = new Date(iso + "T00:00:00Z");
@@ -49,7 +50,10 @@ function fmtCompact(n: number | null | undefined): string {
 function ProcessingBadge({ e }: { e: CompetitorEntity }) {
   const hasData = (e.posts ?? 0) > 0 || (e.posts_per_day ?? 0) > 0;
   if (hasData) return null;
-  return <Badge variant="warning" className="text-[10px] font-normal">Processing</Badge>;
+  // No posts observed in-window. We can't tell "not collected yet" from "genuinely
+  // dormant" (CompetitorEntity has no last_collected_at), so say what's actually true
+  // rather than implying it's still loading.
+  return <Badge variant="secondary" className="text-[10px] font-normal">No posts in range</Badge>;
 }
 
 /**
@@ -115,15 +119,15 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
             <TableRow key={e.name} className="hover:bg-muted/50">
               <TableCell className="font-medium">
                 <div className="flex items-center gap-2">
-                  <span className="truncate">{e.name}</span>
+                  <span>{e.name}</span>
                   <CategoryBadge category={e.category} />
                   <ProcessingBadge e={e} />
                 </div>
               </TableCell>
-              <TableCell>{fmtCompact(e.subscribers)}</TableCell>
+              <TableCell className="tabular-nums">{fmtCompact(e.subscribers)}</TableCell>
               <TableCell><PostsPerDayCell e={e} /></TableCell>
-              <TableCell>{fmtNum(e.posts)}</TableCell>
-              <TableCell>{fmtNum(e.avg_views_per_post)}</TableCell>
+              <TableCell className="tabular-nums">{fmtNum(e.posts)}</TableCell>
+              <TableCell className="tabular-nums">{fmtNum(e.avg_views_per_post)}</TableCell>
             </TableRow>
           ))}
           {entities.length === 0 && (
@@ -178,7 +182,7 @@ export default function CompetitorDashboardPage() {
   return (
     <div>
       <div className="mb-4">
-        <h1 className="text-2xl font-bold tracking-tight">Competitor dashboard</h1>
+        <h1 className="text-xl font-bold tracking-tight">Competitor dashboard</h1>
         <p className="text-sm text-muted-foreground">
           Direct competitors (platform + Telegram) vs Telegram-only channels — all metrics, side by side.
         </p>
@@ -238,7 +242,7 @@ export default function CompetitorDashboardPage() {
             dealTypes.forEach((t) => { row[t] = e.deal_mix?.[t] ?? 0; });
             return row;
           });
-          const dealKeys = dealTypes.map((t) => ({ key: t, name: t }));
+          const dealKeys = dealTypes.map((t) => ({ key: t, name: postTypeLabel(t) }));
 
           const rankingData = [...entities]
             .sort((a: any, b: any) => (b.posts_per_day ?? 0) - (a.posts_per_day ?? 0))
@@ -261,11 +265,11 @@ export default function CompetitorDashboardPage() {
             topMerchants.forEach((m) => { row[m] = e.merchant_mix?.[m] ?? 0; });
             return row;
           });
-          const merchantShareKeys = topMerchants.map((m) => ({ key: m, name: m }));
+          const merchantShareKeys = topMerchants.map((m) => ({ key: m, name: merchantLabel(m) }));
 
           return (
             <div className="space-y-4">
-              <div className="grid gap-6 sm:grid-cols-3">
+              <div className="grid gap-4 sm:grid-cols-3">
                 <StatCard label="Competitors" value={fmtNum(d.summary?.total ?? 0)} />
                 <StatCard label="Direct (platform)" value={fmtNum(d.summary?.platform ?? 0)} />
                 <StatCard label="Indirect (Telegram)" value={fmtNum(d.summary?.channel ?? 0)} />
@@ -345,7 +349,7 @@ export default function CompetitorDashboardPage() {
                     <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Posting trend (30d)</CardTitle></CardHeader>
                     <CardContent>
                       <MultiLineChart
-                        data={trendsQ.data.posting_trend.map((r) => ({ ...r, label: r.date }))}
+                        data={trendsQ.data.posting_trend.map((r) => ({ ...r, label: istDate(r.date) }))}
                         series={trendsQ.data.competitors.map((c) => ({ key: c.name, name: c.name }))}
                         unit=" posts" height={240}
                       />
@@ -355,7 +359,7 @@ export default function CompetitorDashboardPage() {
                     <CardHeader><div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" /><CardTitle className="text-base">Views trend (30d)</CardTitle></CardHeader>
                     <CardContent>
                       <MultiLineChart
-                        data={trendsQ.data.views_trend.map((r) => ({ ...r, label: r.date }))}
+                        data={trendsQ.data.views_trend.map((r) => ({ ...r, label: istDate(r.date) }))}
                         series={trendsQ.data.competitors.map((c) => ({ key: c.name, name: c.name }))}
                         unit=" views" height={240}
                       />

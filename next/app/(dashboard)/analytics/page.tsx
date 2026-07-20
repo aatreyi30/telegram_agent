@@ -10,6 +10,7 @@ import { DateFilter } from "@/components/ui/date-range-picker";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useAnalytics, useDataRange } from "@/queries/queries";
 import { useQueryParams } from "@/lib/use-search-params";
+import { postTypeLabel, merchantLabel } from "@/lib/format";
 import { CHART_AXIS_COLOR as AXIS, CHART_GRID_COLOR as GRID } from "@/constants/charts";
 
 function fmtNum(n: number | null | undefined): string {
@@ -84,7 +85,7 @@ export default function AnalyticsPage() {
   return (
     <div>
       <div className="mb-4">
-        <h1 className="text-3xl font-bold tracking-tight">Analytics</h1>
+        <h1 className="text-xl font-bold tracking-tight">Analytics</h1>
         <p className="text-sm text-muted-foreground">
           Views, reactions, forwards, engagement, CTA, and growth — all from the data we collect.
         </p>
@@ -119,7 +120,7 @@ export default function AnalyticsPage() {
 
           return (
             <div className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-4 xl:grid-cols-7 xl:gap-6">
+              <div className="grid gap-4 sm:grid-cols-4 xl:grid-cols-7">
                 <StatCard label="Posts" value={fmtNum(a.total_posts)} />
                 <StatCard label="Views" value={fmtNum(a.total_views)} />
                 <StatCard label="Total reactions" value={fmtNum(a.total_reactions)} />
@@ -202,7 +203,7 @@ export default function AnalyticsPage() {
                 </ChartCard>
               </div>
 
-              <div className="grid gap-6 lg:grid-cols-3">
+              <div className="grid gap-4 lg:grid-cols-3">
                 <Card className="flex flex-col">
                   <CardHeader>
                     <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
@@ -308,10 +309,10 @@ export default function AnalyticsPage() {
 
               <div className="grid gap-4 lg:grid-cols-2">
                 <ChartCard title="Total views by post type" sub="Which formats perform best · hover for post count">
-                  <BarsChart data={a.by_type || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" height={280} />
+                  <BarsChart data={(a.by_type || []).map((r) => ({ ...r, label: postTypeLabel(r.label) }))} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" height={280} />
                 </ChartCard>
                 <ChartCard title="Total views by merchant (top 10)" sub="Resolved merchants only · hover for post count">
-                  <BarsChart data={a.by_merchant || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" height={280} />
+                  <BarsChart data={(a.by_merchant || []).map((r) => ({ ...r, label: merchantLabel(r.label) }))} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" height={280} />
                 </ChartCard>
               </div>
 

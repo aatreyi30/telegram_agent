@@ -11,6 +11,7 @@ import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceB
 import { useDataRange, useDay, useGrowth } from "@/queries/queries";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { useQueryParams } from "@/lib/use-search-params";
+import { postTypeLabel, merchantLabel } from "@/lib/format";
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -81,18 +82,18 @@ export default function DayViewPage() {
 
   const typeMixChart = useMemo(() => {
     if (!q.data || !("type_mix" in q.data)) return null;
-    return (q.data.type_mix || []).map(([label, count]: [string, number]) => ({ label, count }));
+    return (q.data.type_mix || []).map(([label, count]: [string, number]) => ({ label: postTypeLabel(label), count }));
   }, [q.data]);
 
   const merchantMixChart = useMemo(() => {
     if (!q.data || !("merchant_mix" in q.data)) return null;
-    return (q.data.merchant_mix || []).map(([label, count]: [string, number]) => ({ label, count }));
+    return (q.data.merchant_mix || []).map(([label, count]: [string, number]) => ({ label: merchantLabel(label), count }));
   }, [q.data]);
 
   return (
     <div>
       <div className="mb-4">
-        <h1 className="text-2xl font-bold tracking-tight">Day view</h1>
+        <h1 className="text-xl font-bold tracking-tight">Day view</h1>
         <p className="text-sm text-muted-foreground">Per-merchant breakdown for a date or date range (IST).</p>
       </div>
 
@@ -118,7 +119,7 @@ export default function DayViewPage() {
             <Empty>{d.note || "No posts on this date."}</Empty>
           ) : (
             <div className="space-y-4">
-              <div className="grid gap-6 sm:grid-cols-4">
+              <div className="grid gap-4 sm:grid-cols-4">
                 <StatCard label="posts" value={fmtNum(d.posts)} />
                 <StatCard label="total views" value={fmtNum(d.total_views)} />
                 <StatCard
@@ -161,19 +162,19 @@ export default function DayViewPage() {
                     <TableBody>
                       {d.merchants.map((m, idx) => (
                         <TableRow key={m.key ?? `__unknown__${idx}`} className="hover:bg-muted/50">
-                          <TableCell className="font-medium">{m.display_name ?? m.key}</TableCell>
-                          <TableCell className="text-right">{fmtNum(m.post_count)}</TableCell>
-                          <TableCell className="text-right font-semibold">{fmtNum(m.total_views)}</TableCell>
-                          <TableCell className="text-right">{m.total_reactions ? fmtNum(m.total_reactions) : "—"}</TableCell>
-                          <TableCell className="text-right">{m.total_forwards ? fmtNum(m.total_forwards) : "—"}</TableCell>
-                          <TableCell className="text-right">{m.engagement_rate != null ? `${m.engagement_rate}%` : "—"}</TableCell>
-                          <TableCell className="text-right">{m.deal_count ? fmtNum(m.deal_count) : "—"}</TableCell>
-                          <TableCell className="max-w-40 text-xs text-muted-foreground">
+                          <TableCell className="font-medium">{m.display_name || merchantLabel(m.key)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{fmtNum(m.post_count)}</TableCell>
+                          <TableCell className="text-right font-semibold tabular-nums">{fmtNum(m.total_views)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.total_reactions ? fmtNum(m.total_reactions) : "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.total_forwards ? fmtNum(m.total_forwards) : "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.engagement_rate != null ? `${m.engagement_rate}%` : "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.deal_count ? fmtNum(m.deal_count) : "—"}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
                             {Object.entries(m.type_dist ?? {}).length
-                              ? Object.entries(m.type_dist ?? {}).map(([t, c]) => `${t}(${c})`).join(", ")
+                              ? Object.entries(m.type_dist ?? {}).map(([t, c]) => `${postTypeLabel(t)} (${c})`).join(", ")
                               : "—"}
                           </TableCell>
-                          <TableCell className="max-w-48 truncate text-muted-foreground">
+                          <TableCell className="text-muted-foreground">
                             {m.top_post ? (
                               <span title={`views: ${m.top_post.views} — ${m.top_post.preview}`}>
                                 <span className="font-semibold text-foreground">{fmtNum(m.top_post.views)}</span>
@@ -216,7 +217,7 @@ export default function DayViewPage() {
                       <div className="space-y-1 text-sm">
                         {d.type_mix.map((t) => (
                           <div key={t[0]} className="flex items-center justify-between">
-                            <span>{t[0]}</span>
+                            <span>{postTypeLabel(t[0])}</span>
                             <Badge>{t[1]}</Badge>
                           </div>
                         ))}
@@ -287,8 +288,8 @@ export default function DayViewPage() {
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">Top merchant</span>
-                      <span className="font-semibold truncate max-w-32" title={(() => { const t = d.merchants.filter((m) => m.key)[0]; return t?.display_name ?? t?.key; })()}>
-                        {(() => { const t = d.merchants.filter((m) => m.key)[0]; return t?.display_name ?? t?.key ?? "—"; })()}
+                      <span className="font-semibold truncate max-w-32">
+                        {(() => { const t = d.merchants.filter((m) => m.key)[0]; return t ? (t.display_name || merchantLabel(t.key)) : "—"; })()}
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
@@ -306,7 +307,7 @@ export default function DayViewPage() {
                   <CardContent className="space-y-1 text-sm">
                     {d.type_mix.map((t) => (
                       <div key={t[0]} className="flex items-center justify-between">
-                        <span className="text-muted-foreground">{t[0]}</span>
+                        <span className="text-muted-foreground">{postTypeLabel(t[0])}</span>
                         <span className="font-semibold">{t[1]}</span>
                       </div>
                     ))}
