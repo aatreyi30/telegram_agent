@@ -4,7 +4,6 @@ import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Delete02Icon } from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
@@ -15,6 +14,8 @@ import {
 } from "@/components/ui/table";
 import { useChannels } from "@/queries/queries";
 import { useAddChannel, useDeleteChannel } from "@/queries/mutations";
+import { StatusPill } from "@/components/StatusPill";
+import { atOr } from "@/lib/format";
 import { OwnerOnly } from "../owner-guard";
 import { Note } from "../note";
 
@@ -63,10 +64,10 @@ function ChannelsTab() {
           </div>
           {note && <Note {...note} />}
           <p className="text-xs text-muted-foreground">
-            A new channel starts as <b>pending</b>. Collecting its posts and stats requires a
-            Telegram account that administers it — set <code>TELEGRAM_API_ID / HASH / PHONE</code>
-            for that account and sign in once, then run a sync. The channel flips to <b>active</b>
-            after its first successful collection.
+            A new channel starts as <b>Waiting</b>. Collecting its posts and stats is a one-time
+            technical setup — it needs a Telegram account that admins this channel, connected on the
+            server. Ask your developer to complete it; the channel turns <b>Active</b> after its
+            first successful sync.
           </p>
         </CardContent>
       </Card>
@@ -85,13 +86,9 @@ function ChannelsTab() {
                     {channels.map((c) => (
                       <TableRow key={c.id}>
                         <TableCell className="font-medium">{c.username ? `@${c.username}` : c.title || `#${c.id}`}</TableCell>
-                        <TableCell className="capitalize text-muted-foreground">{c.kind}</TableCell>
-                        <TableCell>
-                          <Badge className={c.status === "active"
-                            ? "bg-success/15 text-success"
-                            : "bg-muted text-muted-foreground"}>{c.status}</Badge>
-                        </TableCell>
-                        <TableCell>{c.posts.toLocaleString()}</TableCell>
+                        <TableCell className="capitalize text-muted-foreground">{c.kind === "owned" ? "Your channel" : c.kind}</TableCell>
+                        <TableCell><StatusPill status={c.status} /></TableCell>
+                        <TableCell className="tabular-nums">{c.posts.toLocaleString()}</TableCell>
                         <TableCell>
                           <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(c)}>
                             <HugeiconsIcon icon={Delete02Icon} size={16} className="text-destructive" />
@@ -109,9 +106,12 @@ function ChannelsTab() {
         <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete channel">
           <div className="space-y-3">
             <p className="text-sm">
-              {deleteTarget && (deleteTarget.posts > 0
-                ? `Delete @${deleteTarget.username} and its ${deleteTarget.posts} posts + all derived data? This cannot be undone.`
-                : `Remove @${deleteTarget.username}?`)}
+              {deleteTarget && (() => {
+                const name = atOr(deleteTarget.username, "this channel");
+                return deleteTarget.posts > 0
+                  ? `Delete ${name} and its ${deleteTarget.posts} posts + all derived data? This cannot be undone.`
+                  : `Remove ${name}?`;
+              })()}
             </p>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(null)}>Cancel</Button>

@@ -15,16 +15,19 @@ import {
 } from "@/components/ui/table";
 import { useUsers } from "@/queries/queries";
 import { useCreateUser, useDeleteUser, useUpdateUserRole } from "@/queries/mutations";
+import { useAuth } from "@/providers/auth";
 import { OwnerOnly } from "../owner-guard";
 
 function UsersTab() {
   const q = useUsers();
+  const { user: me } = useAuth();
   const createUser = useCreateUser();
   const deleteUser = useDeleteUser();
   const updateRole = useUpdateUserRole();
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({ name: "", email: "", password: "", role: "editor" });
   const [note, setNote] = useState<string | null>(null);
+  const canCreate = f.name.trim() && f.email.trim() && f.password.length >= 6;
 
   async function create() {
     setNote(null);
@@ -36,7 +39,9 @@ function UsersTab() {
       setNote((e as Error).message);
     }
   }
-  async function remove(id: number) {
+  async function remove(id: number, name: string) {
+    if (!confirm(`Remove ${name}? They'll lose access immediately.`)) return;
+    setNote(null);
     try {
       await deleteUser.mutateAsync(id);
     } catch (e) {
@@ -44,13 +49,19 @@ function UsersTab() {
     }
   }
   async function changeRole(id: number, role: string) {
-    await updateRole.mutateAsync({ id, role });
+    setNote(null);
+    try {
+      await updateRole.mutateAsync({ id, role });
+    } catch (e) {
+      setNote((e as Error).message);
+    }
   }
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-end">
-        <Button size="sm" onClick={() => setOpen(true)}><HugeiconsIcon icon={UserAdd01Icon} size={16} /> Add user</Button>
+      <CardHeader className="flex-row items-center justify-between gap-2">
+        {note && !open ? <p className="text-sm text-destructive">{note}</p> : <span />}
+        <Button size="sm" onClick={() => { setNote(null); setOpen(true); }}><HugeiconsIcon icon={UserAdd01Icon} size={16} /> Add user</Button>
       </CardHeader>
       <CardContent className="p-0">
         <Async q={q} rows={2}>
@@ -58,19 +69,21 @@ function UsersTab() {
             <Table>
               <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Email</TableHead><TableHead>Role</TableHead><TableHead>Last login</TableHead><TableHead></TableHead></TableRow></TableHeader>
               <TableBody>
-                {users.map((u) => (
+                {users.map((u) => {
+                  const isSelf = u.id === me?.id;
+                  return (
                   <TableRow key={u.id}>
-                    <TableCell className="font-medium">{u.name}</TableCell>
+                    <TableCell className="font-medium">{u.name}{isSelf && <span className="ml-1.5 text-xs text-muted-foreground">(you)</span>}</TableCell>
                     <TableCell>{u.email}</TableCell>
                     <TableCell>
-                      <Select value={u.role} onValueChange={(role) => changeRole(u.id, role as string)}>
-                        <SelectTrigger className="h-8 w-28">
+                      <Select value={u.role} onValueChange={(role) => changeRole(u.id, role as string)} disabled={isSelf}>
+                        <SelectTrigger className="h-8 w-28" title={isSelf ? "You can't change your own role" : undefined}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="owner">owner</SelectItem>
-                          <SelectItem value="editor">editor</SelectItem>
-                          <SelectItem value="viewer">viewer</SelectItem>
+                          <SelectItem value="owner">Owner</SelectItem>
+                          <SelectItem value="editor">Editor</SelectItem>
+                          <SelectItem value="viewer">Viewer</SelectItem>
                         </SelectContent>
                       </Select>
                     </TableCell>
@@ -79,14 +92,17 @@ function UsersTab() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                        onClick={() => remove(u.id)}
+                        className="text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-30"
+                        disabled={isSelf}
+                        title={isSelf ? "You can't remove yourself" : "Remove user"}
+                        onClick={() => remove(u.id, u.name)}
                       >
                         <HugeiconsIcon icon={Delete02Icon} size={16} />
                       </Button>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           )}
@@ -114,7 +130,9 @@ function UsersTab() {
             </Select>
           </div>
           {note && <p className="text-sm text-destructive">{note}</p>}
-          <Button className="w-full" onClick={create}>Create user</Button>
+          <Button className="w-full" onClick={create} disabled={!canCreate || createUser.isPending}>
+            {createUser.isPending ? "Creating…" : "Create user"}
+          </Button>
         </div>
       </Dialog>
     </Card>

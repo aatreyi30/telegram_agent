@@ -16,12 +16,12 @@ export default function SettingsLayout({ children }: { children: ReactNode }) {
     ?? items[0];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+        <h1 className="text-xl font-bold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground">Your profile, channels, the organization, users, and competitors.</p>
       </div>
-      <div className="flex flex-col gap-8 md:flex-row">
+      <div className="flex flex-col gap-6 md:flex-row">
         <nav className="flex shrink-0 gap-1 overflow-x-auto pb-1 md:w-52 md:flex-col md:overflow-visible md:pb-0">
           {items.map((item) => (
             <NavLink

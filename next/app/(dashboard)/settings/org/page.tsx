@@ -46,19 +46,27 @@ function OrgTab() {
                 <Label>Name</Label>
                 <Input value={data.name || ""} onChange={(e) => set("name", e.target.value)} />
               </div>
+              {q.data?.affiliate_provider && (
+                <p className="text-xs text-muted-foreground">
+                  Affiliate provider: <span className="font-medium text-foreground">{q.data.affiliate_provider}</span> — how product links are turned into earning links.
+                </p>
+              )}
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label>Amazon affiliate tag</Label>
-                  <Input value={data.settings?.grabon_amazon_tag || ""} onChange={(e) => setS("grabon_amazon_tag", e.target.value)} />
+                  <Input placeholder="yourtag-21" value={data.settings?.grabon_amazon_tag || ""} onChange={(e) => setS("grabon_amazon_tag", e.target.value)} />
+                  <p className="text-xs text-muted-foreground">Added to Amazon links so purchases are credited to you.</p>
                 </div>
                 <div className="space-y-1.5">
                   <Label>Flipkart params</Label>
-                  <Input value={data.settings?.grabon_flipkart_params || ""} onChange={(e) => setS("grabon_flipkart_params", e.target.value)} />
+                  <Input placeholder="affid=xxxxx&affExtParam1=..." value={data.settings?.grabon_flipkart_params || ""} onChange={(e) => setS("grabon_flipkart_params", e.target.value)} />
+                  <p className="text-xs text-muted-foreground">Flipkart affiliate query string appended to its links.</p>
                 </div>
               </div>
               <div className="space-y-1.5">
                 <Label>Shortener URL</Label>
-                <Input value={data.settings?.grabon_shortener_url || ""} onChange={(e) => setS("grabon_shortener_url", e.target.value)} />
+                <Input placeholder="https://grbn.in" value={data.settings?.grabon_shortener_url || ""} onChange={(e) => setS("grabon_shortener_url", e.target.value)} />
+                <p className="text-xs text-muted-foreground">Base of your short-link service — every posted link is shortened through it for click tracking.</p>
               </div>
               <div className="space-y-1.5">
                 <Label>Preferred categories (comma-separated)</Label>

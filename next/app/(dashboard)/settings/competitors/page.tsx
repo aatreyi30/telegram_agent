@@ -5,6 +5,9 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { UserGroupIcon, Edit03Icon, Delete02Icon } from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
 import { CategoryBadge } from "@/components/CategoryBadge";
+import { StatusPill } from "@/components/StatusPill";
+import { Badge } from "@/components/ui/badge";
+import { relative, atOr } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
@@ -91,11 +94,14 @@ function CompetitorsTab() {
     }
   }
 
+  const [rowError, setRowError] = useState<string | null>(null);
+
   async function toggleMonitoring(c: CompetitorRow) {
+    setRowError(null);
     try {
       await updateCompetitor.mutateAsync({ id: c.id, monitoring_enabled: !c.monitoring_enabled });
-    } catch {
-      // best-effort — the row just won't flip; no separate error surface for this control
+    } catch (e) {
+      setRowError((e as Error)?.message || `Couldn't update monitoring for @${c.username}.`);
     }
   }
 
@@ -112,7 +118,8 @@ function CompetitorsTab() {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-end">
+      <CardHeader className="flex-row items-center justify-between gap-2">
+        {rowError ? <p className="text-sm text-destructive">{rowError}</p> : <span />}
         <Button size="sm" onClick={() => setOpen(true)}><HugeiconsIcon icon={UserGroupIcon} size={16} /> Add competitor</Button>
       </CardHeader>
       <CardContent className="p-0">
@@ -129,6 +136,7 @@ function CompetitorsTab() {
                     <TableHead>Title</TableHead>
                     <TableHead>Category</TableHead>
                     <TableHead>Posts</TableHead>
+                    <TableHead>Last collected</TableHead>
                     <TableHead>Monitored</TableHead>
                     <TableHead></TableHead>
                   </TableRow>
@@ -138,8 +146,13 @@ function CompetitorsTab() {
                     <TableRow key={c.id}>
                       <TableCell className="font-medium">{c.username ? `@${c.username}` : "—"}</TableCell>
                       <TableCell className="text-muted-foreground">{c.title || "—"}</TableCell>
-                      <TableCell><CategoryBadge category={c.category ?? undefined} /></TableCell>
-                      <TableCell>{(c.posts ?? 0).toLocaleString()}</TableCell>
+                      <TableCell>
+                        {c.category ? <CategoryBadge category={c.category} /> : <Badge variant="outline" className="text-[10px] font-normal">Unclassified</Badge>}
+                      </TableCell>
+                      <TableCell className="tabular-nums">{(c.posts ?? 0).toLocaleString()}</TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {c.last_collected_at ? relative(c.last_collected_at) : <StatusPill status={c.status} />}
+                      </TableCell>
                       <TableCell>
                         <Button
                           variant={c.monitoring_enabled ? "secondary" : "outline"}
@@ -220,9 +233,12 @@ function CompetitorsTab() {
       <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete competitor">
         <div className="space-y-3">
           <p className="text-sm">
-            {deleteTarget && ((deleteTarget.posts ?? 0) > 0
-              ? `Delete @${deleteTarget.username} and its ${deleteTarget.posts} posts + all derived competitor data? This cannot be undone.`
-              : `Remove @${deleteTarget.username}?`)}
+            {deleteTarget && (() => {
+              const name = atOr(deleteTarget.username, "this competitor");
+              return (deleteTarget.posts ?? 0) > 0
+                ? `Delete ${name} and its ${deleteTarget.posts} posts + all derived competitor data? This cannot be undone.`
+                : `Remove ${name}?`;
+            })()}
           </p>
           {deleteNote && <p className="text-sm text-destructive">{deleteNote}</p>}
           <div className="flex justify-end gap-2">
