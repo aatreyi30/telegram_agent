@@ -474,6 +474,18 @@ def _clamp_page(page: int, page_size: int) -> tuple[int, int, int]:
     return page, page_size, (page - 1) * page_size
 
 
+def _post_facts(gp) -> dict:
+    """Merchant + affiliate status for a generated post, tolerant of both format_meta
+    shapes: JIT copywriter posts nest affiliate under `affiliate`; template posts put
+    `affiliate_status` at the top level. Returns clean values the UI can trust."""
+    meta = gp.format_meta or {}
+    aff = meta.get("affiliate") if isinstance(meta.get("affiliate"), dict) else {}
+    slot = meta.get("slot") if isinstance(meta.get("slot"), dict) else {}
+    merchant = meta.get("primary_merchant") or aff.get("affiliate_merchant") or slot.get("merchant")
+    status = meta.get("affiliate_status") or aff.get("affiliate_status")
+    return {"merchant": merchant, "affiliate_status": status}
+
+
 def drafts(page: int = 1, page_size: int = 12) -> dict:
     page, page_size, offset = _clamp_page(page, page_size)
     with session_scope() as s:
@@ -484,11 +496,13 @@ def drafts(page: int = 1, page_size: int = 12) -> dict:
         items = []
         for r in rows:
             meta = r.format_meta or {}
+            facts = _post_facts(r)
             items.append({
                 "id": r.id, "post_type": r.post_type, "status": r.status,
                 "bucket": r.selection_bucket, "rank_score": r.rank_score,
                 "text": r.rendered_text,
-                "affiliate_status": meta.get("affiliate_status"),
+                "merchant": facts["merchant"],
+                "affiliate_status": facts["affiliate_status"],
                 "emoji_policy": meta.get("emoji_policy"),
                 "rationale": r.strategy_rationale,
                 "generated_at": r.generated_at.isoformat() if r.generated_at else None,
@@ -627,26 +641,17 @@ def weekly_report(include_ai: bool = True) -> dict:
                                CampaignPlan.plan_type == PlanType.WEEKLY)
                         .order_by(CampaignPlan.generated_at.desc()))
         weekly = None
+        ai_summary = None
         if plan:
             weekly = {"title": plan.title, "blueprint": plan.blueprint,
                       "expected_outcome": plan.expected_outcome, "confidence": plan.confidence,
                       "generated_at": plan.generated_at.isoformat() if plan.generated_at else None}
+            # The weekly AI plan's digest doubles as the operator's weekly retro — surface
+            # the already-generated one rather than making a second AI call.
+            if include_ai:
+                ai_summary = plan.ai_digest or None
         reasoning = ctx.reasoning_insights(s)
         recs = ctx.growth_recommendations(s, limit=6)
-
-    ai_summary = None
-    if include_ai:
-        try:
-            from src.ai.briefing import BriefingGenerator
-            from src.ai.client import AIUnavailable
-            try:
-                ai_summary = BriefingGenerator().generate(weekly=True)
-                from src.services.ai_outputs import record_ai_output
-                record_ai_output("weekly_briefing", ai_summary, get_settings().ai_model)
-            except AIUnavailable:
-                ai_summary = None
-        except Exception:  # briefing is best-effort; never break the report
-            ai_summary = None
 
     return {"available": weekly is not None, "weekly_plan": weekly,
             "what_changed": reasoning, "recommendations": recs, "ai_summary": ai_summary}
@@ -678,19 +683,16 @@ def retro_latest(week: str | None = None) -> dict:
         }
 
 
-def deals_scored(limit: int = 50) -> dict:
-    """Phase 3.3 -- latest ``DealScore`` per deal (score + explainable
-    ``components``), ordered by score desc, for ``/api/deals/scored`` and the
-    Deal Queue view on ``/plan``."""
-    with session_scope() as s:
-        return {"items": ctx.top_scored_deals(s, limit=limit)}
-
-
 def _plan_date_bounds(s):
-    from src.services.analytics.periods import owned_window, to_ist
+    from src.services.analytics.periods import ist_today, owned_window, to_ist
     w = owned_window(s)
     mn = to_ist(w["start"]).date() if w.get("start") else None
     mx = to_ist(w["end"]).date() if w.get("end") else None
+    # The plan is forward-looking ("what to post TODAY"), so the picker must reach today
+    # even though the latest OWNED post is usually yesterday — otherwise today isn't
+    # selectable and the page can't default to it.
+    today = ist_today()
+    mx = max(mx, today) if mx else today
     return mn, mx
 
 
@@ -794,7 +796,12 @@ def ensure_daily_ai_plan(s, day):
     if cached is not None:
         return cached
 
-    recommended = ctx.posting_trajectory(s, days=14, end_day=day - timedelta(days=1))["recent_cadence"]
+    _traj = ctx.posting_trajectory(s, days=14, end_day=day - timedelta(days=1))
+    # Cold start: if the recent window (14 days ending yesterday) is empty — e.g. a
+    # fresh collection whose only posts are TODAY, which that window excludes — fall
+    # back to the lifetime average so the plan isn't empty. Truly-zero only when there
+    # is no posting history at all.
+    recommended = _traj["recent_cadence"] or round(_traj["lifetime_baseline"] or 0)
     windows, allocation, merchants, _ = _today_details(s, recommended)
     evt = None
     try:
@@ -837,9 +844,12 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
                 day = date_cls.fromisoformat(date)
             except ValueError:
                 day = None
+        # Default to TODAY (the plan is forward-looking), not the latest owned day —
+        # you plan today from yesterday's results before you've posted today. Only the
+        # total absence of owned history means there's nothing to plan from.
         if day is None:
-            day = latest_owned_date(s)
-        if day is None:
+            day = ist_today()
+        if latest_owned_date(s) is None:
             return {"available": False, "reason": "No owned posts yet."}
         prev = day - timedelta(days=1)
 
@@ -972,15 +982,11 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
 
     ai_summary, ai_ok = "", False
     try:
-        from src.ai.briefing import BriefingGenerator
         from src.ai.client import AIUnavailable
-        # Same conditional-kwarg reasoning as `_daily_ai_generate`: only pass
-        # `directive` through when set, so existing tests that monkeypatch
-        # `BriefingGenerator.generate` with a fixed `(self, weekly=False)`
-        # signature keep working on the normal, non-regenerate path.
-        directive_kwargs = {"directive": directive} if directive is not None else {}
+        from src.ai.planner import generate_week_plan
         try:
-            ai_summary = BriefingGenerator().generate(weekly=True, **directive_kwargs) or ""
+            res = generate_week_plan(s, week_start, directive=directive)
+            ai_summary = res.get("digest") or "" if res.get("available") else ""
             ai_ok = bool(ai_summary)
         except AIUnavailable:
             ai_summary = ""
@@ -1126,14 +1132,64 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             return {"available": False,
                     "reason": "This day has already elapsed — regenerating it has no effect."}
 
+        # Capture the FULL steering trace before deleting the old plan, so repeated
+        # regenerations accumulate (the AI sees every prior ask, not just the latest),
+        # and gather today's available merchants so it can explain a request it can't
+        # satisfy (e.g. "diversify merchants" when the feed is single-merchant).
+        old = s.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day).order_by(CampaignPlan.generated_at.desc()))
+        # Snapshot the old plan (all cols but id) so we can RESTORE it if regeneration
+        # fails — otherwise a failed regen (e.g. AI at quota) destroys the good plan.
+        old_snap = ({c.name: getattr(old, c.name) for c in CampaignPlan.__table__.columns
+                     if c.name != "id"} if old is not None else None)
+        trace = list((old.blueprint or {}).get("steering_history") or []) if old else []
+        if directive:
+            trace.append(directive)
+        avail = sorted({d.get("merchant_key") for d in ctx.available_deals(s, limit=30)
+                        if d.get("merchant_key")})
         s.execute(delete(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.DAILY,
             CampaignPlan.target_date == day,
         ))
 
-    result = daily_brief(date=day.isoformat(), directive=directive)
-    if result.get("available"):
+    # Compose a directive that carries the whole steering history + what's actually
+    # available, so the AI addresses the repeated ask instead of silently repeating.
+    composed = directive
+    if len(trace) > 1:  # only when there ARE prior asks — the "you've been asked N times" framing
+        composed = (
+            f"You have been asked to adjust THIS day's plan {len(trace)} time(s). Address the "
+            "LATEST request and acknowledge the earlier ones — do NOT silently reproduce the "
+            "same plan.\nSTEERING HISTORY (oldest first):\n"
+            + "\n".join(f"  {i + 1}. {d}" for i, d in enumerate(trace))
+            + f"\n\nMerchants with deals in today's feed: {avail or 'none'}."
+        )
+    result = daily_brief(date=day.isoformat(), directive=composed)
+    # Success is measured by an actual AI plan being PERSISTED — not result["available"]
+    # (daily_brief still returns available=True with the deterministic fallback when the
+    # AI is down). If no AI row landed, the regeneration failed: restore the old plan.
+    with session_scope() as s2:
+        row = s2.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day,
+            CampaignPlan.is_ai_generated == True).order_by(CampaignPlan.generated_at.desc()))  # noqa: E712
+        if row is not None:
+            # success — persist the RAW trace so the next regeneration accumulates it;
+            # keep operator_directive as just the latest raw ask (not the composed blob).
+            row.blueprint = {**(row.blueprint or {}), "steering_history": trace}
+            row.operator_directive = directive
+        elif old_snap is not None:
+            # regeneration produced no AI plan (AI unavailable) — restore the previous one
+            # so the day is never left plan-less with an orphaned queue.
+            s2.add(CampaignPlan(**old_snap))
+    if row is None and old_snap is not None:
+        return {"available": False, "restored": True,
+                "reason": f"Regeneration failed ({result.get('reason') or 'AI unavailable'}) "
+                          "— kept your existing plan."}
+    if row is not None:
         note = f"daily {day.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
         record_ai_output("plan_regenerated", note, get_settings().ai_model)
     return result
@@ -1195,18 +1251,28 @@ def queue(page: int = 1, page_size: int = 20) -> dict:
         rows = s.scalars(select(ScheduledPost)
                          .order_by(ScheduledPost.scheduled_at)
                          .offset(offset).limit(page_size)).all()
-        # attach each draft's category (selection_bucket) so the day-plan is legible
-        cats = {}
+        # attach each queued draft's real content so the schedule is legible: the post
+        # text (what actually goes out), its type and merchant — not just the internal
+        # selection_bucket key the old UI showed.
+        gps = {}
         pids = [r.generated_post_id for r in rows if r.generated_post_id]
         if pids:
             for gp in s.scalars(select(GeneratedPost).where(GeneratedPost.id.in_(pids))):
-                cats[gp.id] = gp.selection_bucket
-        items = [{"id": r.id, "post_id": r.generated_post_id, "channel": r.channel_ref,
-                  "category": cats.get(r.generated_post_id),
-                  "status": r.status,
-                  "scheduled_at": r.scheduled_at.isoformat() if r.scheduled_at else None,
-                  "attempts": f"{r.attempts}/{r.max_attempts}",
-                  "note": (r.last_error or "")} for r in rows]
+                gps[gp.id] = gp
+        items = []
+        for r in rows:
+            gp = gps.get(r.generated_post_id)
+            facts = _post_facts(gp) if gp is not None else {"merchant": None, "affiliate_status": None}
+            items.append({
+                "id": r.id, "post_id": r.generated_post_id, "channel": r.channel_ref,
+                "post_type": gp.post_type if gp is not None else None,
+                "merchant": facts["merchant"], "affiliate_status": facts["affiliate_status"],
+                "text": gp.rendered_text if gp is not None else None,
+                "bucket": gp.selection_bucket if gp is not None else None,
+                "status": r.status,
+                "scheduled_at": r.scheduled_at.isoformat() if r.scheduled_at else None,
+                "attempts": f"{r.attempts}/{r.max_attempts}",
+                "note": (r.last_error or "")})
     return {"counts": counts, "items": items, **_page_meta(total, page, page_size)}
 
 
@@ -1222,22 +1288,16 @@ def _cadence_minutes_by_key() -> dict[str, int]:
         "competitor_sync": C.COMPETITOR_SYNC_MIN,
         "normalize_posts": C.NORMALIZE_POSTS_MIN,
         "stats_refresh": C.STATS_REFRESH_MIN,
-        "deal_monitoring": C.DEAL_MONITORING_HOURS * 60,
-        "price_history": C.PRICE_HISTORY_HOURS * 60,
-        "deal_ranking": C.DEAL_RANKING_MIN,
         "link_resolution": C.LINK_RESOLUTION_DEFAULT_MIN,
         "growth_detection": day,
         "competitor_discover": day,
         "competitor_intel": day,
-        "ai_daily_summary": day,
         "weekly_retro": week,
         "weekly_report": week,
         "monthly_report": month,
         "learning": day,
-        "deal_expiry": C.DEAL_EXPIRY_HOURS * 60,
         "queue_processor": C.QUEUE_PROCESSOR_MIN,
         "url_health": C.URL_HEALTH_HOURS * 60,
-        "analytics_aggregation": C.ANALYTICS_AGGREGATION_HOURS * 60,
         "merchant_feed_sync": C.MERCHANT_FEED_SYNC_MIN,
         "notification_engine": C.NOTIFICATION_ENGINE_MIN,
         "org_health": C.ORG_HEALTH_HOURS * 60,

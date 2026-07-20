@@ -218,6 +218,3 @@ def retro_latest(week: str | None = Query(default=None)):
     return ok(service.retro_latest(week=week))
 
 
-@router.get("/deals/scored")
-def deals_scored(limit: int = Query(default=50)):
-    return ok(service.deals_scored(limit=limit))

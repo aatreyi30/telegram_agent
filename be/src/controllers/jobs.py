@@ -120,20 +120,14 @@ class JobManager:
 
         if brief:
             self._checkpoint()
-            self._emit("→ AI briefing…")
+            self._emit("→ daily plan digest…")
             try:
-                from src.ai.briefing import BriefingGenerator
-                from src.ai.client import AIUnavailable
-                try:
-                    self.last_briefing = BriefingGenerator().generate()
-                    from src.config.settings import get_settings
-                    from src.services.ai_outputs import record_ai_output
-                    record_ai_output("daily_briefing", self.last_briefing, get_settings().ai_model)
-                    self._emit("  ✓ briefing ready")
-                except AIUnavailable as e:
-                    self._emit(f"  • briefing skipped: {e}")
-            except Exception as e:  # noqa: BLE001 - briefing is best-effort
-                self._emit(f"  • briefing skipped: {e}")
+                from src.controllers.service import digest as _digest
+                self.last_briefing = (_digest().get("digest") or None)
+                self._emit("  ✓ digest ready" if self.last_briefing
+                           else "  • no plan digest yet")
+            except Exception as e:  # noqa: BLE001 - best-effort surface of the plan digest
+                self._emit(f"  • digest skipped: {e}")
 
     def _run_generate_live(self, count: int = 5, limit: int = 20) -> None:
         from src.services.collection.base import JobRunner
