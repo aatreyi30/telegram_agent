@@ -150,11 +150,11 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
 
     calls = []
 
-    def fake_generate(self, weekly=False, directive=None):
+    def fake_generate(s, week_start=None, directive=None):
         calls.append(directive)
-        return f"weekly digest #{len(calls)}"
+        return {"available": True, "digest": f"weekly digest #{len(calls)}"}
 
-    monkeypatch.setattr("src.ai.briefing.BriefingGenerator.generate", fake_generate)
+    monkeypatch.setattr("src.ai.planner.generate_week_plan", fake_generate)
 
     first = service.weekly_brief(end=week_start.isoformat())
     assert first["available"] is True
@@ -212,7 +212,8 @@ def test_generate_day_plan_injects_operator_directive_into_prompt(monkeypatch):
     captured = {}
 
     class _FakeAIClient:
-        def complete(self, user, *, system_extra="", max_tokens=2400):
+        def complete(self, user, *, system_extra="", max_tokens=2400, effort="medium",
+                     trace_call=None, channel_id=None):
             captured["user"] = user
             return (
                 "Fake digest.\n===PLAN===\n"
@@ -231,8 +232,9 @@ def test_generate_day_plan_injects_operator_directive_into_prompt(monkeypatch):
     user = captured["user"]
     assert "OPERATOR DIRECTIVE" in user
     assert "Push electronics harder today." in user
-    # highest-priority framing from the spec, verbatim
-    assert "honor it, or explicitly state in the narrative why it can't be honored" in user
+    # highest-priority framing (honor-or-explain) + the merchant-availability guard
+    assert "honor it, or state PLAINLY in the narrative why it can't be honored" in user
+    assert "ONLY merchants with deals in" in user
 
 
 def test_generate_day_plan_omits_operator_directive_block_when_absent(monkeypatch):
@@ -243,7 +245,8 @@ def test_generate_day_plan_omits_operator_directive_block_when_absent(monkeypatc
     captured = {}
 
     class _FakeAIClient:
-        def complete(self, user, *, system_extra="", max_tokens=2400):
+        def complete(self, user, *, system_extra="", max_tokens=2400, effort="medium",
+                     trace_call=None, channel_id=None):
             captured["user"] = user
             return (
                 "Fake digest.\n===PLAN===\n"

@@ -126,8 +126,8 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
     from src.db.models_campaign import CampaignPlan, PlanType, CAMPAIGN_VERSION
 
     monkeypatch.setattr(
-        "src.ai.briefing.BriefingGenerator.generate",
-        lambda self, weekly=False: "Weekly digest text.",
+        "src.ai.planner.generate_week_plan",
+        lambda s, week_start=None, directive=None: {"available": True, "digest": "Weekly digest text."},
     )
 
     r = service.weekly_brief(end="2026-07-08")
@@ -166,11 +166,11 @@ def test_weekly_brief_reuses_cached_digest_on_second_call(monkeypatch):
 
     calls = {"n": 0}
 
-    def _fake_generate(self, weekly=False):
+    def _fake_generate(s, week_start=None, directive=None):
         calls["n"] += 1
-        return f"Digest attempt #{calls['n']}"
+        return {"available": True, "digest": f"Digest attempt #{calls['n']}"}
 
-    monkeypatch.setattr("src.ai.briefing.BriefingGenerator.generate", _fake_generate)
+    monkeypatch.setattr("src.ai.planner.generate_week_plan", _fake_generate)
 
     # A week with no pre-existing CampaignPlan row or seeded data (the earlier test
     # in this module already cached 2026-07-06..07-12) — exercises the create-path

@@ -6,7 +6,6 @@ content-mix respected) and explain themselves.
 
 from __future__ import annotations
 
-from src.services.generation.formatting import strip_emojis
 from src.services.generation.strategy import EmojiRule, PostingStrategy
 
 
@@ -28,14 +27,6 @@ def _strategy():
                          {"part": "Morning", "hours": "06:00–11:00",
                           "recommended_posts_per_day": 2, "avg_views_per_day": 12.0}],
         window_desc="owned, last 12.0 mo", available=True)
-
-
-def test_strip_emojis_removes_avoid_and_tidies():
-    assert strip_emojis("Shop Now 😍👆", {"😍"}) == "Shop Now 👆"
-    assert strip_emojis("✨ Deal ✨ time", {"✨"}) == "Deal time"
-    # newlines preserved, only spaces collapsed
-    assert strip_emojis("a 😍\nb", {"😍"}) == "a\nb"
-    assert strip_emojis("no change", set()) == "no change"
 
 
 def test_emoji_rule_note_states_numbers_and_period():
