@@ -24,6 +24,7 @@ import os
 import httpx
 
 from src.config.settings import get_settings
+from src.services.generation.constants import PRICE_FIELD_ALIASES
 from src.services.generation.enrichment import RawDeal
 from src.logger import get_logger
 
@@ -36,7 +37,7 @@ _FIELD_ALIASES = {
     "url": ["original_url", "url", "link", "deal_url", "product_url"],
     "merchant_url": ["merchant_url", "store_url", "source_url"],
     "image": ["image_url", "image", "img", "thumbnail"],
-    "scraped_price": ["discount_price", "scraped_price", "price", "current_price", "sale_price"],
+    "scraped_price": list(PRICE_FIELD_ALIASES),
     "scraped_mrp": ["mrp", "scraped_mrp", "original_price", "list_price"],
     "discount": ["discount_percentage", "discount", "discount_percent", "off"],
     "timestamp": ["ingested_at", "timestamp", "created_at", "posted_at"],
