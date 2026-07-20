@@ -144,33 +144,6 @@ def _run_engine(engine, target) -> int:
     return (job.records_added or 0) + (job.records_updated or 0)
 
 
-def j_deal_ranking() -> dict:
-    """Phase 3.2 -- runs the audience-aware ``DealScoringEngine`` on a schedule
-    and persists one ``DealScore`` history row per active deal (``deal_scores``
-    table). Replaces the earlier no-op stub (ranking used to only run at
-    draft-generation time via ``DealRanker`` -- see ``generation/ranking.py``,
-    which still drives selection at generation time; this job feeds
-    ``/api/deals/scored`` and the planner's ``scored_deals`` context instead).
-    Job key/cadence (``deal_ranking``, ``cadences.DEAL_RANKING_MIN``) kept as-is
-    -- only the body changed."""
-    from src.db.session import session_scope
-    from src.services.intelligence.deal_scoring import DealScoringEngine
-
-    with session_scope() as s:
-        n = DealScoringEngine().score_all_active(s)
-    return {"processed": n, "detail": f"{n} active deals scored (deal_scores history)"}
-
-
-def j_price_history() -> dict:
-    return {"processed": 0, "status": "limited",
-            "detail": "limited: per-product price scraping unavailable for most merchants (blocked/no API)"}
-
-
-def j_deal_monitoring() -> dict:
-    return {"processed": 0, "status": "limited",
-            "detail": "limited: per-deal stock/price checks need per-merchant scraping; URL/expiry via url_health"}
-
-
 def j_growth_detection() -> dict:
     from src.services.intelligence.growth import GrowthEngine
     n = _run_engine(GrowthEngine(), "growth")
@@ -198,24 +171,6 @@ def j_competitor_intel() -> dict:
     return {"processed": n, "detail": "competitor intel refreshed"}
 
 
-def _briefing(weekly=False) -> str:
-    from src.ai.briefing import BriefingGenerator
-    from src.config.settings import get_settings
-    from src.services.ai_outputs import record_ai_output
-
-    txt = BriefingGenerator().generate(weekly=weekly)
-    record_ai_output("weekly_briefing" if weekly else "daily_briefing", txt, get_settings().ai_model)
-    return txt
-
-
-def j_ai_daily_summary() -> dict:
-    try:
-        txt = _briefing(False)
-        return {"processed": 1, "detail": (txt or "").split("\n")[0][:80]}
-    except Exception as e:
-        return {"processed": 0, "status": "limited", "detail": f"limited: AI unavailable ({e})"}
-
-
 def j_weekly_report() -> dict:
     from datetime import timedelta
     from src.services.planning.campaign import CampaignPlanningEngine
@@ -240,10 +195,6 @@ def j_weekly_report() -> dict:
     except Exception as e:
         ai_note = f"AI weekly plan skipped ({e})"
 
-    try:
-        _briefing(True)
-    except Exception:
-        pass
     return {"processed": 1, "detail": f"weekly plan refreshed — {ai_note}"}
 
 
@@ -313,10 +264,6 @@ def _url_health(limit: int) -> dict:
             "detail": f"{ok} ok / {broken} broken of {len(urls[:limit])} checked"}
 
 
-def j_deal_expiry() -> dict:
-    return _url_health(limit=15)
-
-
 def j_url_health() -> dict:
     return _url_health(limit=40)
 
@@ -327,14 +274,6 @@ def j_normalize_posts() -> dict:
     r = _job_runner()
     job = r.run_collector(PostNormalizer(), collection_type=CollectionType.INCREMENTAL, target="normalize")
     return {"processed": job.records_added or 0, "detail": f"{job.records_added} owned + {job.records_updated} competitor normalized"}
-
-
-def j_analytics_aggregation() -> dict:
-    from src.services.analytics import views as vv
-    from src.db.session import session_scope
-    with session_scope() as s:
-        a = vv.compute(s)
-    return {"processed": a.get("total_posts", 0), "detail": f"aggregated {a.get('total_posts',0)} posts"}
 
 
 def j_merchant_feed_sync() -> dict:
@@ -466,9 +405,6 @@ JOBS: list[Job] = [
     Job("competitor_sync", "Competitor Channel Sync", *_every_min(C.COMPETITOR_SYNC_MIN), "high", j_competitor_sync),
     Job("normalize_posts", "Post Normalizer", *_every_min(C.NORMALIZE_POSTS_MIN), "high", j_normalize_posts),
     Job("stats_refresh", "Message Statistics Refresh", *_every_min(C.STATS_REFRESH_MIN), "high", j_stats_refresh),
-    Job("deal_monitoring", "Deal Monitoring", *_every_hr(C.DEAL_MONITORING_HOURS), "critical", j_deal_monitoring),
-    Job("price_history", "Price History Update", *_every_hr(C.PRICE_HISTORY_HOURS), "medium", j_price_history),
-    Job("deal_ranking", "Deal Ranking Engine", *_every_min(C.DEAL_RANKING_MIN), "high", j_deal_ranking),
     # Defer reading runtime settings until SchedulerRegistry.start() to avoid
     # calling get_settings() at module import time (startup/circular import issues).
     # Use the default cadence constant here; the real cadence/trigger will be applied at start().
@@ -476,15 +412,12 @@ JOBS: list[Job] = [
     Job("growth_detection", "Growth Opportunity Detection", *_daily(C.GROWTH_DETECTION_TIME), "medium", j_growth_detection),
     Job("competitor_discover", "Competitor Discovery", *_daily(C.COMPETITOR_DISCOVER_TIME), "medium", j_competitor_discover),
     Job("competitor_intel", "Competitor Intelligence", *_daily(C.COMPETITOR_INTEL_TIME), "medium", j_competitor_intel),
-    Job("ai_daily_summary", "AI Daily Summary", *_daily(C.AI_DAILY_SUMMARY_TIME), "medium", j_ai_daily_summary),
     Job("weekly_retro", "Weekly Retro", *_weekly("mon", C.WEEKLY_RETRO_TIME), "medium", j_weekly_retro),
     Job("weekly_report", "Weekly Report", *_weekly(C.WEEKLY_REPORT_DOW, C.WEEKLY_REPORT_TIME), "medium", j_weekly_report),
     Job("monthly_report", "Monthly Report", *_monthly(C.MONTHLY_REPORT_DAY, C.MONTHLY_REPORT_TIME), "medium", j_monthly_report),
     Job("learning", "AI Learning Dataset Builder", *_daily(C.LEARNING_TIME), "medium", j_learning),
-    Job("deal_expiry", "Deal Expiry Monitor", *_every_hr(C.DEAL_EXPIRY_HOURS), "high", j_deal_expiry),
     Job("queue_processor", "Scheduler Queue Processor", *_every_min(C.QUEUE_PROCESSOR_MIN), "critical", j_queue_processor),
     Job("url_health", "URL Health Check", *_every_hr(C.URL_HEALTH_HOURS), "low", j_url_health),
-    Job("analytics_aggregation", "Analytics Aggregation", *_every_hr(C.ANALYTICS_AGGREGATION_HOURS), "low", j_analytics_aggregation),
     Job("merchant_feed_sync", "Merchant Feed Sync", *_every_min(C.MERCHANT_FEED_SYNC_MIN), "high", j_merchant_feed_sync),
     Job("notification_engine", "Notification Engine", *_every_min(C.NOTIFICATION_ENGINE_MIN), "medium", j_notification_engine),
     Job("outcome_collector", "Outcome Collector", *_every_min(C.OUTCOME_COLLECTOR_MIN), "high", j_outcome_collector),

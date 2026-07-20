@@ -15,7 +15,6 @@ TELEGRAM_SYNC_MIN = 5
 COMPETITOR_SYNC_MIN = 10
 NORMALIZE_POSTS_MIN = 5
 STATS_REFRESH_MIN = 30
-DEAL_RANKING_MIN = 30  # Phase 3.2 -- DealScoringEngine (job body replaces the earlier no-op stub)
 LINK_RESOLUTION_DEFAULT_MIN = 15  # overridden at runtime by settings.link_resolve_interval_min
 QUEUE_PROCESSOR_MIN = 1
 MERCHANT_FEED_SYNC_MIN = 30
@@ -23,11 +22,7 @@ NOTIFICATION_ENGINE_MIN = 5
 OUTCOME_COLLECTOR_MIN = 15  # Phase 2.3 -- advances post_outcomes through 1h/6h/24h
 
 # --- interval jobs (hours) ---
-DEAL_MONITORING_HOURS = 2
-PRICE_HISTORY_HOURS = 6
-DEAL_EXPIRY_HOURS = 1
 URL_HEALTH_HOURS = 12
-ANALYTICS_AGGREGATION_HOURS = 1
 ORG_HEALTH_HOURS = 1
 
 # --- daily cron jobs — (hour, minute) in IST ---

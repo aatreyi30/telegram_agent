@@ -10,9 +10,8 @@ any other `src.ai.*` module — the dependency only ever runs the other way
 
 from __future__ import annotations
 
-from src.ai.prompts.briefing import DAILY_INSTRUCTIONS, WEEKLY_INSTRUCTIONS
 from src.ai.prompts.coach import COACH_SYSTEM
-from src.ai.prompts.copywriter import COPYWRITER_INSTRUCTIONS
+from src.ai.prompts.copywriter import COPYWRITER_INSTRUCTIONS, LOOT_INSTRUCTIONS
 from src.ai.prompts.discovery import VERIFY_CANDIDATE_SYSTEM, verify_candidate_input
 from src.ai.prompts.grounding import GROUNDING_SYSTEM
 from src.ai.prompts.insight_writer import NARRATE_SYSTEM
@@ -24,9 +23,8 @@ __all__ = [
     "WEEK_PLAN_INSTRUCTIONS",
     "NARRATE_SYSTEM",
     "COACH_SYSTEM",
-    "DAILY_INSTRUCTIONS",
-    "WEEKLY_INSTRUCTIONS",
     "COPYWRITER_INSTRUCTIONS",
+    "LOOT_INSTRUCTIONS",
     "VERIFY_CANDIDATE_SYSTEM",
     "verify_candidate_input",
 ]
