@@ -262,36 +262,20 @@ def competitor_profiles(s: Session) -> list[dict]:
     } for p in profiles]
 
 
-def top_scored_deals(s: Session, limit: int = 15) -> list[dict]:
-    """Latest ``DealScore`` per deal (Phase 3.3), joined to ``EnrichedDeal``,
-    ordered by score desc -- feeds the planner's ``scored_deals`` context and
-    ``/api/deals/scored``. SQLite-safe latest-per-deal via ``row_number()``
-    (no ``DISTINCT ON``), mirroring 0.1's ``latest_profiles`` pattern.
-    ``components`` is included verbatim for explainability."""
-    from sqlalchemy.orm import aliased
-    from src.db.models_deal_score import DealScore
+def available_deals(s: Session, limit: int = 15) -> list[dict]:
+    """Active/valid deals from the live feed (EnrichedDeal) — the pool the planner
+    themes slots around. Ordered by discount desc. No scoring."""
     from src.db.models_generation import DealValidity, EnrichedDeal
-
-    rn = func.row_number().over(
-        partition_by=DealScore.deal_id, order_by=DealScore.scored_at.desc()
-    ).label("rn")
-    sub = select(DealScore, rn).subquery()
-    DS = aliased(DealScore, sub)
-    rows = s.execute(
-        select(DS, EnrichedDeal)
-        .join(EnrichedDeal, EnrichedDeal.id == DS.deal_id)
-        .where(sub.c.rn == 1, EnrichedDeal.deal_validity != DealValidity.INVALID)
-        .order_by(DS.score.desc())
+    rows = s.scalars(
+        select(EnrichedDeal)
+        .where(EnrichedDeal.deal_validity != DealValidity.INVALID)
+        .order_by(EnrichedDeal.discount_percent.is_(None),
+                  EnrichedDeal.discount_percent.desc())
         .limit(limit)
     ).all()
-    return [{
-        "deal_id": deal.deal_id, "title": deal.title, "merchant_key": deal.merchant_key,
-        "category": deal.category,
-        "current_price": deal.current_price, "discount_percent": deal.discount_percent,
-        "url": deal.clean_url or deal.url,
-        "score": ds.score, "components": ds.components,
-        "scored_at": ds.scored_at.isoformat() if ds.scored_at else None,
-    } for ds, deal in rows]
+    return [{"deal_id": d.deal_id, "title": d.title, "merchant_key": d.merchant_key,
+             "category": d.category, "current_price": d.current_price,
+             "discount_percent": d.discount_percent, "url": d.clean_url or d.url} for d in rows]
 
 
 def full_briefing_context(s: Session, weekly: bool = False) -> dict:
@@ -303,6 +287,7 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
         "post_type_performance": post_type_performance(s),
         "merchant_opportunities": merchant_opportunities(s),
         "channel_style": channel_style(s),
+        "competitor_benchmark": competitor_benchmark(s),
     }
     if weekly:
         from datetime import date as _date
@@ -318,6 +303,8 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
             follower_deltas_by_day(s, ch.id if ch else None, week_start, end_day)
             if week_start and end_day else {}
         )
+        # 30-day window: a week is too few days to split for a style→follower signal.
+        out["style_follower_correlation"] = style_follower_correlation(s, days=30, end_day=end_day)
         out["retro"] = latest_retro(s)
     return out
 
@@ -552,3 +539,187 @@ def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_da
                                        "left": r.subs_left or 0,
                                        "net": r.subs_net or 0}
             for r in rows}
+
+
+# Min paired (posts + follower delta) days before the style→follower correlation is
+# offered as a signal at all. Deliberately low — this is a small, day-level, honest
+# correlation; it is never treated as causal (see the prompt guardrails).
+_MIN_CORRELATION_DAYS = 4
+
+
+def daily_style_by_day(s: Session, days: int = 14, end_day=None) -> dict:
+    """Per-IST-day style features of OWNED posts over the last ``days`` (ending at
+    ``end_day`` or the latest owned day): posts, emoji_density (avg emojis/post),
+    avg_caption_len, loot_share, coupon_rate, cta_rate, media_rate, top_hour_ist.
+
+    Same window/day-bucketing as ``posting_trajectory``, and the SAME per-post feature
+    source the Channel Learning Engine uses (OWNED ``NormalizedPost`` joined to ``Post``)
+    — this is the day-resolution view of the channel's own style, so the planner can line
+    it up against ``follower_deltas_by_day``. Read-only; no LLM, no persistence."""
+    from collections import Counter, defaultdict
+    from datetime import timedelta
+    from statistics import fmean
+
+    from src.db.models import Post
+    from src.db.models_normalization import NormalizedPost, SourceType
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.daily_report import _owned_channel
+    from src.services.analytics.periods import ist_day_bounds_utc, to_ist
+
+    if end_day is None:
+        end_day = latest_owned_date(s)
+    if end_day is None:
+        return {"days": []}
+
+    first_day = end_day - timedelta(days=days - 1)
+    start_utc, _ = ist_day_bounds_utc(first_day)
+    _, end_utc = ist_day_bounds_utc(end_day)
+    ch = _owned_channel(s)
+    q = (
+        select(Post.posted_at, func.length(Post.text), Post.has_media,
+               NormalizedPost.emojis, NormalizedPost.has_coupon,
+               NormalizedPost.is_multi_deal, NormalizedPost.cta_texts)
+        .select_from(Post)
+        .join(NormalizedPost, (NormalizedPost.source_id == Post.id)
+              & (NormalizedPost.source_type == SourceType.OWNED))
+        .where(Post.posted_at >= start_utc, Post.posted_at < end_utc)
+    )
+    if ch is not None:
+        q = q.where(Post.channel_id == ch.id)
+
+    buckets: dict = defaultdict(list)
+    for posted_at, tlen, media, emojis, coupon, multi, cta in s.execute(q).all():
+        if posted_at is None:
+            continue
+        ist = to_ist(posted_at)
+        buckets[ist.date()].append({
+            "hour": ist.hour, "caption_len": tlen or 0, "media": bool(media),
+            "emojis": len(emojis or []), "coupon": bool(coupon),
+            "multi": bool(multi), "cta": bool(cta),
+        })
+
+    out = []
+    for i in range(days):
+        d = first_day + timedelta(days=i)
+        rows = buckets.get(d, [])
+        n = len(rows)
+        if not n:
+            out.append({"date": d.isoformat(), "posts": 0})
+            continue
+        top_hour = Counter(r["hour"] for r in rows).most_common(1)[0][0]
+        out.append({
+            "date": d.isoformat(), "posts": n,
+            "emoji_density": round(fmean(r["emojis"] for r in rows), 2),
+            "avg_caption_len": round(fmean(r["caption_len"] for r in rows), 1),
+            "loot_share": round(sum(r["multi"] for r in rows) / n, 2),
+            "coupon_rate": round(sum(r["coupon"] for r in rows) / n, 2),
+            "cta_rate": round(sum(r["cta"] for r in rows) / n, 2),
+            "media_rate": round(sum(r["media"] for r in rows) / n, 2),
+            "top_hour_ist": top_hour,
+        })
+    return {"days": out}
+
+
+def _style_follower_split(paired: list[dict], feature: str) -> dict | None:
+    """Split ``paired`` days at the median of ``feature`` and compare each half's mean
+    net follower change. Returns None unless both halves have >= 2 days (small-sample
+    honesty — a one-day 'group' is noise, not a signal)."""
+    from statistics import fmean, median
+
+    vals = [r[feature] for r in paired if r.get(feature) is not None]
+    if len(vals) < 4:
+        return None
+    med = median(vals)
+    high = [r["followers_net"] for r in paired if (r.get(feature) or 0) > med]
+    low = [r["followers_net"] for r in paired if (r.get(feature) or 0) <= med]
+    if len(high) < 2 or len(low) < 2:
+        return None
+    return {"feature": feature, "split_at": round(med, 2),
+            "high_days_avg_net": round(fmean(high), 1), "n_high_days": len(high),
+            "low_days_avg_net": round(fmean(low), 1), "n_low_days": len(low)}
+
+
+def style_follower_correlation(s: Session, days: int = 14, end_day=None) -> dict:
+    """Line up each day's OWNED post-style features (``daily_style_by_day``) with that
+    day's net follower change (``follower_deltas_by_day``), plus a few median-split
+    comparisons (loot-heavy vs not, media-heavy vs not, etc.).
+
+    This is CORRELATIONAL and day-level by construction: Telegram attributes joins to a
+    day, never to a single post, so this shows 'days styled like X averaged N net joins',
+    never 'this post caused a join'. Sample sizes are returned so the reader can weigh it;
+    ``available`` is False until there are >= ``_MIN_CORRELATION_DAYS`` paired days."""
+    from datetime import date as _date
+
+    from src.services.analytics.daily_report import _owned_channel
+
+    style_days = daily_style_by_day(s, days=days, end_day=end_day)["days"]
+    ch = _owned_channel(s)
+    if not style_days or ch is None:
+        return {"available": False, "reason": "no owned posting history / channel"}
+
+    first = _date.fromisoformat(style_days[0]["date"])
+    last = _date.fromisoformat(style_days[-1]["date"])
+    deltas = follower_deltas_by_day(s, ch.id, first, last)
+
+    rows = []
+    for d in style_days:
+        fd = deltas.get(d["date"]) or {}
+        rows.append({**d,
+                     "followers_joined": fd.get("joined"),
+                     "followers_left": fd.get("left"),
+                     "followers_net": fd.get("net")})
+
+    paired = [r for r in rows if r.get("posts") and r.get("followers_net") is not None]
+    comparisons = [c for c in (_style_follower_split(paired, f)
+                   for f in ("loot_share", "media_rate", "coupon_rate",
+                             "cta_rate", "emoji_density"))
+                   if c is not None]
+    return {"available": len(paired) >= _MIN_CORRELATION_DAYS, "n_days": len(paired),
+            "note": "day-level correlation, not causal; joins are per-day, not per-post",
+            "days": rows, "comparisons": comparisons}
+
+
+def competitor_benchmark(s: Session) -> dict:
+    """Compact us-vs-competitors comparison for the planner: aggregate competitor style
+    (posts/day, avg views, cta/coupon/multi-deal/media rates), our own style, and a
+    per-merchant share comparison — all derived from the already-collected competitor
+    profiles + ``merchant_mix``. Summarized (not full profile dumps) to keep prompt cost
+    sane, and shaped as flat dicts so cited numbers stay fact-checkable."""
+    from statistics import fmean
+
+    profs = competitor_profiles(s)
+    if not profs:
+        return {"available": False, "reason": "no competitor profiles yet"}
+
+    def _avg(key: str):
+        vals = [p[key] for p in profs if p.get(key) is not None]
+        return round(fmean(vals), 3) if vals else None
+
+    ours = channel_style(s)
+    mm = merchant_mix(s)
+    owned = next((c for c in mm.get("channels", []) if c.get("is_owned")), None)
+    comp_channels = [c for c in mm.get("channels", []) if not c.get("is_owned")]
+    merchant_rows = []
+    for m in (mm.get("merchants") or [])[:8]:
+        comp_shares = [c["shares"].get(m, 0.0) for c in comp_channels]
+        merchant_rows.append({
+            "merchant": m,
+            "our_share": round(owned["shares"].get(m, 0.0), 3) if owned else None,
+            "competitor_avg_share": round(fmean(comp_shares), 3) if comp_shares else None,
+        })
+
+    return {
+        "available": True,
+        "n_competitors": len(profs),
+        "competitors_avg": {
+            "posts_per_day": _avg("posts_per_day"), "avg_views": _avg("avg_views"),
+            "cta_rate": _avg("cta_rate"), "coupon_rate": _avg("coupon_rate"),
+            "multi_deal_rate": _avg("multi_deal_rate"), "media_rate": _avg("media_rate"),
+        },
+        "ours": {
+            "posts_per_day": ours.get("posts_per_day"), "cta_rate": ours.get("cta_rate"),
+            "coupon_rate": ours.get("coupon_rate"), "multi_deal_rate": ours.get("multi_deal_rate"),
+            "media_rate": ours.get("media_rate"),
+        } if ours.get("available") else {"available": False},
+        "merchant_share_vs_competitors": merchant_rows,
+    }

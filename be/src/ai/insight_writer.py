@@ -35,7 +35,8 @@ def narrate(kind: str, observation: str, evidence: dict, fallback: str) -> str:
             return fallback
         user = (f"CONTEXT: {kind}\nOBSERVATION: {observation}\n\n"
                 f"EVIDENCE:\n{to_json(evidence)}")
-        text = ai.complete(user, system_extra=_NARRATE_SYSTEM, max_tokens=120, effort="low")
+        text = ai.complete(user, system_extra=_NARRATE_SYSTEM, max_tokens=120, effort="low",
+                           trace_call="narrate")
         text = text.strip().strip('"').strip()
         return text or fallback
     except AIUnavailable:

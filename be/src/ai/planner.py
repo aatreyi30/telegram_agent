@@ -107,18 +107,36 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     inputs = inputs or {}
     if yesterday_plan is _UNSET:
         yesterday_plan = _yesterday_ai_plan(s, prev)
-    recommended_posts = inputs.get("recommended_posts", traj["recent_cadence"])
-    # Phase 3.3 -- top-N audience-scored deals (limit = 3x today's slots), with
-    # `components` included so the AI can cite/explain a specific deal's score.
-    scored_deals = ctx.top_scored_deals(s, limit=max(3 * (recommended_posts or 0), 9))
+    # Cold-start floor: an empty recent window (e.g. a fresh channel whose only posts
+    # are TODAY, which the yesterday-ending trajectory excludes) falls back to the
+    # lifetime average, so the AI doesn't ground the plan on a phantom 0 cadence and
+    # emit zero slots. Truly zero only when there is no posting history at all.
+    recent_cadence = traj["recent_cadence"] or round(traj["lifetime_baseline"] or 0)
+    recommended_posts = inputs.get("recommended_posts", recent_cadence)
+    # Available deals from the live feed (limit = 3x today's slots) — the pool the
+    # plan themes slots around. No scoring; ordered by discount.
+    available_deals = ctx.available_deals(s, limit=max(3 * (recommended_posts or 0), 9))
     week_bp = _current_week_plan(s)
     week_direction = ({k: week_bp.get(k) for k in ("direction", "loot_deal_ratio", "merchant_priorities")}
                       if week_bp else None)
     # The real vocabulary the live deal feed uses — the plan's slot `theme`/`merchant`
     # must come from these so the just-in-time filler can actually match an item to
     # each slot (otherwise it silently falls back to any fresh deal).
-    available_categories = sorted({d["category"] for d in scored_deals if d.get("category")})
-    available_merchants = sorted({d["merchant_key"] for d in scored_deals if d.get("merchant_key")})
+    available_categories = sorted({d["category"] for d in available_deals if d.get("category")})
+    available_merchants = sorted({d["merchant_key"] for d in available_deals if d.get("merchant_key")})
+    # Per-day follower deltas lined up with the trajectory days, so the planner sees the
+    # follower curve next to the posting curve (not just yesterday's net).
+    from datetime import date as _date
+    from src.services.analytics.daily_report import _owned_channel
+    owned_ch = _owned_channel(s)
+    traj_days = traj["days"]
+    fdeltas = (ctx.follower_deltas_by_day(
+        s, owned_ch.id, _date.fromisoformat(traj_days[0]["date"]),
+        _date.fromisoformat(traj_days[-1]["date"]))
+        if traj_days and owned_ch else {})
+    follower_trajectory = [{"date": d["date"], **(fdeltas.get(d["date"])
+                            or {"joined": None, "left": None, "net": None})}
+                           for d in traj_days]
     return {
         "today": day.isoformat(),
         "day_of_week": day.strftime("%A"),
@@ -129,16 +147,20 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
         "yesterday": yesterday,
         "yesterday_digest": yesterday_plan.ai_digest if yesterday_plan else None,
         "trajectory": traj["days"],
-        "recent_cadence": traj["recent_cadence"],
+        "recent_cadence": recent_cadence,
         "lifetime_baseline": traj["lifetime_baseline"],
         "recommended_posts": recommended_posts,
         "posting_windows": inputs.get("posting_windows", []),
         "deal_type_allocation": inputs.get("deal_type_allocation", []),
         "merchant_mix": inputs.get("merchant_allocation", []),
         "post_type_performance": ctx.post_type_performance(s),
+        "channel_style": ctx.channel_style(s),
+        "follower_trajectory": follower_trajectory,
+        "style_follower_correlation": ctx.style_follower_correlation(s, days=14, end_day=prev),
+        "competitor_benchmark": ctx.competitor_benchmark(s),
         "upcoming_event": inputs.get("upcoming_event"),
         "retro": ctx.latest_retro(s),
-        "scored_deals": scored_deals,
+        "available_deals": available_deals,
         "operator_directive": directive,
     }
 
@@ -178,10 +200,10 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         # the retro's numbers (metrics.prediction.*, metrics.plan_adherence.*, ...)
         # need to sit exactly one level below what's in `facts` to be verifiable.
         facts.append(retro["metrics"])
-    # Phase 3.3 -- each scored deal is its own top-level fact item (not nested
-    # under a wrapper key), same one-level-of-nesting reasoning as the retro
-    # above, so a cited `score` or `components.*` value is verifiable.
-    facts.extend(plan_ctx.get("scored_deals") or [])
+    # Each available deal is its own top-level fact item (not nested under a
+    # wrapper key), same one-level-of-nesting reasoning as the retro above, so a
+    # cited price/discount value is verifiable.
+    facts.extend(plan_ctx.get("available_deals") or [])
     # The prompt SHOWS the AI these grounded inputs and instructs it to cite them
     # (merchant share/avg-views, per-window averages, deal-type + post-type stats).
     # They must be in the factcheck pool too — otherwise legitimately-cited numbers
@@ -190,8 +212,21 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     # list of dicts; check_cited_numbers flattens one level, exposing their numeric
     # fields. This corrects an omission in the guard — it does not weaken it.
     for _key in ("merchant_mix", "posting_windows", "deal_type_allocation",
-                 "post_type_performance"):
+                 "post_type_performance", "follower_trajectory"):
         facts.extend(plan_ctx.get(_key) or [])
+    # New grounded signals (style + follower correlation + competitor benchmark): their
+    # numbers must be in the fact-check pool too, same reasoning as the block above.
+    # Each is a flat dict or a list of flat dicts, so check_cited_numbers exposes them.
+    if plan_ctx.get("channel_style"):
+        facts.append(plan_ctx["channel_style"])
+    sfc = plan_ctx.get("style_follower_correlation") or {}
+    facts.extend(sfc.get("days") or [])
+    facts.extend(sfc.get("comparisons") or [])
+    cb = plan_ctx.get("competitor_benchmark") or {}
+    if cb.get("available"):
+        facts.append(cb.get("competitors_avg") or {})
+        facts.append(cb.get("ours") or {})
+        facts.extend(cb.get("merchant_share_vs_competitors") or [])
     ai = AIClient()
     recon_note = ""
     if yesterday_plan is not None and yesterday_plan.reconciliation:
@@ -199,13 +234,21 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
                       "correlational, not causal):\n" + to_json(yesterday_plan.reconciliation))
     directive_note = ""
     if directive:
+        avail = plan_ctx.get("available_merchants") or []
         directive_note = (
-            "\n\nOPERATOR DIRECTIVE (highest priority — honor it, or explicitly state in "
-            "the narrative why it can't be honored given the data):\n" + directive
+            "\n\nOPERATOR DIRECTIVE (highest priority — honor it, or state PLAINLY in the "
+            "narrative why it can't be honored). CRITICAL: the ONLY merchants with deals in "
+            f"today's feed are {avail} — a slot's merchant MUST be one of these. If the "
+            "directive asks to diversify merchants or use a merchant not in that list, you "
+            "CANNOT — say so explicitly and name what IS available (e.g. \"today's feed only "
+            "has ajio deals, so every slot stays ajio; I can't add other merchants until the "
+            "feed carries them\"). Never silently keep the same merchants without explaining "
+            "this constraint.\n" + directive
         )
     try:
         user = f"DATA:\n{to_json(plan_ctx)}{recon_note}{directive_note}"
-        raw = ai.complete(user, system_extra=_PLAN_INSTRUCTIONS, max_tokens=3200)
+        raw = ai.complete(user, system_extra=_PLAN_INSTRUCTIONS, max_tokens=3200,
+                          trace_call="day_plan")
     except AIUnavailable as e:
         return {"available": False, "reason": str(e), "plan": None, "digest": "", "facts": facts}
     digest, plan_text = _split_digest_and_plan(raw)
@@ -232,12 +275,14 @@ def _parse_week_plan(raw: str) -> dict:
     return data
 
 
-def generate_week_plan(s: Session, week_start=None) -> dict:
+def generate_week_plan(s: Session, week_start=None, directive: str | None = None) -> dict:
     """Grounded AI WEEKLY plan. Analyses last week's evidence — which post type (loot vs
     single) and which merchants drew traction — and sets THIS week's direction: the
     loot:deal ratio to aim for, merchant priorities, and a per-day theme_focus. The
+    digest doubles as the operator's weekly retro (win/concern/what-to-change). The
     daily planner reads this week's plan (``this_week_theme``) and aligns its slots to
-    it. Returns the raw digest + parsed plan + the facts it was grounded on."""
+    it. ``directive`` is an optional Steer & Regenerate operator instruction injected as
+    a highest-priority block. Returns the raw digest + parsed plan + grounding facts."""
     from datetime import timedelta
     from src.ai.context import full_briefing_context
     from src.services.analytics.periods import ist_today
@@ -247,18 +292,37 @@ def generate_week_plan(s: Session, week_start=None) -> dict:
         week_start = today - timedelta(days=today.weekday())  # IST Monday
 
     facts_ctx = full_briefing_context(s, weekly=True)
+    # Flatten the new grounded signals into the fact-check pool as their own items so
+    # cited style/follower/competitor numbers verify (nested lists inside facts_ctx are
+    # otherwise invisible to check_cited_numbers, which flattens only one level).
+    facts = [facts_ctx]
+    sfc = facts_ctx.get("style_follower_correlation") or {}
+    facts.extend(sfc.get("days") or [])
+    facts.extend(sfc.get("comparisons") or [])
+    cb = facts_ctx.get("competitor_benchmark") or {}
+    if cb.get("available"):
+        facts.append(cb.get("competitors_avg") or {})
+        facts.append(cb.get("ours") or {})
+        facts.extend(cb.get("merchant_share_vs_competitors") or [])
     ai = AIClient()
+    directive_note = ""
+    if directive:
+        directive_note = (
+            "\n\nOPERATOR DIRECTIVE (highest priority — honor it in the direction/digest, "
+            "or state plainly why the DATA can't support it; never invent a fact):\n" + directive
+        )
     try:
-        user = f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n{to_json(facts_ctx)}"
-        raw = ai.complete(user, system_extra=_WEEK_PLAN_INSTRUCTIONS, max_tokens=2000)
+        user = f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n{to_json(facts_ctx)}{directive_note}"
+        raw = ai.complete(user, system_extra=_WEEK_PLAN_INSTRUCTIONS, max_tokens=2000,
+                          trace_call="week_plan")
     except AIUnavailable as e:
         return {"available": False, "reason": str(e), "plan": None, "digest": "",
-                "facts": [facts_ctx]}
+                "facts": facts}
     digest, plan_text = _split_digest_and_plan(raw)
     try:
         plan = _parse_week_plan(plan_text)
     except ValueError:
         return {"available": False, "reason": "unparseable weekly plan", "plan": None,
-                "digest": digest, "facts": [facts_ctx]}
+                "digest": digest, "facts": facts}
     plan.setdefault("week_start", week_start.isoformat())
-    return {"available": True, "digest": digest, "plan": plan, "facts": [facts_ctx]}
+    return {"available": True, "digest": digest, "plan": plan, "facts": facts}
