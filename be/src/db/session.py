@@ -77,8 +77,8 @@ def init_db() -> None:
     from src.db import models_automation  # noqa: F401  (Phase 11 tables)
     from src.db import models_scheduler  # noqa: F401  (scheduler run logs)
     from src.db import models_ai_output  # noqa: F401  (Phase 0.2: persisted AI outputs)
+    from src.db import models_ai_trace  # noqa: F401  (per-call AI trace ledger)
     from src.db import models_prediction  # noqa: F401  (Phase 2: predict/outcome/retro tables)
-    from src.db import models_deal_score  # noqa: F401  (Phase 3.1: deal scoring history)
 
     Base.metadata.create_all(get_engine())
     # create_all does not ALTER existing tables; add columns introduced after first run.

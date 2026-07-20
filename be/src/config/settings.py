@@ -45,6 +45,22 @@ def _get_float(name: str, default: float) -> float:
         return default
 
 
+def _ai_provider_kwargs() -> dict:
+    """Resolve the AI provider + its default model. Provider defaults to openai when an
+    OpenAI key is set (else groq); AI_MODEL overrides the per-provider default."""
+    openai_key = _get("OPENAI_API_KEY")
+    provider = (_get("AI_PROVIDER") or ("openai" if openai_key else "groq")).lower()
+    default_model = "gpt-4o-mini-2024-07-18" if provider == "openai" else "llama-3.3-70b-versatile"
+    return {
+        "ai_provider": provider,
+        "groq_api_key": _get("GROQ_API_KEY"),
+        "openai_api_key": openai_key,
+        "anthropic_api_key": _get("ANTHROPIC_API_KEY"),
+        "ai_model": _get("AI_MODEL", default_model),
+        "ai_reasoning_effort": _get("AI_REASONING_EFFORT", "medium"),
+    }
+
+
 @dataclass
 class Settings:
     # --- Runtime / server (template contract) ---
@@ -64,6 +80,11 @@ class Settings:
     telegram_session_name: str = "tg_owned_session"
     telegram_phone: str | None = None
     owned_channels_raw: str | None = None
+    # The ONLY channel auto-send will ever post to. Deliberately separate from
+    # OWNED_CHANNELS (which means "the channels we collect + learn from"), so the
+    # agent can keep analysing the real channel while posting to a test one.
+    # Unset => auto-send stays held for every channel (the safe default).
+    publish_channel_raw: str | None = None
 
     # --- Competitor monitoring (t.me/s) ---
     competitor_channels_raw: str | None = None
@@ -116,10 +137,16 @@ class Settings:
     link_resolve_concurrency: int = 200
     metric_snapshot_offsets_raw: str = "1,4,24"
 
-    # --- AI layer (Groq — OpenAI-compatible) ---
+    # --- AI layer (provider-selectable: openai reasoning | groq) ---
+    # AI_PROVIDER picks the client; unset => openai when OPENAI_API_KEY is present, else groq.
+    # AI_MODEL overrides the per-provider default. AI_REASONING_EFFORT is the default
+    # thinking budget for reasoning models (minimal|low|medium|high) — no-op on groq.
+    ai_provider: str = "groq"
     groq_api_key: str | None = None
+    openai_api_key: str | None = None
     anthropic_api_key: str | None = None  # optional alternative provider
     ai_model: str = "llama-3.3-70b-versatile"
+    ai_reasoning_effort: str = "medium"
 
     # --- Publishing (Phase 0.3) ---
     # a draft older than this (or a deal that fails revalidation) is BLOCKED, not sent.
@@ -147,6 +174,7 @@ class Settings:
             or _get("TELETHON_SESSION", "tg_owned_session"),
             telegram_phone=_get("TELEGRAM_PHONE") or _get("PHONE_NUMBER"),
             owned_channels_raw=_get("OWNED_CHANNELS"),
+            publish_channel_raw=_get("PUBLISH_CHANNEL"),
             competitor_channels_raw=_get("COMPETITOR_CHANNELS"),
             tme_request_delay_seconds=_get_float("TME_REQUEST_DELAY_SECONDS", 2.0),
             tme_user_agent=_get("TME_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
@@ -171,9 +199,7 @@ class Settings:
             admin_password=_get("ADMIN_PASSWORD"),
             api_secret_key=_get("API_SECRET_KEY"),
             grabcash_api_base=_get("GRABCASH_API_BASE"),
-            groq_api_key=_get("GROQ_API_KEY"),
-            anthropic_api_key=_get("ANTHROPIC_API_KEY"),
-            ai_model=_get("AI_MODEL", "llama-3.3-70b-versatile"),
+            **_ai_provider_kwargs(),
             prepublish_max_staleness_min=_get_int("PREPUBLISH_MAX_STALENESS_MIN", 30),
             owned_incremental_interval_min=_get_int("OWNED_INCREMENTAL_INTERVAL_MIN", 15),
             owned_analytics_interval_min=_get_int("OWNED_ANALYTICS_INTERVAL_MIN", 60),
@@ -191,6 +217,23 @@ class Settings:
     @property
     def owned_channels(self) -> list[str]:
         return _split_csv(self.owned_channels_raw)
+
+    @property
+    def publish_channel(self) -> str | None:
+        """The sole auto-send target, or None when unset.
+
+        None means "never auto-send" — the Publisher holds every post. This is the
+        default and the reason a misconfigured deploy cannot post anywhere.
+
+        A public channel is '@handle'. A PRIVATE channel has no username and is
+        referenced by its numeric id (e.g. -1001234567890), which is returned bare —
+        '@'-prefixing an id makes it unresolvable."""
+        raw = (self.publish_channel_raw or "").strip()
+        if not raw:
+            return None
+        if raw.lstrip("-").isdigit():
+            return raw
+        return f"@{raw.lstrip('@')}"
 
     @property
     def competitor_channels(self) -> list[str]:
@@ -222,7 +265,7 @@ class Settings:
 
     @property
     def ai_available(self) -> bool:
-        return bool(self.groq_api_key or self.anthropic_api_key)
+        return bool(self.openai_api_key or self.groq_api_key or self.anthropic_api_key)
 
     @property
     def affiliate_provider_name(self) -> str:

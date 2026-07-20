@@ -34,8 +34,6 @@ def _org_settings(s) -> dict:
         # j_competitor_discover from auto-adding new ones. Defaults True so a
         # fresh install keeps discovering, matching today's behaviour.
         "auto_discover_competitors": True,
-        "owned_channels": s.owned_channels,
-        "competitor_channels": s.competitor_channels,
         # Editable post-text templates (viewable/editable in Settings). Seeded with
         # the exact previous hardcoded strings so output is unchanged until edited.
         # Because startup merge is DB-wins at the top level, an org that predates
