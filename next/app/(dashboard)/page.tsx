@@ -4,15 +4,18 @@ import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CheckmarkCircle01Icon, Cancel01Icon, ExternalLinkIcon, Note01Icon, Sent02Icon,
-  UserGroupIcon, BarChartIcon, Target02Icon, SparklesIcon, ChevronRightIcon,
+  UserGroupIcon, BarChartIcon, Target02Icon, ChevronRightIcon,
 } from "@hugeicons/core-free-icons";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { StatCard } from "@/components/StatCard";
+import { PageHeader } from "@/components/PageHeader";
+import { StatusCounts } from "@/components/StatusPill";
 import { Async } from "@/components/Async";
 import { TimelineChart } from "@/components/charts";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useOverview, useGrowth, useInsights, useDrafts, useQueue } from "@/queries/queries";
+import { titleCase, istDate } from "@/lib/format";
 import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint } from "@/types/api";
 
 function fmtNum(n: number | null | undefined): string {
@@ -70,9 +73,7 @@ function ChannelHeader({ channel }: { channel: OverviewResponse["channel"] }) {
 function QueueStats({ queue_counts }: { queue_counts: Record<string, number> }) {
   return (
     <div className="flex flex-wrap gap-1.5">
-      {Object.entries(queue_counts).map(([status, count]) => (
-        <Badge key={status} variant="secondary">{status}: {count}</Badge>
-      ))}
+      <StatusCounts counts={queue_counts} />
     </div>
   );
 }
@@ -85,8 +86,7 @@ function PriorityCard({ rec }: { rec: GrowthRecommendation }) {
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <Badge variant="outline" className="text-xs">{rec.category}</Badge>
-          {rec.priority != null && <span className="text-xs text-muted-foreground">P{rec.priority}</span>}
+          <Badge variant="outline" className="text-xs">{titleCase(rec.category)}</Badge>
         </div>
         <p className="mt-1 text-sm font-medium leading-snug">{rec.recommendation}</p>
         <p className="mt-0.5 text-xs text-muted-foreground leading-relaxed">{rec.reasoning}</p>
@@ -101,21 +101,15 @@ export default function OverviewPage() {
   const insights = useInsights();
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Overview</h1>
-        <p className="flex items-center gap-1.5 text-sm text-muted-foreground mt-1.5">
-          <HugeiconsIcon icon={SparklesIcon} className="h-3.5 w-3.5 shrink-0" />
-          Dashboard overview of your channel performance and activities.
-        </p>
-      </div>
+    <div className="space-y-6">
+      <PageHeader title="Overview" subtitle="Your channel at a glance — growth, what to do next, and what's in the pipeline." />
 
       <Async q={overview} rows={2}>
         {(data: OverviewResponse) => (
           <>
             <ChannelHeader channel={data.channel} />
 
-            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <StatCard label="Posts collected" value={data.posts.toLocaleString()} icon={<HugeiconsIcon icon={Note01Icon} className="h-4 w-4" />} />
               <StatCard label="Competitors tracked" value={data.competitors.toLocaleString()} icon={<HugeiconsIcon icon={UserGroupIcon} className="h-4 w-4" />} />
               <StatCard label="Drafts ready" value={data.drafts.toLocaleString()} icon={<HugeiconsIcon icon={Sent02Icon} className="h-4 w-4" />} />
@@ -139,8 +133,8 @@ export default function OverviewPage() {
                 <Async q={growth} rows={4}>
                   {(g) => {
                     if (!g.available) return <p className="text-sm text-muted-foreground">{g.reason}</p>;
-                    const chartData = g.daily.map((d) => ({ label: d.date, subs_end: d.subs_end ?? 0 }));
-                    const churnData = g.daily.map((d) => ({ label: d.date, joined: d.joined, left: d.left }));
+                    const chartData = g.daily.map((d) => ({ label: istDate(d.date), subs_end: d.subs_end ?? 0 }));
+                    const churnData = g.daily.map((d) => ({ label: istDate(d.date), joined: d.joined, left: d.left }));
                     const subsTrend = periodTrend(g.daily, "subs_end", "avg");
                     const joinedTrend = periodTrend(g.daily, "joined", "sum");
                     const netTrend = periodTrend(g.daily, "net", "sum");
@@ -171,7 +165,7 @@ export default function OverviewPage() {
               </CardContent>
             </Card>
 
-            <div className="grid gap-6 lg:grid-cols-4">
+            <div className="grid gap-4 lg:grid-cols-4">
               <Card className="col-span-3 rounded-xl">
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
@@ -226,8 +220,8 @@ function DraftsQueueCard() {
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium">Drafts</span>
               <Link href="/drafts" className="flex items-center gap-2 text-2xl font-bold tabular-nums hover:text-primary transition-colors">
-                {d.items.length}
-                <Badge variant="secondary" className="text-xs font-normal">{d.items.length > 0 ? "pending" : "empty"}</Badge>
+                {d.total}
+                <Badge variant="secondary" className="text-xs font-normal">{d.total > 0 ? "ready" : "empty"}</Badge>
               </Link>
             </div>
           )}
@@ -238,14 +232,12 @@ function DraftsQueueCard() {
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium">Queued</span>
                 <Link href="/queue" className="flex items-center gap-2 text-2xl font-bold tabular-nums hover:text-primary transition-colors">
-                  {q.items.length}
-                  <Badge variant="secondary" className="text-xs font-normal">{q.items.length > 0 ? "waiting" : "empty"}</Badge>
+                  {q.total}
+                  <Badge variant="secondary" className="text-xs font-normal">{q.total > 0 ? "waiting" : "empty"}</Badge>
                 </Link>
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {Object.entries(q.counts).map(([status, count]) => (
-                  <Badge key={status} variant="outline">{status}: {count}</Badge>
-                ))}
+                <StatusCounts counts={q.counts} />
               </div>
             </div>
           )}
@@ -258,30 +250,32 @@ function DraftsQueueCard() {
 function PublishingGatesCard({ gates }: { gates: OverviewResponse["publishing_gates"] }) {
   if (!gates || gates.length === 0) return null;
   const okCount = gates.filter((g) => g.ok).length;
+  const allOk = okCount === gates.length;
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/20 p-3">
-      <div className="flex items-center gap-2">
-        <div className={`h-2 w-2 rounded-full ${okCount === gates.length ? "bg-green-500" : "bg-orange-400"}`} />
-        <span className="text-xs font-medium">Publishing readiness</span>
-        <Badge variant="outline" className="text-xs">{okCount}/{gates.length} passed</Badge>
-      </div>
-      <div className="flex flex-wrap gap-2">
+    <Card className="rounded-xl">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <div className={`h-2 w-2 rounded-full ${allOk ? "bg-green-500" : "bg-orange-400"}`} />
+          <CardTitle className="text-base">Publishing readiness</CardTitle>
+          <Badge variant={allOk ? "success" : "warning"} className="text-xs">{okCount}/{gates.length} ready</Badge>
+        </div>
+        <CardDescription>{allOk ? "Everything's set — posts can go out." : "A couple of things are blocking posts from sending."}</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-2 sm:grid-cols-2">
         {gates.map((gate) => (
-          <div key={gate.name}
-            className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs ${
-              gate.ok ? "bg-green-50 text-green-700" : "bg-orange-50 text-orange-700"
-            }`}
-            title={gate.detail || gate.name}
-          >
+          <div key={gate.name} className="flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
             {gate.ok ? (
-              <HugeiconsIcon icon={CheckmarkCircle01Icon} className="h-3 w-3 shrink-0" />
+              <HugeiconsIcon icon={CheckmarkCircle01Icon} className="mt-0.5 h-4 w-4 shrink-0 text-green-600" />
             ) : (
-              <HugeiconsIcon icon={Cancel01Icon} className="h-3 w-3 shrink-0" />
+              <HugeiconsIcon icon={Cancel01Icon} className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
             )}
-            {gate.name}
+            <div className="min-w-0">
+              <p className="font-medium leading-tight">{titleCase(gate.name)}</p>
+              {gate.detail && <p className="mt-0.5 text-xs text-muted-foreground leading-relaxed">{gate.detail}</p>}
+            </div>
           </div>
         ))}
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }

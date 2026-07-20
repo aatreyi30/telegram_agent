@@ -6,7 +6,6 @@ import {
   Alert01Icon,
   Calendar03Icon,
   Clock01Icon,
-  Store01Icon,
 } from "@hugeicons/core-free-icons";
 import { Async, Empty } from "@/components/Async";
 import { AiBadge } from "@/components/AiBadge";
@@ -15,12 +14,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DateFilter } from "@/components/ui/date-range-picker";
+import { PageHeader } from "@/components/PageHeader";
 import { useQueryParams } from "@/lib/use-search-params";
 import { cn } from "@/lib/utils";
+import { postTypeLabel, merchantLabel, categoryLabel, titleCase, statusLabel } from "@/lib/format";
 import { useRegenerateDailyPlan, useRegenerateWeeklyPlan } from "@/queries/mutations";
-import { useDailyBrief, useLatestRetro, useScoredDeals, useWeeklyBrief } from "@/queries/queries";
+import { useDailyBrief, useLatestRetro, useWeeklyBrief } from "@/queries/queries";
 import type {
-  DailyBrief, DailyPlanToday, DailyTrajectory, PlanRisk, RetroLatest, ScoredDealsResponse, WeeklyBrief,
+  DailyBrief, DailyPlanToday, PlanRisk, RetroLatest, WeeklyBrief,
   WeeklyBriefDay, YesterdayBrief,
 } from "@/types/api";
 
@@ -98,14 +99,6 @@ function RiskList({ risks }: { risks: PlanRisk[] | null }) {
   );
 }
 
-function ConfidenceFooter({ confidence }: { confidence: number }) {
-  return (
-    <p className="border-t border-border pt-2 text-xs text-muted-foreground">
-      Confidence {Math.round(confidence * 100)}%
-    </p>
-  );
-}
-
 /** Renders an AI narrative, promoting a leading "Label: " to a bold inline
  * heading when present — general-purpose, not tied to fixed section names. */
 function DigestBlock({ text }: { text: string }) {
@@ -130,7 +123,7 @@ function TypeMixBadges({ mix }: { mix: Record<string, number> | null }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span className="text-xs font-medium text-muted-foreground">Type mix:</span>
-      {entries.map(([k, v]) => <Badge key={k} variant="outline">{k}: {v}</Badge>)}
+      {entries.map(([k, v]) => <Badge key={k} variant="outline">{postTypeLabel(k)}: {v}</Badge>)}
     </div>
   );
 }
@@ -159,9 +152,9 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
             <TypeMixBadges mix={y!.type_mix} />
             {(y!.best_category || y!.worst_category) && (
               <p className="text-xs text-muted-foreground">
-                {y!.best_category && <>Best category: <span className="font-medium text-foreground">{y!.best_category}</span></>}
+                {y!.best_category && <>Best category: <span className="font-medium text-foreground">{categoryLabel(y!.best_category)}</span></>}
                 {y!.best_category && y!.worst_category && " · "}
-                {y!.worst_category && <>Worst: <span className="font-medium text-foreground">{y!.worst_category}</span></>}
+                {y!.worst_category && <>Worst: <span className="font-medium text-foreground">{categoryLabel(y!.worst_category)}</span></>}
               </p>
             )}
             {y!.source === "live" && (
@@ -174,29 +167,6 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
   );
 }
 
-function TrajectoryBars({ trajectory }: { trajectory: DailyTrajectory }) {
-  const max = Math.max(1, ...trajectory.days.map((d) => d.posts));
-  return (
-    <div className="space-y-2">
-      <div className="flex h-16 items-end gap-1">
-        {trajectory.days.map((d) => (
-          <div key={d.date} className="flex flex-1 flex-col items-center gap-1" title={`${d.date}: ${d.posts} posts · ${Math.round(d.views_avg)} avg views`}>
-            <div
-              className="w-full rounded-t-sm bg-primary/70"
-              style={{ height: `${Math.max(4, Math.round((d.posts / max) * 100))}%` }}
-            />
-            <span className="text-[9px] text-muted-foreground">{d.date.slice(5)}</span>
-          </div>
-        ))}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        recent ~{trajectory.recent_cadence}/day
-        {trajectory.lifetime_baseline != null && <span className="text-muted-foreground"> vs lifetime {trajectory.lifetime_baseline}/day</span>}
-      </p>
-    </div>
-  );
-}
-
 function TodayCard({ brief }: { brief: DailyBrief }) {
   const t: DailyPlanToday = brief.today;
   const regenerate = useRegenerateDailyPlan();
@@ -206,7 +176,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
       <CardContent className="space-y-5 text-sm">
         <div>
           <div className="flex items-baseline gap-2">
-            <span className="text-4xl font-bold tracking-tight">{t.recommended_posts}</span>
+            <span className="text-3xl font-bold tracking-tight tabular-nums">{t.recommended_posts}</span>
             <span className="text-sm text-muted-foreground">posts recommended today</span>
           </div>
           {t.plan_clamped && (
@@ -214,18 +184,29 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
               Adjusted for sanity from the AI's suggestion.
             </p>
           )}
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <Badge variant="outline">{t.scheduled_count} scheduled today</Badge>
-            {t.gap > 0 ? (
-              <Badge variant="warning">{t.gap} more needed</Badge>
-            ) : (
-              <Badge variant="success">Fully scheduled</Badge>
-            )}
-          </div>
+          {(() => {
+            // Under just-in-time filling the plan's SLOTS are the schedule — each is
+            // rendered into a real post only ~3 min before it fires. So "planned" is the
+            // sum of slot counts, NOT how many rows have materialised yet (that would
+            // always read as a deficit all day). Only a genuine plan shortfall is a gap.
+            const planned = (t.slots || []).reduce((a, s) => a + (s.count ?? 1), 0);
+            const short = Math.max(t.recommended_posts - planned, 0);
+            return (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <Badge variant="outline">{planned} planned across {t.slots?.length || 0} slots</Badge>
+                {short > 0 ? (
+                  <Badge variant="warning">{short} short of target</Badge>
+                ) : (
+                  <Badge variant="success">On target</Badge>
+                )}
+                {t.scheduled_count > 0 && (
+                  <span className="text-xs text-muted-foreground">{t.scheduled_count} filled so far today</span>
+                )}
+              </div>
+            );
+          })()}
           {t.cadence_why && <p className="mt-1.5 text-sm text-foreground">{t.cadence_why}</p>}
         </div>
-
-        <TrajectoryBars trajectory={brief.trajectory} />
 
         {brief.digest ? (
           <div className="space-y-1.5">
@@ -276,32 +257,13 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
               <TableBody>
                 {t.deal_type_allocation.map((a, i) => (
                   <TableRow key={i}>
-                    <TableCell>{a.deal_type}</TableCell>
+                    <TableCell>{postTypeLabel(a.deal_type)}</TableCell>
                     <TableCell>{a.target_posts}</TableCell>
                     <TableCell>{a.avg_views_per_day != null ? Math.round(a.avg_views_per_day) : "—"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
-          </div>
-        )}
-
-        {t.merchant_allocation?.length > 0 && (
-          <div>
-            <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <HugeiconsIcon icon={Store01Icon} size={14} /> Merchant mix
-            </p>
-            <div className="space-y-1">
-              {t.merchant_allocation.map((m) => (
-                <div key={m.merchant} className="flex items-center gap-2">
-                  <div className="w-24 shrink-0 truncate text-xs">{m.merchant}</div>
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-secondary">
-                    <div className="h-full rounded-full bg-primary" style={{ width: `${Math.round(m.recent_share * 100)}%` }} />
-                  </div>
-                  <div className="w-9 shrink-0 text-right text-xs text-muted-foreground">{Math.round(m.recent_share * 100)}%</div>
-                </div>
-              ))}
-            </div>
           </div>
         )}
 
@@ -322,10 +284,10 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
                 {t.slots.map((s, i) => (
                   <TableRow key={i}>
                     <TableCell className="font-medium tabular-nums">{s.window_ist}</TableCell>
-                    <TableCell className="tabular-nums">{s.count ?? "—"}</TableCell>
-                    <TableCell><Badge variant="outline">{s.type}</Badge></TableCell>
-                    <TableCell className="text-muted-foreground">{s.theme}</TableCell>
-                    <TableCell className="text-muted-foreground">{s.merchant || "mixed"}</TableCell>
+                    <TableCell className="tabular-nums">{s.count ?? 1}</TableCell>
+                    <TableCell><Badge variant="secondary" className="font-medium">{postTypeLabel(s.type)}</Badge></TableCell>
+                    <TableCell className="text-muted-foreground">{categoryLabel(s.theme) || "—"}</TableCell>
+                    <TableCell className="text-muted-foreground">{merchantLabel(s.merchant)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{s.why || "—"}</TableCell>
                   </TableRow>
                 ))}
@@ -345,7 +307,6 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
           }
         />
 
-        <ConfidenceFooter confidence={t.confidence} />
       </CardContent>
     </Card>
   );
@@ -390,12 +351,12 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
         {days.map((d) => (
           <TableRow key={d.date}>
             <TableCell className="font-medium">{d.weekday}</TableCell>
-            <TableCell className="text-muted-foreground">{d.date}</TableCell>
-            <TableCell>{d.posts}</TableCell>
-            <TableCell>{Math.round(d.views_avg).toLocaleString()}</TableCell>
-            <TableCell className="text-emerald-600 dark:text-emerald-400">+{d.joined}</TableCell>
-            <TableCell className="text-red-600 dark:text-red-400">-{d.left}</TableCell>
-            <TableCell className={d.net < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}>
+            <TableCell className="text-muted-foreground tabular-nums">{d.date}</TableCell>
+            <TableCell className="tabular-nums">{d.posts}</TableCell>
+            <TableCell className="tabular-nums">{Math.round(d.views_avg).toLocaleString()}</TableCell>
+            <TableCell className="text-emerald-600 tabular-nums dark:text-emerald-400">+{d.joined}</TableCell>
+            <TableCell className="text-red-600 tabular-nums dark:text-red-400">-{d.left}</TableCell>
+            <TableCell className={cn("tabular-nums", d.net < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
               {d.net > 0 ? "+" : ""}{d.net}
             </TableCell>
           </TableRow>
@@ -426,19 +387,19 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
             </CardHeader>
             <CardContent className="space-y-4 text-sm">
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <Stat label="Prediction MAPE" value={prediction.mape_views_24h != null ? `${Math.round(prediction.mape_views_24h * 100)}%` : "—"} />
-                <Stat label="Bias" value={pct(prediction.bias)} />
-                <Stat label="Predicted posts" value={String(prediction.n_posts)} />
-                <Stat label="Published/planned" value={`${plan_adherence.published}/${plan_adherence.planned}`} />
+                <Stat label="Avg forecast error" value={prediction.mape_views_24h != null ? `${Math.round(prediction.mape_views_24h * 100)}%` : "—"} />
+                <Stat label="Runs high / low" value={prediction.bias == null ? "—" : `${prediction.bias >= 0 ? "over " : "under "}${pct(Math.abs(prediction.bias))}`} />
+                <Stat label="Posts scored" value={String(prediction.n_posts)} />
+                <Stat label="Published / planned" value={`${plan_adherence.published}/${plan_adherence.planned}`} />
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
-                {engagement.best_hour_bucket && <Badge variant="outline">Best hour: {engagement.best_hour_bucket}</Badge>}
-                {engagement.best_type_by_engagement && <Badge variant="outline">Best type: {engagement.best_type_by_engagement}</Badge>}
+                {engagement.best_hour_bucket && <Badge variant="outline">Best time: {titleCase(engagement.best_hour_bucket)}</Badge>}
+                {engagement.best_type_by_engagement && <Badge variant="outline">Best format: {postTypeLabel(engagement.best_type_by_engagement)}</Badge>}
                 {engagement.median_forward_rate != null && (
-                  <Badge variant="outline">Median forward rate: {(engagement.median_forward_rate * 100).toFixed(1)}%</Badge>
+                  <Badge variant="outline">Typical forward rate: {(engagement.median_forward_rate * 100).toFixed(1)}%</Badge>
                 )}
-                {plan_adherence.blocked_stale > 0 && <Badge variant="warning">{plan_adherence.blocked_stale} blocked stale</Badge>}
+                {plan_adherence.blocked_stale > 0 && <Badge variant="warning">{plan_adherence.blocked_stale} {statusLabel("blocked_stale").toLowerCase()}s</Badge>}
               </div>
 
               {(churn_vs_frequency.high_leave_days_posts_per_day != null || churn_vs_frequency.low_leave_days_posts_per_day != null) && (
@@ -472,8 +433,8 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
                       <ul className="space-y-1 text-xs text-muted-foreground">
                         {top_over.map((m) => (
                           <li key={m.post_id}>
-                            #{m.post_id} · pred {m.pred?.toLocaleString() ?? "—"} → actual {m.actual?.toLocaleString() ?? "—"}
-                            {m.merchant ? ` · ${m.merchant}` : ""}
+                            Post #{m.post_id} · forecast {m.pred?.toLocaleString() ?? "—"} → got {m.actual?.toLocaleString() ?? "—"}
+                            {m.merchant ? ` · ${merchantLabel(m.merchant)}` : ""}
                           </li>
                         ))}
                       </ul>
@@ -485,8 +446,8 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
                       <ul className="space-y-1 text-xs text-muted-foreground">
                         {top_under.map((m) => (
                           <li key={m.post_id}>
-                            #{m.post_id} · pred {m.pred?.toLocaleString() ?? "—"} → actual {m.actual?.toLocaleString() ?? "—"}
-                            {m.merchant ? ` · ${m.merchant}` : ""}
+                            Post #{m.post_id} · forecast {m.pred?.toLocaleString() ?? "—"} → got {m.actual?.toLocaleString() ?? "—"}
+                            {m.merchant ? ` · ${merchantLabel(m.merchant)}` : ""}
                           </li>
                         ))}
                       </ul>
@@ -496,71 +457,6 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
               )}
 
               {r.narrative && <DigestBlock text={r.narrative} />}
-            </CardContent>
-          </Card>
-        );
-      }}
-    </Async>
-  );
-}
-
-/** Component label -> short human title, for the score-breakdown badges. */
-const SCORE_COMPONENT_LABELS: Record<string, string> = {
-  discount_depth: "Discount", audience_affinity: "Audience fit", freshness: "Freshness",
-  time_fit: "Time fit", price_credibility: "Price credibility", scarcity_of_coverage: "Scarcity",
-};
-
-/** Phase 3.3 -- the audience-aware Deal Queue: every actively-scored deal from
- * `DealScoringEngine`, with its 0-100 score and an explainable per-component
- * breakdown (each 0..1, shown as %). Renders nothing while there's no scored
- * deal yet, same "never show an empty shell" convention as `RetroCard`. */
-function DealQueueCard({ q }: { q: ReturnType<typeof useScoredDeals> }) {
-  return (
-    <Async q={q} rows={2}>
-      {(data: ScoredDealsResponse) => {
-        if (!data.items?.length) return null;
-        return (
-          <Card>
-            <CardHeader><CardTitle className="text-base">Deal queue — audience-scored</CardTitle></CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Deal</TableHead><TableHead>Merchant</TableHead><TableHead>Price</TableHead>
-                    <TableHead>Discount</TableHead><TableHead>Score</TableHead><TableHead>Why</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {data.items.map((d) => (
-                    <TableRow key={d.deal_id}>
-                      <TableCell className="max-w-[220px] truncate" title={d.title || d.deal_id}>
-                        {d.url ? (
-                          <a href={d.url} target="_blank" rel="noreferrer" className="hover:underline">
-                            {d.title || d.deal_id}
-                          </a>
-                        ) : (d.title || d.deal_id)}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">{d.merchant_key || "—"}</TableCell>
-                      <TableCell className="tabular-nums">
-                        {d.current_price != null ? `₹${Math.round(d.current_price).toLocaleString()}` : "—"}
-                      </TableCell>
-                      <TableCell className="tabular-nums">
-                        {d.discount_percent != null ? `${Math.round(d.discount_percent)}%` : "—"}
-                      </TableCell>
-                      <TableCell className="font-semibold tabular-nums">{Math.round(d.score)}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap gap-1">
-                          {Object.entries(d.components).map(([k, v]) => (
-                            <Badge key={k} variant="outline" title={`${SCORE_COMPONENT_LABELS[k] || k}: ${Math.round(v * 100)}%`}>
-                              {SCORE_COMPONENT_LABELS[k] || k} {Math.round(v * 100)}%
-                            </Badge>
-                          ))}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
             </CardContent>
           </Card>
         );
@@ -667,7 +563,6 @@ export default function PlanPage() {
 
   const dailyQ = useDailyBrief(date || undefined);
   const weeklyQ = useWeeklyBrief(date || undefined);
-  const scoredDealsQ = useScoredDeals(20);
 
   const min = dailyQ.data?.min_date;
   const max = dailyQ.data?.max_date;
@@ -676,16 +571,12 @@ export default function PlanPage() {
   const handleDateChange = (val: string) => set({ date: val || null });
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Plan</h1>
-          <p className="text-sm text-muted-foreground">
-            What went well yesterday, and what to post today — grounded in your data.
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
+    <div className="space-y-4">
+      <PageHeader
+        title="Plan"
+        subtitle="What went well yesterday, and what to post today — grounded in your data."
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
           <div className="flex rounded-lg border bg-card p-0.5">
             {(["daily", "weekly"] as const).map((v) => (
               <button
@@ -702,12 +593,11 @@ export default function PlanPage() {
             ))}
           </div>
           <DateFilter mode="single" value={date} onChange={handleDateChange} min={min} max={max} showArrows />
-        </div>
-      </div>
+          </div>
+        }
+      />
 
       {view === "daily" ? <DailyView q={dailyQ} /> : <WeeklyView q={weeklyQ} />}
-
-      <DealQueueCard q={scoredDealsQ} />
     </div>
   );
 }

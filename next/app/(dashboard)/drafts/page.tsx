@@ -9,32 +9,17 @@ import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PagedNav } from "@/components/PagedNav";
+import { PageHeader } from "@/components/PageHeader";
+import { PostPreview } from "@/components/PostPreview";
+import { StatusPill } from "@/components/StatusPill";
+import { MoneyBadge } from "@/components/MoneyBadge";
 import { useDrafts } from "@/queries/queries";
 import { useCreateDraft, useUpdateDraft, useDeleteDraft } from "@/queries/mutations";
+import { postTypeLabel, merchantLabel } from "@/lib/format";
 import type { DraftsResponse, EmojiPolicy, StrategyRationale } from "@/types/api";
 import { Plus, Edit, Trash2 } from "lucide-react";
 
-const URL_RE = /(https?:\/\/[^\s]+)/g;
-
-function Linkified({ text }: { text: string }) {
-  const parts = text.split(URL_RE);
-  return (
-    <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-3 text-sm leading-relaxed">
-      {parts.map((p, i) =>
-        URL_RE.test(p) ? (
-          <a key={i} href={p} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">
-            {p}
-          </a>
-        ) : (
-          <span key={i}>{p}</span>
-        )
-      )}
-    </pre>
-  );
-}
-
 function DraftCard({ r, onEdit, onDelete }: { r: DraftsResponse["items"][number]; onEdit: (r: DraftsResponse["items"][number]) => void; onDelete: (id: number) => void }) {
-  const aff = r.affiliate_status || "";
   const rat: Partial<StrategyRationale> = r.rationale ?? {};
   const ep: Partial<EmojiPolicy> = rat.emoji_policy || r.emoji_policy || {};
   const hasRationale = rat.why_type || rat.target_window_ist?.why || ep.avoid?.length || rat.why_this_deal?.why;
@@ -45,13 +30,10 @@ function DraftCard({ r, onEdit, onDelete }: { r: DraftsResponse["items"][number]
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline" className="font-mono text-[10px]">#{r.id}</Badge>
-            <Badge variant="primary">{r.post_type}</Badge>
-            <Badge variant={r.status === "published" ? "success" : "default"}>{r.status}</Badge>
-            {aff.endsWith("_applied") ? (
-              <Badge variant="success">affiliate links</Badge>
-            ) : aff ? (
-              <Badge variant="warning">clean url</Badge>
-            ) : null}
+            <Badge variant="secondary" className="font-medium">{postTypeLabel(r.post_type)}</Badge>
+            {r.merchant && <span className="text-xs text-muted-foreground">{merchantLabel(r.merchant)}</span>}
+            <StatusPill status={r.status} />
+            <MoneyBadge affiliateStatus={r.affiliate_status} merchant={r.merchant} />
           </div>
           <div className="flex gap-1">
             <Button variant="ghost" size="sm" onClick={() => onEdit(r)}>
@@ -64,7 +46,7 @@ function DraftCard({ r, onEdit, onDelete }: { r: DraftsResponse["items"][number]
         </div>
       </CardHeader>
       <CardContent className="space-y-3 p-4">
-        <Linkified text={r.text} />
+        <PostPreview text={r.text} dense />
         {hasRationale && (
           <div className="space-y-1 text-xs text-muted-foreground">
             {rat.why_type && <div><span className="font-medium text-foreground">Why this post:</span> {rat.why_type}</div>}
@@ -155,19 +137,17 @@ export default function DraftsPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Drafts</h1>
-          <p className="text-sm text-muted-foreground">
-            Generated posts with real, clickable links + affiliate short links. Each shows why it follows the strategy.
-          </p>
-        </div>
-        <Button onClick={handleCreate}>
-          <Plus className="h-4 w-4 mr-2" />
-          Create Draft
-        </Button>
-      </div>
+    <div className="space-y-4">
+      <PageHeader
+        title="Drafts"
+        subtitle="Generated posts, shown exactly as they'll appear in Telegram. Each says why it fits the strategy and whether it earns."
+        actions={
+          <Button onClick={handleCreate}>
+            <Plus className="h-4 w-4 mr-2" />
+            Create draft
+          </Button>
+        }
+      />
       <Dialog open={isDialogOpen} onClose={handleClose} title={editingDraft ? "Edit Draft" : "Create New Draft"}>
         <DraftForm draft={editingDraft} onClose={handleClose} />
       </Dialog>
