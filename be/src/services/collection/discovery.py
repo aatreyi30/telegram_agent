@@ -25,6 +25,7 @@ from src.config.settings import get_settings
 from src.db.models import Competitor, SourceAccessStatus
 from src.db.session import session_scope
 from src.logger import get_logger
+from src.services.collection.platform_detector import DEAL_WORD_STRIP_RE
 
 logger = get_logger(__name__)
 
@@ -141,11 +142,7 @@ def _generate_search_variations(name: str) -> list[str]:
         variations.append(f"{base}{sep}deals")
 
     # remove common deal keywords to get bare brand
-    bare = re.sub(
-        r"\b(deals?|offers?|coupons?|india|online|shopping|loot"
-        r"|discounts?|sales?|promotions?|cashback)\b",
-        "", base,
-    ).strip()
+    bare = DEAL_WORD_STRIP_RE.sub("", base).strip()
     if bare and bare != base:
         variations.append(bare)
 
@@ -429,6 +426,7 @@ def verify_candidate(brand: str, candidates: list[dict]) -> tuple[str | None, fl
                 verify_candidate_input(brand, lines),
                 system_extra=VERIFY_CANDIDATE_SYSTEM,
                 max_tokens=120,
+                trace_call="verify_candidate",
             )
             import json
             import re

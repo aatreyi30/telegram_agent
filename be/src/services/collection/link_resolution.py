@@ -27,6 +27,29 @@ Design notes (async rewrite):
     they're distinguishable from "never attempted" and can be retried up to a
     cap, instead of silently looking identical to a NULL resolved_url.
 
+Fairness & resiliency notes:
+  * The pending query is ordered ``resolution_attempts ASC, id ASC`` so
+    never-attempted links (NULL/0) always get their first shot before we spend
+    the run re-trying already-failed backlog. Without this, a large NULL-order
+    scan against a multi-thousand-row backlog starves fresh candidates
+    indefinitely — a batch of never-attempted Flipkart fkrt.* shortlinks could
+    sit at ``resolution_attempts=0`` forever while older stuck rows got
+    reselected every run.
+  * Some shortener hosts (e.g. ajiio.cc, fktr.cc) serve an INCOMPLETE TLS
+    certificate chain (missing intermediate CA), so certifi can't verify and
+    httpx raises a generic ConnectError/HTTPError whose message carries a
+    ``CERTIFICATE_VERIFY_FAILED`` marker. For that one narrow case only we
+    retry the SINGLE request over a ``verify=False`` client. This is safe here
+    because we only ever read a redirect target (a URL) from a public marketing
+    shortlink — we never send credentials nor trust response-body content. It
+    is a fallback ONLY: never a first attempt, and never used for any other
+    failure kind.
+  * Momentary connection resets / timeouts get up to 2 bounded retries with a
+    short backoff before being recorded as a genuine failure. A host proven
+    unreachable at the connection level within a run is then skipped for its
+    remaining URLs (per-run circuit breaker) so we don't burn the full retry
+    budget over and over against a host that's clearly down right now.
+
 Politeness: still a single AsyncClient with a bounded connection pool and a
 concurrency semaphore, so we don't hammer any one host arbitrarily — bounded
 by max_connections / semaphore, not a single-file-at-a-time sleep loop.
@@ -40,11 +63,11 @@ import ssl
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 import httpx
 import tldextract
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.services.collection.merchants.registry import detect_merchant_key
@@ -56,9 +79,67 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
+# The three resolution-outcome states (written to ExtractedLink.resolution_status
+# and carried on _ResolveOutcome.status). Named once here because the same three
+# string values are asserted/branched on in many places below — a stray typo in
+# any one of them would silently mis-record a link's state.
+_STATUS_RESOLVED = "resolved"
+_STATUS_FAILED = "failed"
+_STATUS_NO_MATCH = "no_match"
+
 # Exceptions we treat as an explicit, retryable resolution failure (never a
 # bare `except:` — a genuine programming error should still surface).
 _RESOLUTION_EXCEPTIONS = (httpx.HTTPError, ssl.SSLError)
+
+# Momentary connection-level failures (resets / timeouts) — as opposed to a
+# permanent block or a broken cert chain. These get a short, bounded retry
+# (see `_TRANSIENT_BACKOFFS`) before being recorded as a genuine failure.
+# Cert-chain failures are deliberately NOT here: they surface as ConnectError
+# too, but retrying identically won't fix a server's missing intermediate CA —
+# those take the verify=False fallback in `_fetch` instead.
+_TRANSIENT_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
+# Per-attempt backoff (seconds) for transient failures; its length is also the
+# retry budget (2 retries => 3 total attempts).
+_TRANSIENT_BACKOFFS = (1.0, 2.0)
+
+# Connection-level failures that, once seen for a host this run, trip the
+# per-run circuit breaker (skip that host's other URLs). A cert-chain failure
+# is intentionally excluded — it's handled by the verify=False fallback, not by
+# giving up on the host.
+_HOST_DOWN_EXCEPTIONS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+# Substrings that identify a broken *remote* TLS certificate chain (server sent
+# an incomplete chain / missing intermediate CA). httpx surfaces this as a
+# generic ConnectError/HTTPError whose message (often on the chained cause)
+# contains one of these markers, NOT as a distinctly-typed ssl.SSLError — so we
+# match on the message text across the exception and its cause/context.
+_CERT_CHAIN_MARKERS = (
+    "CERTIFICATE_VERIFY_FAILED",
+    "certificate verify failed",
+    "unable to get local issuer certificate",
+)
+
+
+def _is_cert_chain_error(exc: BaseException) -> bool:
+    """True if `exc` (or its chained cause/context) reports a broken remote TLS
+    certificate chain — the narrow case eligible for the verify=False retry."""
+    parts = [str(exc)]
+    for attr in ("__cause__", "__context__"):
+        chained = getattr(exc, attr, None)
+        if chained is not None:
+            parts.append(str(chained))
+    blob = " ".join(parts)
+    return any(marker in blob for marker in _CERT_CHAIN_MARKERS)
+
 
 # Cap on resolution_attempts before a candidate is left alone (still NULL
 # merchant/resolved_url, but no longer re-queued every run).
@@ -98,6 +179,35 @@ def _is_self_domain(domain: str | None, domains: frozenset | set = _SELF_DOMAINS
         return False
     d = domain.lower()
     return d in domains or any(d.endswith("." + s) for s in domains)
+
+
+# Affiliate-redirector networks (NOT merchants). They end on their own page but carry
+# the real destination in a query param, and their domain must never be slugged into a
+# bogus merchant_key. Param NAMES vary per network (linkredirect.in ?dl=, affinity.net
+# ?d=, ...), so we scan every param rather than whitelist names.
+_REDIRECTOR_DOMAINS = {
+    "affinity.net", "linkredirect.in", "bitli.in", "ddime.in",
+}
+
+
+def _merchant_from_embedded_url(chain: list[str]) -> str | None:
+    """Recover a merchant from a destination URL embedded in a redirect's query params.
+    Affiliate redirectors carry the real target as a URL-valued query param under a
+    provider-specific name (?dl=, ?d=, ?url=, ...), so scan EVERY param value across the
+    chain for the first that URL-decodes to a known merchant."""
+    for link in chain:
+        try:
+            params = parse_qs(urlsplit(link).query)
+        except ValueError:
+            continue
+        for values in params.values():
+            for raw in values:
+                candidate = unquote(raw)
+                if candidate.startswith(("http://", "https://")):
+                    mk = detect_merchant_key(candidate)
+                    if mk:
+                        return mk
+    return None
 
 
 # Max number of extra hops we'll follow via meta-refresh / simple-JS redirects
@@ -163,7 +273,7 @@ class _ResolveOutcome:
     url: str
     resolved_url: str | None
     merchant_key: str | None
-    status: str  # "resolved" | "failed" | "no_match"
+    status: str  # _STATUS_RESOLVED | _STATUS_FAILED | _STATUS_NO_MATCH
     error: str | None = None
     discovered_domain: str | None = None  # set only when the capture fallback fired
 
@@ -217,7 +327,19 @@ class LinkResolutionEngine(BaseCollector):
                         ExtractedLink.resolution_attempts.is_(None),
                         ExtractedLink.resolution_attempts < _MAX_ATTEMPTS,
                     ),
-                ).limit(self.limit)
+                )
+                # Prioritise never-attempted links (NULL/0) ahead of
+                # already-attempted-and-failed backlog so fresh candidates
+                # always get their first shot; oldest-first (id ASC) within an
+                # attempt tier keeps it fair/FIFO. Without this explicit order,
+                # the default scan starves newly-arrived rows behind a large
+                # stuck backlog (the Flipkart fkrt.* starvation). COALESCE maps
+                # NULL to 0 so untouched rows sort together with attempts=0.
+                .order_by(
+                    func.coalesce(ExtractedLink.resolution_attempts, 0).asc(),
+                    ExtractedLink.id.asc(),
+                )
+                .limit(self.limit)
             ).all()
         if not pending:
             result.skipped_reason = "No unresolved links pending."
@@ -245,16 +367,29 @@ class LinkResolutionEngine(BaseCollector):
         concurrency = self.concurrency if self.concurrency is not None else settings.link_resolve_concurrency
         timeout = self.timeout if self.timeout is not None else 30.0
         sem = asyncio.Semaphore(concurrency)
-        async with httpx.AsyncClient(
+        # Hosts proven unreachable at the connection level during THIS run —
+        # shared across the concurrent tasks (asyncio is single-threaded, so
+        # plain-set mutation is safe) to short-circuit the per-run circuit
+        # breaker in `_fetch`.
+        down_hosts: set[str] = set()
+        client_kwargs = dict(
             http2=True,
             limits=httpx.Limits(max_connections=250, max_keepalive_connections=50),
             timeout=timeout,
             headers={"User-Agent": self.ua},
-        ) as client:
+        )
+        # `insecure_client` (verify=False) is used ONLY as the narrow fallback
+        # for a broken remote cert chain (see `_fetch`); never as a first
+        # attempt and never for other failures.
+        async with httpx.AsyncClient(**client_kwargs) as client, \
+                httpx.AsyncClient(verify=False, **client_kwargs) as insecure_client:
 
             async def _bounded(url: str) -> _ResolveOutcome:
                 async with sem:
-                    return await self._resolve_one(client, cache, url, domain_by_url.get(url))
+                    return await self._resolve_one(
+                        client, insecure_client, cache, url,
+                        domain_by_url.get(url), down_hosts,
+                    )
 
             outcomes = await asyncio.gather(*[_bounded(u) for u in by_url])
 
@@ -266,7 +401,7 @@ class LinkResolutionEngine(BaseCollector):
                 # write-through: make this run's resolution visible to any
                 # later candidate sharing the same URL (already deduped above,
                 # but also benefits any future run reading this cache anew).
-                if outcome.status != "failed":
+                if outcome.status != _STATUS_FAILED:
                     cache[outcome.url] = (outcome.resolved_url, outcome.merchant_key)
 
                 if outcome.discovered_domain:
@@ -285,8 +420,8 @@ class LinkResolutionEngine(BaseCollector):
                     result.processed += 1
                     affected_posts.add(post_id)
 
-                    if outcome.status == "failed":
-                        link.resolution_status = "failed"
+                    if outcome.status == _STATUS_FAILED:
+                        link.resolution_status = _STATUS_FAILED
                         link.resolution_error = outcome.error
                         link.resolution_attempts = (link.resolution_attempts or 0) + 1
                         result.skipped += 1
@@ -313,19 +448,72 @@ class LinkResolutionEngine(BaseCollector):
         return result
 
     # ------------------------------------------------------------------ #
+    async def _fetch(
+        self,
+        client: httpx.AsyncClient,
+        insecure_client: httpx.AsyncClient,
+        url: str,
+        down_hosts: set[str],
+    ) -> httpx.Response:
+        """Perform a single ``GET`` (following redirects) with the run's
+        resiliency policy layered on:
+
+          * per-run circuit breaker — if this URL's host was already proven
+            unreachable this run, fail fast instead of re-spending the full
+            retry-with-backoff budget on a host that's clearly down now;
+          * broken-remote-cert fallback — on a ``CERTIFICATE_VERIFY_FAILED``
+            style error only, retry this ONE request over `insecure_client`
+            (verify=False). Safe: we only read a redirect target from a public
+            marketing shortlink, never sending credentials nor trusting body;
+          * bounded transient retry — momentary resets / timeouts get up to
+            ``len(_TRANSIENT_BACKOFFS)`` retries with backoff.
+
+        Raises the underlying `_RESOLUTION_EXCEPTIONS` on unrecoverable failure;
+        the caller records that as an explicit resolution failure."""
+        host = (urlsplit(url).hostname or "").lower()
+        if host and host in down_hosts:
+            raise httpx.ConnectError(f"host {host} marked unreachable earlier this run")
+
+        for attempt in range(len(_TRANSIENT_BACKOFFS) + 1):
+            try:
+                return await client.get(url, follow_redirects=True)
+            except _RESOLUTION_EXCEPTIONS as exc:  # noqa: BLE001 - narrow, re-raised below
+                if _is_cert_chain_error(exc):
+                    # Broken remote cert chain: retry this single request
+                    # insecurely. Not retried further and never trips the
+                    # breaker — the host is reachable, only its chain is broken.
+                    logger.warning(
+                        "[link_resolution] broken remote cert chain for %s, "
+                        "retrying once with verify=False: %s", url, exc,
+                    )
+                    return await insecure_client.get(url, follow_redirects=True)
+                if isinstance(exc, _TRANSIENT_EXCEPTIONS) and attempt < len(_TRANSIENT_BACKOFFS):
+                    await asyncio.sleep(_TRANSIENT_BACKOFFS[attempt])
+                    continue
+                # Non-transient, or retries exhausted. If it's a connection-level
+                # failure, trip the per-run breaker for this host.
+                if host and isinstance(exc, _HOST_DOWN_EXCEPTIONS):
+                    down_hosts.add(host)
+                raise
+        # Unreachable: the loop either returns or raises on every path.
+        raise httpx.ConnectError(f"exhausted retries resolving {url}")  # pragma: no cover
+
+    # ------------------------------------------------------------------ #
     async def _resolve_one(
         self,
         client: httpx.AsyncClient,
+        insecure_client: httpx.AsyncClient,
         cache: dict[str, tuple[str | None, str | None]],
         url: str,
         raw_domain: str | None,
+        down_hosts: set[str],
     ) -> _ResolveOutcome:
         """Resolve a single (deduped) URL: cache hit -> direct-domain match ->
         network fetch + redirect-chain scan -> domain-capture fallback."""
         cached = cache.get(url)
         if cached is not None:
             resolved_url, merchant_key = cached
-            status = "resolved" if merchant_key else "no_match"
+            status = _STATUS_RESOLVED if merchant_key else _STATUS_NO_MATCH
             return _ResolveOutcome(url, resolved_url, merchant_key, status)
 
         # self-domain (platform's own domain, WhatsApp, Telegram) — never a
@@ -333,19 +521,19 @@ class LinkResolutionEngine(BaseCollector):
         # (see _SELF_DOMAINS_PREFETCH) since that domain must still be
         # followed to reveal the real merchant behind the shortlink.
         if _is_self_domain(raw_domain, _SELF_DOMAINS_PREFETCH):
-            return _ResolveOutcome(url, url, None, "no_match")
+            return _ResolveOutcome(url, url, None, _STATUS_NO_MATCH)
 
         # raw link already on a known merchant domain — no network call needed
         if raw_domain:
             direct = detect_merchant_key(raw_domain)
             if direct:
-                return _ResolveOutcome(url, url, direct, "resolved")
+                return _ResolveOutcome(url, url, direct, _STATUS_RESOLVED)
 
         try:
-            response = await client.get(url, follow_redirects=True)
+            response = await self._fetch(client, insecure_client, url, down_hosts)
         except _RESOLUTION_EXCEPTIONS as exc:
             logger.warning("[link_resolution] failed to resolve %s: %s", url, exc)
-            return _ResolveOutcome(url, None, None, "failed", error=str(exc)[:500])
+            return _ResolveOutcome(url, None, None, _STATUS_FAILED, error=str(exc)[:500])
 
         redirect_chain = [str(r.url) for r in response.history]
         redirect_chain.append(str(response.url))
@@ -377,7 +565,7 @@ class LinkResolutionEngine(BaseCollector):
                 break
             try:
                 await asyncio.sleep(min(max(delay, 0.0), 2.0))
-                response = await client.get(next_url, follow_redirects=True)
+                response = await self._fetch(client, insecure_client, next_url, down_hosts)
             except _RESOLUTION_EXCEPTIONS as exc:
                 logger.warning(
                     "[link_resolution] extra-hop failed for %s -> %s: %s",
@@ -391,11 +579,17 @@ class LinkResolutionEngine(BaseCollector):
             merchant = _scan(redirect_chain)
             hops += 1
 
+        # Affiliate redirectors (e.g. linkredirect.in) often stop on a landing/error
+        # page but carry the real destination in a query param (e.g. ?dl=<merchant-url>).
+        # Recover the merchant from that embedded URL before the generic domain-capture.
+        if merchant is None:
+            merchant = _merchant_from_embedded_url(redirect_chain)
+
         discovered_domain = None
         if merchant is None:
             merchant, discovered_domain = self._capture_domain(final_url)
 
-        status = "resolved" if merchant else "no_match"
+        status = _STATUS_RESOLVED if merchant else _STATUS_NO_MATCH
         return _ResolveOutcome(url, final_url, merchant, status, discovered_domain=discovered_domain)
 
     @staticmethod
@@ -412,7 +606,9 @@ class LinkResolutionEngine(BaseCollector):
         if not ext.domain or not ext.suffix:
             return None, None
         domain = f"{ext.domain}.{ext.suffix}".lower()
-        if _is_self_domain(domain):
+        # Never slug the platform's own domain or an affiliate redirector into a
+        # "merchant" — the real store lives in the redirector's query param, not its host.
+        if _is_self_domain(domain) or domain in _REDIRECTOR_DOMAINS:
             return None, None
         slug = re.sub(r"[^a-z0-9]+", "_", ext.domain.lower()).strip("_")
         if not slug:
@@ -463,6 +659,9 @@ class LinkResolutionEngine(BaseCollector):
                 top, n = counts.most_common(1)[0]
                 if np.primary_merchant_key != top:
                     np.primary_merchant_key = top
+                    # Share of known-merchant links that agree — same denominator
+                    # basis as normalizer's primary_merchant_confidence, so the
+                    # field's meaning is stable across resolution.
                     np.primary_merchant_confidence = round(n / len(keys), 3)
                     updated += 1
         return updated

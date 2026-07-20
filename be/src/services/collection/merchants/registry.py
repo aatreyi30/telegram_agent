@@ -12,6 +12,8 @@ Access status legend (SourceAccessStatus):
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,7 +24,7 @@ MERCHANT_SEED: list[dict] = [
     {
         "key": "amazon",
         "display_name": "Amazon",
-        "domains": ["amazon.in", "amzn.to", "amzn.in"],
+        "domains": ["amazon.in", "amzn.to", "amzn.in", "link.amazon"],
         "collector": "amazon_creators_api",
         "access_status": SourceAccessStatus.PARTIAL,
         "access_notes": (
@@ -35,7 +37,10 @@ MERCHANT_SEED: list[dict] = [
     {
         "key": "flipkart",
         "display_name": "Flipkart",
-        "domains": ["flipkart.com", "fkrt.cc", "fkrt.it", "dl.flipkart.com"],
+        "domains": [
+            "flipkart.com", "fkrt.cc", "fkrt.it", "fkrt.co", "fkrt.site",
+            "fkrt.to", "dl.flipkart.com", "fktr.cc", "fktr.in",
+        ],
         "collector": "flipkart_affiliate_api",
         "access_status": SourceAccessStatus.PARTIAL,
         "access_notes": (
@@ -70,7 +75,7 @@ MERCHANT_SEED: list[dict] = [
     {
         "key": "ajio",
         "display_name": "AJIO",
-        "domains": ["ajio.com"],
+        "domains": ["ajio.com", "ajiio.cc", "ajiio.in", "ajiio.co", "ajio.me", "ajio.bitiy.in"],
         "collector": None,
         "access_status": SourceAccessStatus.BLOCKED,
         "access_notes": "Akamai CDN — Access Denied. No public product API. Operator manual input only.",
@@ -107,10 +112,11 @@ MERCHANT_SEED: list[dict] = [
         "access_status": SourceAccessStatus.BLOCKED,
         "access_notes": "Cloudflare block confirmed. No affiliate program.",
     },
+    # ---- UNKNOWN merchants: represented, access not yet determined ----
     {
         "key": "myntra",
         "display_name": "Myntra",
-        "domains": ["myntra.com", "myntr.it"],
+        "domains": ["myntra.com", "myntr.it", "myntr.in", "mynt.ro", "myntra.bitiy.in"],
         "collector": None,
         "access_status": SourceAccessStatus.UNKNOWN,
         "access_notes": "No confirmed product data API. Redirect chain resolves but no verified access.",
@@ -136,11 +142,28 @@ def seed_merchants(session: Session) -> int:
     return changed
 
 
+def _url_host(url: str) -> str | None:
+    """Extract the lowercased hostname from a URL (scheme optional)."""
+    u = (url or "").strip()
+    if "//" not in u:
+        u = "//" + u  # let urlsplit treat a bare host as netloc, not path
+    host = urlsplit(u).hostname
+    return host.lower() if host else None
+
+
 def detect_merchant_key(url: str) -> str | None:
-    """Match a URL to a merchant key by domain. Returns None if unknown."""
-    u = url.lower()
+    """Match a URL to a merchant key by hostname. Returns None if unknown.
+
+    Matches the parsed host exactly or as a subdomain (host == dom or host
+    endswith ".<dom>"), so lookalike hosts like ``myflipkart.com.evil`` no
+    longer false-positive the way a raw ``dom in url`` substring test did.
+    """
+    host = _url_host(url)
+    if not host:
+        return None
     for row in MERCHANT_SEED:
         for dom in row["domains"]:
-            if dom in u:
+            d = dom.lower()
+            if host == d or host.endswith("." + d):
                 return row["key"]
     return None

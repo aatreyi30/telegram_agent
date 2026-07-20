@@ -65,15 +65,26 @@ def _upsert_daily_subscriber_stat(s, channel_id: int, day, count: int, updated_a
         )
     )
     if row is None:
+        # Seed the day's start from the LAST KNOWN count (prior day's end), not the
+        # current count — otherwise the change since the last observation (which can
+        # span days, since Telegram gives no history and we may only snapshot once a
+        # day) is dropped and a single-observation day always shows net=0.
+        prev = s.scalar(
+            select(DailySubscriberStat)
+            .where(DailySubscriberStat.channel_id == channel_id,
+                   DailySubscriberStat.stat_date < day)
+            .order_by(DailySubscriberStat.stat_date.desc())
+        )
+        start = prev.subs_end if prev else count
         s.add(
             DailySubscriberStat(
                 channel_id=channel_id,
                 stat_date=day,
-                subs_start=count,
+                subs_start=start,
                 subs_end=count,
-                subs_joined=0,
-                subs_left=0,
-                subs_net=0,
+                subs_joined=max(count - start, 0),
+                subs_left=max(start - count, 0),
+                subs_net=count - start,
                 updated_at=updated_at,
             )
         )

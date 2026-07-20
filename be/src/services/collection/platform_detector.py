@@ -64,6 +64,17 @@ SOCIAL_KEYWORDS = [
 
 TLD_CANDIDATES = [".com", ".in", ".co.in", ".org", ".net", ".info"]
 
+# Deal-related words stripped from a raw channel/brand name to expose the bare
+# brand (e.g. "myntra deals india" -> "myntra"). Operates on already-lowercased
+# text (no re.IGNORECASE), so a compiled, flag-less pattern is behaviour-exact.
+# Shared with discovery._generate_search_variations, which strips the identical
+# vocabulary — kept here (a leaf module discovery already imports) as the single
+# source of truth so the two never drift.
+DEAL_WORD_STRIP_RE = re.compile(
+    r"\b(deals?|offers?|coupons?|india|online|shopping|loot"
+    r"|discounts?|sales?|promotions?|cashback)\b"
+)
+
 # ── helpers ──────────────────────────────────────────────────────────
 
 
@@ -112,18 +123,34 @@ def _build_domain_candidates(title: str | None, username: str | None) -> list[st
         _add(step2, seen, candidates)
 
         # 3 — strip deal-related words to expose the bare brand name
-        step3 = re.sub(
-            r"\b(deals?|offers?|coupons?|india|online|shopping|loot"
-            r"|discounts?|sales?|promotions?|cashback)\b",
-            "", step2,
-        )
+        step3 = DEAL_WORD_STRIP_RE.sub("", step2)
         _add(step3, seen, candidates)
 
     return candidates
 
 
+# Bounds on the (synchronous) HTTP probe. Each _http_fetch can block up to its
+# timeout, so without a cap a single competitor could fan out to ~144 probes
+# (6 domain candidates x 6 TLDs x {bare,www} x {https,http}) and stall the
+# discovery/onboarding pipeline for minutes. Cap total probes and enforce an
+# overall wall-clock deadline instead.
+MAX_PROBE_URLS = 14
+PROBE_DEADLINE_SECONDS = 30.0
+
+
 def _http_probe_platform(candidates: list[str]) -> str | None:
-    """Try each candidate with each TLD; return ``"platform"`` or ``"channel"``."""
+    """Try candidate domains; return ``"platform"`` or ``"channel"``.
+
+    Bounded worst case: at most ``MAX_PROBE_URLS`` probe URLs and
+    ``PROBE_DEADLINE_SECONDS`` of wall-clock. A real match is still found first
+    because the priority order (bare domain, https, common TLDs first) is
+    preserved — only the never-matching tail is dropped.
+    """
+    import time
+
+    # Build a deduped, priority-ordered list of probe URLs, then cap it.
+    probe_urls: list[str] = []
+    seen: set[str] = set()
     for slug in candidates:
         if len(slug) < 3:
             continue
@@ -132,12 +159,21 @@ def _http_probe_platform(candidates: list[str]) -> str | None:
             for base in (domain, f"www.{domain}"):
                 for scheme in ("https", "http"):
                     url = f"{scheme}://{base}/"
-                    html = _http_fetch(url)
-                    if html is None:
+                    if url in seen:
                         continue
-                    if _is_platform_html(html):
-                        return "platform"
-                    return "channel"  # page exists but not a deal platform
+                    seen.add(url)
+                    probe_urls.append(url)
+
+    deadline = time.monotonic() + PROBE_DEADLINE_SECONDS
+    for url in probe_urls[:MAX_PROBE_URLS]:
+        if time.monotonic() >= deadline:
+            break
+        html = _http_fetch(url)
+        if html is None:
+            continue
+        if _is_platform_html(html):
+            return "platform"
+        return "channel"  # page exists but not a deal platform
     return None
 
 
