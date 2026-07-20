@@ -28,6 +28,26 @@ services:
         sync: false
       - key: TELEGRAM_PHONE
         sync: false
+      - key: TELEGRAM_SESSION_NAME
+        # On the mounted disk -> survives redeploys. Matches the local session file
+        # name (growth_agent.session), so that file can be uploaded to /app/data as-is;
+        # telegram-login is interactive and cannot be run on Render.
+        value: /app/data/growth_agent
+      - key: OWNED_CHANNELS
+        sync: false          # channels to COLLECT + LEARN from, e.g. GrabOnIndiaOfficial
+      - key: PUBLISH_CHANNEL
+        sync: false          # the ONLY channel auto-send posts to. Leave BLANK to post
+                             # nowhere; set to your test channel to post there instead of
+                             # the real one. Never set this to the live channel until you
+                             # actually intend every planned post to go out publicly.
+      - key: DEAL_API_BASE
+        sync: false          # latest-deals endpoint; without it jit_fill fills 0 slots
+      - key: DEAL_API_AUTH
+        sync: false
+      - key: AI_PROVIDER
+        value: openai
+      - key: OPENAI_API_KEY
+        sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: API_SECRET_KEY

@@ -140,15 +140,15 @@ public URL for the frontend and its CORS setting.
 4. **Variables** — set: `ENVIRONMENT=production`, `SCHEDULERS_AUTOSTART=true`,
    `AUTH_SECRET` (long random string), `ADMIN_EMAIL`, `ADMIN_PASSWORD`,
    `CORS_ORIGIN` (your Vercel URL, e.g. `https://dealwing.vercel.app`),
-   `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE`, `GROQ_API_KEY`,
-   `API_SECRET_KEY`. `PORT` is injected by Railway automatically.
+   `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE`, `AI_PROVIDER=openai`,
+   `OPENAI_API_KEY` (or `GROQ_API_KEY`), `API_SECRET_KEY`. `PORT` is injected by Railway automatically.
 5. Deploy. The admin user is auto-seeded on first boot; check `GET /<url>/api/health`.
 
 ### Backend → Render (alternative)
 
 The repo ships a `render.yaml` blueprint. **New → Blueprint → pick this repo**; Render
 builds `be/Dockerfile`, attaches a 1 GB disk at `/app/data`, and prompts for the
-`sync: false` secrets (`CORS_ORIGIN`, `ADMIN_*`, `TELEGRAM_*`, `GROQ_API_KEY`,
+`sync: false` secrets (`CORS_ORIGIN`, `ADMIN_*`, `TELEGRAM_*`, `OPENAI_API_KEY`,
 `API_SECRET_KEY`). `AUTH_SECRET` is generated for you. Health check: `/api/health`.
 
 ### Frontend → Vercel
@@ -180,7 +180,7 @@ builds `be/Dockerfile`, attaches a 1 GB disk at `/app/data`, and prompts for the
 | Layer     | Stack                                                                 |
 | --------- | --------------------------------------------------------------------- |
 | Frontend  | Vite, React, TypeScript, TailwindCSS, shadcn/ui, TanStack Query, Axios, Recharts |
-| Backend   | FastAPI, Uvicorn, SQLAlchemy, Typer, APScheduler, Groq (LLM)          |
+| Backend   | FastAPI, Uvicorn, SQLAlchemy, Typer, APScheduler, OpenAI/Groq (LLM)   |
 | Auth      | PBKDF2 password hashing + HMAC‑signed tokens (stdlib)                 |
 | Storage   | SQLite (default)                                                      |
 | Infra     | Docker (backend)                                                      |

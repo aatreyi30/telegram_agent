@@ -52,8 +52,8 @@ flowchart LR
 
     subgraph AI["AI layer (ai/)"]
         CTX["context.py\n(read-only bundlers)"]
-        GROQ["AIClient → Groq LLM"]
-        OUT["Planner (day+week) /\nBriefing / Coach"]
+        GROQ["AIClient → LLM\n(OpenAI default, Groq)"]
+        OUT["Planner (day+week) /\nCoach"]
         COPY["Copywriter\n(write_for_item)"]
     end
 
@@ -254,7 +254,6 @@ flowchart TD
 | `link_resolution` | 15 min (`LINK_RESOLVE_INTERVAL_MIN`) | Resolve shortlinks → merchant | Live |
 | `stats_refresh` | 30 min | Re-check views/forwards/reactions on recent posts | Live |
 | `merchant_feed_sync` | 30 min | Pull + enrich deal feed | Live |
-| `deal_ranking` | 30 min | `DealScoringEngine` — persist an audience-fit `DealScore` per active deal (feeds `/deals/scored` + planner `scored_deals`) | Live |
 | `outcome_collector` | 15 min | Advance `post_outcomes` through T+1h/6h/24h view snapshots (feeds prediction scoring **and** velocity-based learning) | Live |
 | `competitor_discover` | daily 06:30 | Find new competitor channels | Live |
 | `competitor_intel` | daily 07:00 | Rebuild competitor profiles/benchmarks (delete-all-then-rebuild-all each run) | Live |
@@ -263,20 +262,16 @@ flowchart TD
 | `daily_report` | daily 05:15 | Persist `daily_channel_reports` | Live |
 | `daily_plan` | daily **06:00** | Generate today's **AI daily plan** (per-post slots: window/type/theme/merchant) via `ensure_daily_ai_plan`. **No longer pre-renders drafts** — slots are filled just-in-time | Live |
 | `jit_fill` | 1 min | For each AI-plan slot due within a 3-min lookahead: scrape the live pool, pick a fresh item matching theme/merchant (broadens + logs on miss), AI-write the post (template fallback), write `generated_posts` + enqueue. Idempotent per slot | Live |
-| `ai_daily_summary` | daily 08:00 | Groq daily briefing (text only, not stored) | Live |
-| `weekly_report` | Mon 08:30 | Deterministic weekly plan (`CampaignPlanningEngine`) + **AI weekly plan** (`generate_week_plan` → persisted as the WEEKLY `campaign_plans` row the daily planner reads) + Groq weekly briefing | Live |
+| `weekly_report` | Mon 08:30 | Deterministic weekly plan (`CampaignPlanningEngine`) + **AI weekly plan** (`generate_week_plan` → persisted as the WEEKLY `campaign_plans` row the daily planner reads) | Live |
 | `weekly_retro` | Mon 07:30 | Compare last week's predictions vs actuals (before `weekly_report`) | Live |
 | `queue_processor` | 1 min | Publish due `scheduled_posts` | Live (send gated on admin rights + sign-off) |
 | `notification_engine` | 5 min | Flag blocked posts / failed runs | Live |
 | `org_health` | 1 h | Check config completeness | Live |
 | `url_health` | 12 h | Sweep `enriched_deals` for dead links | Live |
-| `analytics_aggregation` | 1 h | Aggregate analytics data | Live |
-| `deal_expiry` | 1 h | Mark expired deals invalid | Live |
 | `db_cleanup` | daily 03:00 | Delete old `scheduler_runs`/`collection_events` (+ 90-day competitor-intel prune) | Live |
-| `deal_monitoring`, `price_history` | 2h / 6h | Stock / price checks | **Stub — always returns "limited"** |
 | `monthly_report` | 1st @ 00:05 | 30-day post count | **Placeholder, no dedicated table** |
 
-**Why the stubs/placeholder are still registered (not deleted):** `deal_monitoring` and `price_history` need per-merchant price/stock scraping, which is blocked or has no API for most merchants today (see the `merchants` registry) — so they return an honest `"limited"` instead of fabricating stock/price data. `monthly_report` has no dedicated rollup table yet. They're kept in the registry on purpose: each **reserves its cadence slot**, still writes a `SchedulerRun` audit row every run (so the pipeline is complete and observable), and **lights up automatically** the moment the missing capability (merchant scraping / a monthly table) lands — no scheduler rewiring needed. A visible `"limited"` beats a silent gap.
+**Removed jobs (were registered, now deleted):** `deal_ranking` (drove the deleted `DealScoringEngine`), `ai_daily_summary` and the Groq weekly briefing (the free-text briefing generator was removed — the daily/weekly **plan digests** already serve as the operator briefing), plus the `deal_monitoring` / `price_history` / `deal_expiry` / `analytics_aggregation` stubs (no-op or redundant: expiry was a duplicate of `url_health`, aggregation is computed on demand). `monthly_report` stays as an honest placeholder until a dedicated rollup table exists.
 
 There's also a **legacy, unused** `CollectionScheduler` (`services/collection/scheduler.py`) that reads the old `OWNED_INCREMENTAL_INTERVAL_MIN`-style env vars — only reachable via `cli.py`, not wired into the app. Not part of the live system.
 
@@ -305,20 +300,75 @@ The clock times aren't arbitrary — the daily jobs form a strict **producer →
 
 ---
 
-## 5. AI layer — how Groq gets used
+## 4.5 Content lifecycle — weekly plan → today's plan → publish → learn
+
+The end-to-end flow one post travels, grouped into pre-posting / during / post.
+
+### Phase 0 — Weekly (Monday IST)
+
+| Step | Job (cadence) | What happens | Reads → Writes |
+|---|---|---|---|
+| Retro | `weekly_retro` (Mon 07:30) | Compare last week's predictions vs actuals | `post_predictions` + `post_outcomes` → `weekly_retros` |
+| Weekly plan | `weekly_report` (Mon 08:30) | Deterministic weekly blueprint + AI `generate_week_plan` → week theme / direction / loot-deal ratio | reports/profiles → `campaign_plans` (WEEKLY) |
+
+The WEEKLY row is what the daily planner reads as `this_week_theme` / `direction`.
+
+### Phase 1 — PRE-POSTING: build today's plan (daily chain, ordered by clock)
+
+| Job (cadence) | What happens | Reads → Writes |
+|---|---|---|
+| `telegram_sync` (5m) / `competitor_sync` (10m) | Pull new owned + competitor posts | Telegram → `posts`, `competitor_posts` |
+| `normalize_posts` (5m) | Raw → structured | → `normalized_posts` |
+| `link_resolution` (15m) | Resolve shortlinks → merchant | → `extracted_links.merchant_key` |
+| `merchant_feed_sync` (30m) | Pull the deal pool from GrabCash | → `enriched_deals` |
+| `learning` (02:00) | Rebuild "what's working" from matured metrics | → `channel_style_profiles`, `post_type_performance`, `learning_records` |
+| `daily_report` (05:15) | Persist yesterday's aggregates | → `daily_channel_reports` |
+| `growth_detection` (05:30) | Learning + reports → strategy blueprint (windows, content mix) | → `growth_strategies` |
+| **`daily_plan` (06:00)** | `ensure_daily_ai_plan`: weekly theme + blueprint + reports + `available_deals` + 14-day trajectory → AI `generate_day_plan` → deterministic factcheck → persist | → **`campaign_plans` (DAILY, `post_slots`)** |
+
+The `post_slots` (window / type / theme / merchant) are the day's source of truth. `available_deals` (from `enriched_deals`, no scoring) supplies the merchant/category vocabulary the slots must use.
+
+### Phase 2 — PRE-POSTING: fill each slot just-in-time
+
+| Job (cadence) | What happens | Reads → Writes |
+|---|---|---|
+| **`jit_fill` (every 1m)** | For each slot due within a 3-min lookahead: scrape the live pool → pick a fresh item matching theme/merchant (loot = distinct categories; deal = one product) → apply our affiliate link → AI copy (`write_for_item`/`write_for_loot`, template fallback) → draft + queue at the slot's fire time + baseline prediction | `campaign_plans` + live deals → `generated_posts`, `scheduled_posts`, `post_predictions` |
+
+Content is scraped fresh ~3 min before it fires — per-minute, not one batch.
+
+### Phase 3 — DURING POSTING: publish
+
+| Job (cadence) | What happens | Reads → Writes |
+|---|---|---|
+| **`queue_processor` (every 1m)** | Publish due `scheduled_posts` → `Publisher.publish`: revalidate deal → verify admin rights → send → set status | → status `PUBLISHED`/`BLOCKED`/`RETRY`/`FAILED` |
+
+The real send is **hard-gated** (`_check_and_publish` returns `False` — never posts to the owned channel). Dev testing posts to a test chat via `dev_send`. Retries 60→120→240s, max 3.
+
+### Phase 4 — POST-POSTING: measure & close the loop
+
+| Job (cadence) | What happens | Reads → Writes |
+|---|---|---|
+| `stats_refresh` (30m) | Re-check views/forwards/reactions | → `posts`, `post_metric_snapshots` |
+| `outcome_collector` (15m) | Advance each post through T+1h / 6h / 24h view snapshots | → `post_outcomes` |
+| `weekly_retro` (Mon) | Predictions vs actuals → next weekly plan | closes the weekly loop |
+| `learning` (next 02:00) | Re-read matured metrics → feed tomorrow's plan | **closes the daily loop** |
+
+> **Jobs vs Queue (dashboard):** `scheduler_runs` (Jobs page) = the cron machinery — which background jobs run and their health. `scheduled_posts` (Queue page) = the product — individual posts waiting to publish. The `queue_processor` *job* drains the *queue*.
+
+---
+
+## 5. AI layer — how the AI layer works
 
 ```mermaid
 flowchart LR
     DB[("DB: reports, profiles,\nstrategies, insights, deals")] --> CTX["context.py\n(read-only, no LLM)"]
-    CTX --> CLIENT["AIClient\n(Groq, llama-3.3-70b)"]
+    CTX --> CLIENT["AIClient\n(provider-selectable:\nOpenAI default, Groq)"]
     CLIENT --> PLANNER["planner.py\ngenerate_day_plan()\ngenerate_week_plan()"]
-    CLIENT --> BRIEF["briefing.py\ndaily/weekly briefing"]
     CLIENT --> COACH["coach.py\nGrowthCoach (agentic Q&A)"]
     CLIENT --> COPY["copywriter.py\nwrite_for_item()"]
     PLANNER --> FC["factcheck.py\n(deterministic, no LLM)\nverifies every cited number"]
     FC --> CPLAN[("campaign_plans")]
-    BRIEF --> TXT["text only\n(not persisted)"]
-    COACH --> TXT
+    COACH --> TXT["text only\n(not persisted)"]
     CPLAN --> JIT["jit_fill\n(reads plan slots +\nfresh scraped deals)"]
     FRESH[("live deal pool")] --> JIT
     JIT --> COPY
@@ -327,11 +377,39 @@ flowchart LR
 
 - **Every AI call is grounded** — `context.py` builds the JSON bundle from real DB rows first; the LLM never sees free-form access to the database.
 - **Fact-checking is deterministic**, not AI: `factcheck.py` checks every number the planner cited against `daily_channel_reports` (2% tolerance) before the plan is marked trustworthy.
-- **The planner persists output and it drives scheduling.** `campaign_plans` holds both the AI **daily** plan (per-day, cached per day — see `daily_brief()`/`ensure_daily_ai_plan()`) and the AI **weekly** plan (`generate_week_plan`, persisted Mon 08:30 and read back by the daily planner as `this_week_theme`/`this_week_direction`). The daily plan's `post_slots` are the **source of truth** the `jit_fill` worker executes — no longer a dashboard-only artifact. Briefing and coach answers are request/log-only, not stored.
-- **Every AI call uses a real system prompt.** `AIClient.complete()` puts `GROUNDING_SYSTEM` + the call's instruction block in the *system* role. The planner, briefing, coach and copywriter all pass their instructions via `system_extra=` (the briefing previously smuggled them into the user message — fixed).
+- **The planner persists output and it drives scheduling.** `campaign_plans` holds both the AI **daily** plan (per-day, cached per day — see `daily_brief()`/`ensure_daily_ai_plan()`) and the AI **weekly** plan (`generate_week_plan`, persisted Mon 08:30 and read back by the daily planner as `this_week_theme`/`this_week_direction`). The daily plan's `post_slots` are the **source of truth** the `jit_fill` worker executes — no longer a dashboard-only artifact. The plan's `digest` doubles as the operator briefing; coach answers are request/log-only, not stored.
+- **Every AI call uses a real system prompt.** `AIClient.complete()` puts `GROUNDING_SYSTEM` + the call's instruction block in the *system* role. The planner, coach and copywriter all pass their instructions via `system_extra=`.
 - **Scheduled draft text is AI-first with a deterministic fallback.** `jit_fill` calls `Copywriter.write_for_item()` — it hands the model the slot's freshly-scraped deal plus the org's saved deal/loot **post template as the "winning-format" exemplar** — and only if the AI is unavailable does it fall back to `PostFormatter` template rendering. The post-text templates are **editable** and live in `organizations.settings["post_templates"]` (seeded from code defaults; safe-rendered so a bad edit can never crash generation). The older fully-deterministic engines (`engine.py`) still back the opt-in `/run/generate-live` path.
 - `insight_writer.narrate()` is a small AI-assist used *inside* the Growth/Reasoning engines to phrase a "why" sentence from evidence — always has a deterministic fallback string if AI is unavailable.
-- **The planner degrades gracefully without AI.** When Groq is unavailable (`ai_available:false`), `/plan/daily` still returns a full deterministic plan — `posting_windows`, `deal_type_allocation`, and `merchant_allocation` are computed by `CampaignPlanningEngine` from real history (see §7 note on cold-start fallbacks). Only the free-text digest / AI-only slots go empty, and `jit_fill` falls back to template-rendered copy.
+- **The planner degrades gracefully without AI.** When the AI is unavailable (`ai_available:false`), `/plan/daily` still returns a full deterministic plan — `posting_windows`, `deal_type_allocation`, and `merchant_allocation` are computed by `CampaignPlanningEngine` from real history (see §7 note on cold-start fallbacks). Only the free-text digest / AI-only slots go empty, and `jit_fill` falls back to template-rendered copy.
+
+---
+
+## 5.5 AI call audit — every product LLM call, input → output
+
+**All calls share one client.** `AIClient` (`ai/client.py`) is **provider-selectable** (`AI_PROVIDER`): **OpenAI reasoning** (default `gpt-5-mini-2025-08-07`) when `OPENAI_API_KEY` is set, else **Groq** (`llama-3.3-70b-versatile`). Both go through `chat.completions.create`. Every call sends `system = GROUNDING_SYSTEM + <the per-call prompt>` and `user = <grounded context>`. **No JSON mode** — JSON is prompted for, parsed defensively, then fact-checked. `AIClient.agentic()` (tool loop) is coach/CLI only.
+
+- **OpenAI reasoning path:** goes through the **Responses API** with `reasoning={"effort", "summary":"auto"}` so we capture the model's **diarized reasoning summary** (OpenAI never returns raw CoT — only this summary). System prompt is passed as `instructions`; `max_output_tokens = budget + 2000` headroom (reasoning tokens count against the output budget, so a tight cap would truncate the answer). Groq path uses `chat.completions` with `max_tokens` + `temperature=0.3`; `effort` is a no-op there.
+- **Every call is traced** to the **`ai_traces`** table (`db/models_ai_trace.py`), written at the single choke point `AIClient.complete`: input (user), system prompt, output, **reasoning summary**, `reasoning_tokens`/prompt/completion tokens, `reasoning_effort`, provider, model, `latency_ms`, `call` label, `channel_id`, `ok`/`error`, `created_at`. This is the evaluation ledger — replay any row's input against a new model and diff.
+
+> Migration: set `AI_PROVIDER=openai`, `OPENAI_API_KEY=…`, `AI_MODEL=gpt-5-mini-2025-08-07` in `.env` — no code change. Compare outputs by querying `ai_traces` (filter by `call`).
+
+**Prompts merged 4 → 2 this iteration.** The two standalone briefing prompts (`DAILY_INSTRUCTIONS`/`WEEKLY_INSTRUCTIONS`, the old `BriefingGenerator`) were **deleted**: the plan already emits a narrative `digest`, so the day/week plan prompts now absorb the "what to do" / weekly-retro content and their digest *is* the operator briefing. The `ai_daily_summary` job and the write-only `ai_outputs` briefing rows are gone.
+
+| # | Call (fn · file) | Prompt · trace `call` | Trigger | Input (user message) | Output | Params | Persisted |
+|---|---|---|---|---|---|---|---|
+| 1 | `generate_day_plan` · `ai/planner.py` | `PLAN_INSTRUCTIONS` · `day_plan` | `daily_plan` job 06:00 · regenerate | yesterday report, 14d trajectory, cadence, `available_deals`, posting windows, deal-type alloc, week theme, directive + **steering history** | digest (**doubles as daily briefing**: went-well/badly + do-today) + `===PLAN===` + `post_slots` JSON | `3200`, effort | `campaign_plans` DAILY (fact-checked) + `ai_traces` |
+| 2 | `generate_week_plan` · `ai/planner.py` | `WEEK_PLAN_INSTRUCTIONS` · `week_plan` | `weekly_report` job Mon · `/plan/weekly` · regenerate | last-week evidence: post-type perf, merchant opps, follower deltas, retro, directive | digest (**doubles as weekly retro**: win/concern/what-to-change) + `daily_themes`/`direction`/`loot_deal_ratio` JSON | `2000`, effort | `campaign_plans` WEEKLY + `ai_traces` |
+| 3 | `Copywriter.write_for_item` · `ai/copywriter.py` | `COPYWRITER_INSTRUCTIONS` · `copywriter_deal` | `jit_fill` (per **deal** slot, 1m) | PRODUCT, FORMAT_REFERENCE (`_deal_examples`), slot theme/merchant, CHANNEL_STYLE; `<link/>` swapped after | `<hook>/<name>/<price>/<cta>` tags → post | `600`, `low` | `generated_posts` + `ai_traces` |
+| 4 | `Copywriter.write_for_loot` · `ai/copywriter.py` | `LOOT_INSTRUCTIONS` · `copywriter_loot` | `jit_fill` (per **loot** slot) | ITEMS (label → `<LINK_n>`), price cap, `_loot_examples`, CHANNEL_STYLE | `<theme>/<items>` tags → loot | `600`, `low` | `generated_posts` + `ai_traces` |
+| 5 | `insight_writer.narrate` · `ai/insight_writer.py` | `NARRATE_SYSTEM` · `narrate` | inside Growth/Reasoning engines (daily) | kind + observation + evidence JSON | one grounded sentence (deterministic fallback on failure) | `120`, `low` | in `growth_*`/`reasoned_insights` + `ai_traces` |
+| 6 | `verify_candidate` · `collection/discovery.py` | `VERIFY_CANDIDATE_SYSTEM` · `verify_candidate` | `competitor_discover` job 06:30 (only when < `competitor_target` and the match is ambiguous) | brand + candidate handles/titles | JSON `{handle, Direct/Indirect}` | `120` | `competitors` + `ai_traces` |
+
+> **CLI-only, excluded from the product runtime (not traced):** `Copywriter.write_for_deal` (`write-post`, same prompt as #3) and `GrowthCoach.ask` (`COACH_SYSTEM` + agentic tool loop, only caller is `cli.py` — no route/scheduler).
+
+**Removed earlier:** `DealScoringEngine` / `deal_ranking` / `deal_scores` / `/deals/scored` (planner reads `available_deals` from `enriched_deals`, no scoring); plan-page Deal queue / merchant-mix graph / trajectory timeline.
+
+**Cost:** the per-post copy calls (3,4) dominate volume; the day/week plans (1,2) are the largest single prompts (~5.5k in / 2.2k out). On `gpt-5-mini` reasoning, per-post copy stays cheap but reasoning tokens add to completion cost — watch `ai_traces.reasoning_tokens` to tune `AI_REASONING_EFFORT`.
 
 ---
 
@@ -348,8 +426,7 @@ flowchart LR
 | `/drafts` | `/drafts` | `generated_posts` |
 | `/queue` | `/queue` | `scheduled_posts` |
 | `/settings` | `/org`, `/users`, `/channels`, `/competitors` (GET + POST) | `organizations`, `users`, `channels`, `competitors` — the Competitors tab lists/adds competitors (Direct/Indirect); the **Post Templates** tab (owner-only) reads/writes `organizations.settings["post_templates"]` via `PATCH /org` (partial merge) |
-
-No page currently reads `scheduler_runs` — there's no Schedulers status page/router yet, even though the audit table exists.
+| `/schedulers` | `/schedulers/runs` | `scheduler_runs` — per-job cadence, priority, last status, last run, detail |
 
 ---
 
@@ -380,7 +457,7 @@ Backend rooted at `be/`, frontend at `next/`. Only the load-bearing files are li
 | **Analytics** | `services/analytics/views.py` | `compute()` — the `/analytics` payload (`by_hour[].n`, `golden_hours`, etc.); `_owned_rows()` + `to_ist()` are the canonical owned-post/hour source. |
 | | `services/analytics/day.py`, `comparison.py`, `competitor_trends.py` | `/day` summary, us-vs-competitor comparison, per-competitor trends. |
 | **Intelligence** | `services/intelligence/growth.py` | `GrowthEngine` — growth blueprint incl. `posting_plan` (via `build_posting_plan`), content-mix. |
-| **AI** | `ai/context.py` | Read-only DB→JSON bundlers (grounding). `ai/planner.py` (`generate_day_plan` + `generate_week_plan`), `briefing.py`, `coach.py`, `copywriter.py` (`write_for_item` fill-time + `write_for_deal` CLI), `factcheck.py`, `insight_writer.py`, `client.py` (Groq — `complete()` takes `system_extra`). Prompts in `ai/prompts/`. |
+| **AI** | `ai/context.py` | Read-only DB→JSON bundlers (grounding). `ai/planner.py` (`generate_day_plan` + `generate_week_plan`), `coach.py`, `copywriter.py` (`write_for_item` fill-time + `write_for_deal` CLI), `factcheck.py`, `insight_writer.py`, `client.py` (provider-selectable OpenAI/Groq — `complete()` takes `system_extra`). Prompts in `ai/prompts/`. |
 | **Learning** | `services/learning/channel_learning.py` | `ChannelLearningEngine` — `Fact.view_rate()` prefers true first-24h velocity (nearest T+24h `post_metric_snapshots`) over the cumulative views/age proxy; emits `channel_style_profiles`/`post_type_performance`/`learning_records`. |
 | **DB** | `db/models*.py` | ORM split across `models.py` + `models_*.py` by domain. `db/base.py` = `Base`. |
 | | `db/migrate.py` | `add_missing_columns(engine)` — the additive-column patcher (**no Alembic**; see §8). |
@@ -411,3 +488,147 @@ Backend rooted at `be/`, frontend at `next/`. Only the load-bearing files are li
 - **SQLite pragmas** (`db/session.py`): `foreign_keys=ON`, `journal_mode=WAL`, `busy_timeout=5000` on every connection.
 - **Sync SQLAlchemy 2.0** throughout — use `session_scope()`; engines/sessionmakers are `lru_cache`d.
 - **IST is the product timezone.** Analytics/schedulers bucket by IST via `to_ist()`; timestamps in the DB are UTC.
+
+---
+
+## 9. AI cost estimation (GPT-4o-mini)
+
+Pricing reference (OpenAI, as of Jul 2026): **$0.15 / 1M input tokens**, **$0.60 / 1M output tokens**. Context window 128K.
+
+### 9.1 Per-call token estimates (current architecture — isolated, stateless calls)
+
+| Call type | Calls/day | Input tok/call | Output tok/call | Daily input tok | Daily output tok |
+|---|---|---|---|---|---|
+| `generate_day_plan` | 1 | ~5,500 | ~2,200 | 5,500 | 2,200 |
+| `generate_week_plan` | 1/week | ~4,000 | ~1,400 | (see Mon) | (see Mon) |
+| Daily briefing | 1 | ~2,250 | ~300 | 2,250 | 300 |
+| Weekly briefing | 1/week | ~3,500 | ~450 | (see Mon) | (see Mon) |
+| `Copywriter.write_for_item` | ~5 | ~750 | ~175 | 3,750 | 875 |
+| `insight_writer.narrate` | ~5 | ~650 | ~45 | 3,250 | 225 |
+| `verify_candidate` (discovery) | ~2 | ~850 | ~30 | 1,700 | 60 |
+| **Typical weekday** | **14** | | | **16,450** | **3,660** |
+| Monday (add weekly plan + briefing) | +2 | | | +7,500 | +1,850 |
+| **Monday total** | **16** | | | **23,950** | **5,510** |
+
+### 9.2 Daily cost
+
+| Day | Input cost | Output cost | Total |
+|---|---|---|---|
+| Typical weekday | 16,450 × $0.15/1M = $0.0025 | 3,660 × $0.60/1M = $0.0022 | **$0.0047** |
+| Monday | 23,950 × $0.15/1M = $0.0036 | 5,510 × $0.60/1M = $0.0033 | **$0.0069** |
+
+### 9.3 Monthly projection (scheduled crons only)
+
+| Item | Days | Cost |
+|---|---|---|
+| 28 typical weekdays | 28 | $0.13 |
+| 3 Mondays | 3 | $0.02 |
+| **Monthly total (scheduled only)** | 31 | **~$0.15** |
+
+### 9.4 With operator usage (on-demand coach)
+
+The GrowthCoach agentic loop averages ~5,000 tokens/question (cumulative across tool-call iterations).
+
+| Coach Q&A sessions/day | Extra daily cost | Monthly total |
+|---|---|---|
+| 0 (fully automated) | $0.000 | **$0.15** |
+| 5 (light operator use) | $0.008 | **$0.39** |
+| 20 (heavy operator use) | $0.030 | **$1.05** |
+
+### 9.5 Full agentic rewrite estimate (single agent, all tool calls)
+
+If the entire pipeline were replaced by a **single GPT-4o-mini agent** making sequential tool calls with accumulating context:
+
+| Phase | Cumulative input tok | Output tok |
+|---|---|---|
+| 8 data-gathering tool calls | ~80,000 | ~800 |
+| Planning reasoning | ~20,000 | ~1,000 |
+| 5-8 post generations | ~150,000 | ~1,500 |
+| Validation + finalization | ~36,000 | ~500 |
+| **Total per daily run** | **~286,000** | **~3,800** |
+
+| | Daily | Monthly |
+|---|---|---|
+| Input cost (286K × $0.15/1M) | $0.043 | |
+| Output cost (3.8K × $0.60/1M) | $0.002 | |
+| **Agentic daily total** | **$0.045** | **~$1.35** |
+
+### 9.6 Comparison table — all candidate models (monthly)
+
+| Model | Input / 1M | Output / 1M | Monthly (current arch.) | Monthly (agentic rewrite) |
+|---|---|---|---|---|
+| Groq llama-3.3-70b (current) | Free | Free | $0.00 | — |
+| **GPT-4o-mini** | $0.15 | $0.60 | **$0.15** | **$1.35** |
+| DeepSeek V3 | $0.27 | $1.10 | $0.27 | ~$2.50 |
+| GPT-4o | $2.50 | $10.00 | $2.50 | ~$22.00 |
+| Claude 3.5 Sonnet | $3.00 | $15.00 | $3.75 | ~$33.00 |
+
+### 9.7 Takeaway
+
+The current **isolated-call architecture keeps GPT-4o-mini costs under $0.20/month**. A full agentic rewrite would increase costs ~9× to ~$1.35/month — still cheap, but the real risk is latency (sequential tool calls) and token blow-up on complex days. The hybrid approach (deterministic orchestration + AI only for generation) is the sweet spot for cost efficiency.
+
+---
+
+## 9. AI cost estimation — GPT-4o-mini
+
+**Model pricing (OpenAI, as of 2025-09):** Input **$0.15 / 1M tokens** · Output **$0.60 / 1M tokens** · Context window 128K.
+
+All estimates below use the **current isolated-call architecture** (§5) — each AI call is stateless with a fixed-size prompt; there is no agentic context accumulation.
+
+### 9.1 Per-call token budget
+
+| Call | Freq | Input tok (est.) | Output tok (est.) | Notes |
+|---|---|---|---|---|
+| `generate_day_plan` | 1×/day | 4,000–7,000 | 1,500–2,800 | Heaviest call — bundles reports, trajectory, scored deals, merchant mix, posting windows |
+| `generate_week_plan` | 1×/week (Mon) | 3,000–5,000 | 1,000–1,800 | Full weekly briefing context |
+| `BriefingGenerator` (daily) | 1×/day | 1,500–3,000 | 200–400 | Insights + recommendations + channel style |
+| `BriefingGenerator` (weekly) | 1×/week (Mon) | 2,500–4,500 | 300–600 | Same context as weekly plan |
+| `Copywriter.write_for_item` | 3–8×/day | 600–900 | 100–250 | Per JIT-filled slot; `effort="low"` |
+| `insight_writer.narrate` | 4–6×/day | 500–800 | 30–60 | GrowthEngine + ReasoningEngine; always has deterministic fallback |
+| `verify_candidate` (discovery) | 0–5×/day | 700–1,000 | 20–40 | Only fires for ambiguous competitor candidates |
+| `GrowthCoach.ask` (operator) | 0–∞×/day | 3,000–7,500 | 200–500 | Agentic loop (up to 8 iterations); operator-triggered only |
+
+### 9.2 Daily cost — scheduled crons only
+
+| Call type | Calls/day | Input cost | Output cost | Subtotal |
+|---|---|---|---|---|
+| Daily plan | 1 | $0.0008 | $0.0013 | $0.0021 |
+| Daily briefing | 1 | $0.0003 | $0.0002 | $0.0005 |
+| Copywriter (×5 avg) | 5 | $0.0006 | $0.0005 | $0.0011 |
+| Insight narrator (×5 avg) | 5 | $0.0005 | $0.0001 | $0.0006 |
+| Discovery verify (×2 avg) | 2 | $0.0003 | $0.0000 | $0.0003 |
+| **Weekday total** | **14** | **$0.0025** | **$0.0021** | **$0.0046** |
+| Monday add (weekly plan + briefing) | +2 | $0.0020 | $0.0013 | $0.0033 |
+| **Monday total** | **16** | **$0.0045** | **$0.0034** | **$0.0079** |
+
+### 9.3 Monthly projection
+
+| Scenario | Calculation | Monthly cost |
+|---|---|---|
+| **Scheduled crons only** | 28 weekdays × $0.0046 + 3 Mondays × $0.0079 | **~$0.15** |
+| **+ 5 coach Q&A/day** | + 5 × $0.0030 × 30 | **~$0.60** |
+| **+ 10 insight narrations/day** (heavy) | + 5 extra × $0.0002 × 30 | **~$0.03** |
+| **Full realistic range** | | **$0.15 – $0.78** |
+| **Heavy operator usage (20 coach/day)** | + 20 × $0.0030 × 30 | **~$1.95** |
+| **Absolute ceiling** | | **< $2.00** |
+
+### 9.4 Comparison with other models (same architecture, monthly)
+
+| Model | Input / 1M | Output / 1M | Monthly (scheduled) | Monthly (realistic) |
+|---|---|---|---|---|
+| Groq llama-3.3-70b (current) | Free (rate-limited) | Free (rate-limited) | $0.00 | $0.00 |
+| GPT-4o-mini | $0.15 | $0.60 | $0.15 | $0.15–$0.78 |
+| DeepSeek V3 | $0.27 | $1.10 | $0.27 | $0.27–$1.40 |
+| GPT-4o | $2.50 | $10.00 | $2.50 | $2.50–$13.00 |
+| GPT-4o **agentic** (single agent, full context accumulation) | $2.50 | $10.00 | — | **$27–$33** |
+
+### 9.5 Why agentic is expensive (for reference)
+
+If the system were refactored to a **single agentic loop** (one agent makes all tool calls, reasons, and generates every post), the cumulative context causes a multiplicative blow-up:
+
+- Turn 1 sends ~3K tokens; turn 8 sends ~35K (all prior turns re-sent).
+- A 6-tool-call + 8-slot generation cycle accumulates **~200K input tokens** per daily run.
+- At GPT-4o ($2.50/1M in, $10/1M out): **~$0.54/run** → **~$16/month** just for the main loop.
+- With all supporting agents (discovery, growth, intel, coach): **$27–$33/month**.
+
+The **current isolated-call design keeps costs under $1/month** because each call is stateless and tightly scoped. The trade-off is more deterministic orchestration code; the payoff is 20–30× lower AI spend.
