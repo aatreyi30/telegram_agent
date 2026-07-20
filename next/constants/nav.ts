@@ -26,5 +26,5 @@ export const NAV: NavItem[] = [
   { to: "/plan", label: "Plan", icon: CheckListIcon, group: "Act" },
   { to: "/drafts", label: "Drafts", icon: Sent02Icon, group: "Act" },
   { to: "/queue", label: "Queue", icon: Package02Icon, group: "Act" },
-  { to: "/schedulers", label: "Jobs", icon: Clock01Icon, group: "System" },
+  { to: "/schedulers", label: "System health", icon: Clock01Icon, group: "System" },
 ];

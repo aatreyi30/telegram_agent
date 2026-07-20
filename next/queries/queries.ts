@@ -7,8 +7,8 @@ import type {
   AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorDashboardTrendsResponse,
   CompetitorsResponse,
   DailyBrief, DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
-  OrgResponse, OverviewResponse, PlansResponse, PostsResponse,
-  QueueResponse, RetroLatest, ScoredDealsResponse, SchedulerRunsResponse, UsersResponse, WeeklyBrief, WeeklyResponse,
+  OrgResponse, OverviewResponse, PostsResponse,
+  QueueResponse, RetroLatest, SchedulerRunsResponse, UsersResponse, WeeklyBrief,
 } from "@/types/api";
 
 export function useOverview() {
@@ -74,12 +74,6 @@ export function useCompetitorDashboardTrends(days: number = 30) {
     queryFn: () => api.get<CompetitorDashboardTrendsResponse>(`/competitor-dashboard/trends?days=${days}`),
   });
 }
-export function usePlans() {
-  return useQuery({ queryKey: queryKeys.plans(), queryFn: () => api.get<PlansResponse>("/plans") });
-}
-export function useWeekly() {
-  return useQuery({ queryKey: queryKeys.weekly(), queryFn: () => api.get<WeeklyResponse>("/weekly") });
-}
 export function useGrowth(start?: string | null, end?: string | null, opts?: { enabled?: boolean }) {
   const qs = start && end ? `?start=${start}&end=${end}` : "";
   return useQuery({
@@ -126,11 +120,5 @@ export function useLatestRetro(week?: string | null) {
   return useQuery({
     queryKey: queryKeys.retroLatest(week),
     queryFn: () => api.get<RetroLatest>(`/retro/latest${qs}`),
-  });
-}
-export function useScoredDeals(limit: number = 50) {
-  return useQuery({
-    queryKey: queryKeys.scoredDeals(limit),
-    queryFn: () => api.get<ScoredDealsResponse>(`/deals/scored?limit=${limit}`),
   });
 }

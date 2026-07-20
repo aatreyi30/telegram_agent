@@ -115,7 +115,7 @@ export interface StrategyRationale {
 
 export interface DraftItem {
   id: number; post_type: string; status: string; bucket: string | null; rank_score: number | null;
-  text: string; affiliate_status: string | null;
+  text: string; merchant: string | null; affiliate_status: string | null;
   emoji_policy: Partial<EmojiPolicy> | null; rationale: StrategyRationale | null;
   generated_at: string | null;
 }
@@ -127,7 +127,9 @@ export interface PostItem { id: number; posted_at: string | null; views: number 
 export interface PostsResponse extends PageMeta { items: PostItem[]; }
 
 export interface QueueItem {
-  id: number; post_id: number | null; channel: string | null; category: string | null;
+  id: number; post_id: number | null; channel: string | null;
+  post_type: string | null; merchant: string | null; affiliate_status: string | null;
+  text: string | null; bucket: string | null;
   status: string; scheduled_at: string | null; attempts: string; note: string;
 }
 
@@ -182,55 +184,10 @@ export interface CompetitorDashboardTrendsResponse {
   competitors: { id: number; name: string }[];
 }
 
-export interface DealTypeAllocation { deal_type: string; post_type: string; target_posts: number; avg_views_per_day: number | null; }
 export interface MerchantAllocation { merchant: string; recent_share: number; }
 export interface PostingWindowRow { part: string; hours: string; posts: number; }
-export interface DailyThemeRow { day: string; date: string; theme_focus: string; posts_planned: number; }
 export interface UpcomingEventRow { name: string; date: string; days_away: number; date_confidence: string; }
 export interface PlanRisk { kind?: string; detail: string; [key: string]: unknown; }
-
-export interface DailyPlanBlueprint {
-  posts_planned: number; posting_windows: PostingWindowRow[];
-  deal_type_allocation: DealTypeAllocation[]; merchant_allocation: MerchantAllocation[];
-  emoji_strategy: string[] | null; event_note: string | null;
-}
-
-export interface WeeklyPlanBlueprint {
-  posts_per_day: number; posts_per_week: number; daily_themes: DailyThemeRow[];
-  rotation_for_diversity: string[]; upcoming_events: UpcomingEventRow[];
-}
-
-export interface EventPlanBlueprint {
-  event: string; event_date: string; days_away: number; window_days: number;
-  date_confidence: "exact" | "approximate" | string;
-  recommended_posts_per_day_during_event: number; baseline_posts_per_day: number;
-  ramp_multiplier: number; merchant_focus: string; prep_checklist: string[]; notes: string | null;
-}
-
-export type CampaignPlanDTO =
-  | { plan_type: "daily"; title: string; target_date: string | null; end_date: string | null;
-      confidence: number; blueprint: DailyPlanBlueprint;
-      expected_outcome: { estimated_daily_views: number; basis: string; caveat: string } | null;
-      risks: PlanRisk[] | null; evidence: Record<string, unknown> | null; }
-  | { plan_type: "weekly"; title: string; target_date: string | null; end_date: string | null;
-      confidence: number; blueprint: WeeklyPlanBlueprint;
-      expected_outcome: { note: string } | null; risks: null; evidence: Record<string, unknown> | null; }
-  | { plan_type: "event"; title: string; target_date: string | null; end_date: string | null;
-      confidence: number; blueprint: EventPlanBlueprint;
-      expected_outcome: { note: string } | null;
-      risks: PlanRisk[] | null; evidence: Record<string, unknown> | null; }
-  | { plan_type: string; title: string; target_date: string | null; end_date: string | null;
-      confidence: number; blueprint: Record<string, unknown>;
-      expected_outcome: Record<string, unknown> | null;
-      risks: PlanRisk[] | null; evidence: Record<string, unknown> | null; };
-
-export type PlansResponse = CampaignPlanDTO[];
-
-export interface WeeklyResponse {
-  available: boolean;
-  weekly_plan: { title: string; blueprint: WeeklyPlanBlueprint; expected_outcome: { note: string } | null; confidence: number; generated_at: string | null; } | null;
-  what_changed: ReasonedInsightDTO[]; recommendations: GrowthRecommendation[]; ai_summary: string | null;
-}
 
 // Editable post-text templates stored in org.settings.post_templates. Every key is
 // optional in the type (a fresh org may not have overridden them yet) but the backend
@@ -242,6 +199,11 @@ export interface PostTemplates {
   collection_theme_default?: string;
   collection_item?: string;
   collection_footer?: string;
+  loot_theme_default?: string;
+  loot_item?: string;
+  loot_price_subtitle?: string;
+  cta?: string;
+  footer?: string;
   category_theme_with_tier?: string;
   category_theme_no_tier?: string;
   category_item?: string;
@@ -249,6 +211,11 @@ export interface PostTemplates {
   observed_collection_theme?: string;
   fallback_category_label?: string;
   fallback_title?: string;
+  // UI-only keys: JSON string[] of additional editable blocks the operator keeps for
+  // reference. The generation formatter ignores unknown keys, so these round-trip
+  // through PATCH /org without any backend change.
+  _deal_examples?: string;
+  _loot_examples?: string;
 }
 
 export type PostTemplateKey = keyof PostTemplates;
@@ -401,21 +368,6 @@ export interface RetroMetrics {
 export type RetroLatest =
   | { available: false; week_start: null; metrics: null; narrative: null; }
   | { available: true; week_start: string; metrics: RetroMetrics; narrative: string | null; created_at?: string | null; };
-
-// GET /deals/scored — Phase 3.3 audience-aware deal score from the scheduled
-// DealScoringEngine, with an explainable per-component breakdown (each 0..1).
-export interface ScoredDealComponents {
-  discount_depth: number; audience_affinity: number; freshness: number;
-  time_fit: number; price_credibility: number; scarcity_of_coverage: number;
-}
-
-export interface ScoredDeal {
-  deal_id: string; title: string | null; merchant_key: string | null;
-  current_price: number | null; discount_percent: number | null; url: string | null;
-  score: number; components: ScoredDealComponents; scored_at: string | null;
-}
-
-export interface ScoredDealsResponse { items: ScoredDeal[]; }
 
 export interface SchedulerJobStatus {
   key: string; name: string; cadence: string; priority: string;

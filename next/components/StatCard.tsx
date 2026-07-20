@@ -12,11 +12,11 @@ export function StatCard({ label, value, sub, icon, trend, className }: {
   const isGood = trend ? (trend.positiveIsGood ?? true) ? trend.value >= 0 : trend.value <= 0 : true;
   return (
     <Card className={cn("", className)}>
-      <CardContent className="p-4">
+      <CardContent className="p-3">
         <div className="flex items-start justify-between">
           <div className="min-w-0">
             <p className="truncate text-xs text-muted-foreground">{label}</p>
-            <p className="mt-0.5 text-2xl font-bold tracking-tight">{value}</p>
+            <p className="mt-0.5 text-xl font-semibold tracking-tight tabular-nums">{value}</p>
             {sub && <p className="mt-0.5 text-xs text-muted-foreground">{sub}</p>}
             {trend && (
               <div className={cn("mt-1 flex items-center gap-1 text-xs font-medium", isGood ? "text-green-600" : "text-red-600")}>

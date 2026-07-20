@@ -11,8 +11,6 @@ export const queryKeys = {
   competitors: () => ["competitors"] as const,
   competitorDashboard: (window?: number | null) => ["competitor-dashboard", window] as const,
   competitorDashboardTrends: (days?: number) => ["competitor-dashboard-trends", days] as const,
-  plans: () => ["plans"] as const,
-  weekly: () => ["weekly"] as const,
   growth: (start?: string | null, end?: string | null) => ["growth", start, end] as const,
   org: () => ["org"] as const,
   channels: () => ["channels"] as const,
@@ -25,5 +23,4 @@ export const queryKeys = {
   schedulerRuns: (job?: string | null) => ["scheduler-runs", job] as const,
   retroLatest: (week?: string | null) => ["retro-latest", week] as const,
   retroLatestAll: () => ["retro-latest"] as const,
-  scoredDeals: (limit?: number) => ["deals-scored", limit] as const,
 };
