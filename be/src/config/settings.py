@@ -29,6 +29,16 @@ def _get(name: str, default: str | None = None) -> str | None:
     return val if val not in (None, "") else default
 
 
+# Myntra affiliate deeplink template (affinity network). The url-encoded product URL
+# replaces the "<encoded_deal>" token at link-build time; {clickID}/{country_code} are
+# network-filled macros left untouched. Override per-account via GRABON_MYNTRA_DEEPLINK.
+_DEFAULT_MYNTRA_DEEPLINK = (
+    "https://ww44.affinity.net/sssweb?enk=f97834eb14a90bc444d4d8eb7db1383a9f7df71129836f894"
+    "543fc962edb2e0afd170e97d4712b301084991c781da51ad90598436d53c82b0201cd87a5370ef0"
+    "&di=%7BclickID%7D&subid=tl&cc=%7Bcountry_code_2_character_format%7D&d=<encoded_deal>"
+)
+
+
 def _get_int(name: str, default: int) -> int:
     raw = _get(name)
     try:
@@ -66,7 +76,7 @@ class Settings:
     # --- Runtime / server (template contract) ---
     environment: str = "development"     # development | production | test
     port: int = 8000
-    cors_origin: str = "http://localhost:5173"   # the frontend dev origin
+    cors_origin: str = "http://localhost:3000"   # the frontend dev origin (Next.js)
     # auto-start the 20-job scheduler registry on server boot (cron runs automatically)
     schedulers_autostart: bool = False
 
@@ -111,6 +121,10 @@ class Settings:
     grabon_shortener_url: str = "https://shortner-api.grabon.com/api/url/shorten"
     grabon_amazon_tag: str = "tlg022-21"
     grabon_flipkart_params: str = "affid=bh7162&affExtParam1=1005&affExtParam2=gb"
+    # Myntra deeplink template: the encoded product URL is substituted for the literal
+    # "<encoded_deal>" token; the {clickID}/{country_code} macros are filled by the
+    # affinity network at click time and stay as-is. (See grabon._myntra_affiliate_url.)
+    grabon_myntra_deeplink: str = _DEFAULT_MYNTRA_DEEPLINK
     # shorten EVERY link (even merchants with no affiliate rule) so output matches how the
     # channel actually posts (all links are grbn.in). Fallback still never blocks posting.
     grabon_shorten_all: bool = True
@@ -163,7 +177,7 @@ class Settings:
         return cls(
             environment=_get("ENVIRONMENT", "development"),
             port=_get_int("PORT", 8000),
-            cors_origin=_get("CORS_ORIGIN", "http://localhost:5173"),
+            cors_origin=_get("CORS_ORIGIN", "http://localhost:3000"),
             schedulers_autostart=_get("SCHEDULERS_AUTOSTART", "false").lower() in ("1", "true", "yes"),
             db_url=_get("DB_URL", "sqlite:///./data/tgagent.db"),
             raw_snapshot_dir=Path(_get("RAW_SNAPSHOT_DIR", "./data/raw_snapshots")),
@@ -189,6 +203,7 @@ class Settings:
             grabon_shortener_url=_get("GRABON_SHORTENER_URL",
                                       "https://shortner-api.grabon.com/api/url/shorten"),
             grabon_amazon_tag=_get("GRABON_AMAZON_TAG", "tlg022-21"),
+            grabon_myntra_deeplink=_get("GRABON_MYNTRA_DEEPLINK", _DEFAULT_MYNTRA_DEEPLINK),
             grabon_flipkart_params=_get("GRABON_FLIPKART_PARAMS",
                                         "affid=bh7162&affExtParam1=1005&affExtParam2=gb"),
             grabon_shorten_all=_get("GRABON_SHORTEN_ALL", "true").lower() in ("1", "true", "yes"),
