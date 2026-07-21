@@ -347,6 +347,25 @@ def predict_for_slot(
     return features, prediction
 
 
+def _resolve_dest_channel(s: Session, channel_ref: str | None, fallback):
+    """The channel a draft's message actually lands in, for content-hash matching.
+
+    Prefers ``channel_ref`` (where the send actually went) over ``fallback`` (the
+    channel the ``GeneratedPost`` was authored for, i.e. ``gp.channel_id``) --
+    the two can differ, e.g. a dev/test send to a channel outside the normal
+    ``owned_handles()`` collection scope. Falls back to ``fallback`` only when no
+    ``Channel`` row exists yet for ``channel_ref`` (there is nothing else to
+    search against either way).
+    """
+    from src.db.models import Channel
+
+    if channel_ref:
+        row = s.scalar(select(Channel).where(Channel.username == channel_ref.lstrip("@")))
+        if row is not None:
+            return row
+    return fallback
+
+
 def repredict_and_link_on_publish(generated_post_id: int, channel_ref: str) -> None:
     """Phase 2.2 publish-time hook (called from
     ``publishing.Publisher.publish`` right after a send resolves ``ok``).
@@ -355,9 +374,10 @@ def repredict_and_link_on_publish(generated_post_id: int, channel_ref: str) -> N
     medians) and writes/updates the ``PostPrediction`` row for this draft.
     Also best-effort links ``post_id`` by content hash -- this rarely
     succeeds *synchronously* today because the raw ``Post`` row is only
-    created by the next ``telegram_sync`` poll, not by the send itself; it's
-    still correct to attempt (and cheap), and it starts succeeding the moment
-    a sync happens to run before this hook, with no further code change.
+    created by the next ``telegram_sync`` poll, not by the send itself. The
+    catch-up pass for that (``backfill_post_links``, run from the outcome
+    collector) is what makes the link succeed later with no further code
+    change once a sync happens to run.
     """
     from src.db.models import Channel, Post
     from src.db.models_generation import GeneratedPost
@@ -384,8 +404,13 @@ def repredict_and_link_on_publish(generated_post_id: int, channel_ref: str) -> N
 
         # same hash the owned collector computes on ingest (text, extracted links, media_type)
         digest = content_hash(gp.rendered_text, extract_urls(gp.rendered_text), None)
-        matched_post_id = s.scalar(
-            select(Post.id).where(Post.channel_id == channel_row.id, Post.content_sha256 == digest)
+        # Match against the channel the message actually landed in (`channel_ref`),
+        # not necessarily `channel_row` above (see `_resolve_dest_channel`).
+        dest_channel = _resolve_dest_channel(s, channel_ref, channel_row)
+        matched_post_id = (
+            s.scalar(select(Post.id).where(Post.channel_id == dest_channel.id, Post.content_sha256 == digest))
+            if dest_channel is not None
+            else None
         )
 
         existing = s.scalar(
@@ -404,3 +429,49 @@ def repredict_and_link_on_publish(generated_post_id: int, channel_ref: str) -> N
         existing.features = features
         if matched_post_id is not None:
             existing.post_id = matched_post_id
+
+
+def backfill_post_links(s: Session) -> int:
+    """Catch-up pass for ``PostPrediction.post_id`` (Phase 2.2 gap G8).
+
+    ``repredict_and_link_on_publish`` links synchronously at publish time, but
+    usually finds no ``Post`` yet -- the raw row is only created by the next
+    ``telegram_sync`` poll. Called from the outcome collector (every 15 min,
+    ``outcomes.collect_due_outcomes``) so a prediction links itself the moment
+    its ``Post`` shows up, with no further code change needed once publishing
+    actually reaches a tracked (``owned_handles()``) channel.
+
+    Matches the same (channel, content_sha256) pair the publish-time hook
+    uses -- see ``_resolve_dest_channel``. Returns the number of predictions
+    linked this run.
+    """
+    from src.db.models import Channel, Post
+    from src.db.models_generation import GeneratedPost
+    from src.db.models_prediction import PostPrediction
+    from src.services.collection.util import content_hash, extract_urls
+
+    unlinked = s.scalars(
+        select(PostPrediction).where(
+            PostPrediction.post_id.is_(None), PostPrediction.generated_post_id.isnot(None)
+        )
+    ).all()
+    if not unlinked:
+        return 0
+
+    linked = 0
+    for pred in unlinked:
+        gp = s.get(GeneratedPost, pred.generated_post_id)
+        if gp is None or not (gp.rendered_text or "").strip():
+            continue
+        fallback = s.get(Channel, gp.channel_id) if gp.channel_id else None
+        dest_channel = _resolve_dest_channel(s, gp.channel_ref, fallback)
+        if dest_channel is None:
+            continue
+        digest = content_hash(gp.rendered_text, extract_urls(gp.rendered_text), None)
+        matched_post_id = s.scalar(
+            select(Post.id).where(Post.channel_id == dest_channel.id, Post.content_sha256 == digest)
+        )
+        if matched_post_id is not None:
+            pred.post_id = matched_post_id
+            linked += 1
+    return linked

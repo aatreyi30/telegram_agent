@@ -87,7 +87,19 @@ def collect_due_outcomes(s: Session) -> int:
 
     Returns the number of posts whose outcome row changed this run (created
     and/or one or more phases advanced).
+
+    Also runs the ``PostPrediction.post_id`` catch-up pass (G8): the publish-time
+    hook (``prediction.repredict_and_link_on_publish``) usually can't link yet
+    (its Post row doesn't exist at send time), so this job -- already running
+    every 15 min -- re-attempts it each time, closing the loop the moment a
+    published post's raw row shows up with no further code change needed.
     """
+    from src.services.analytics.prediction import backfill_post_links
+
+    linked = backfill_post_links(s)
+    if linked:
+        logger.info("[outcomes] linked %d post_prediction(s) to their published post", linked)
+
     now = datetime.now(timezone.utc)
     earliest_due_age = min(h[1] - h[2] for h in _HORIZONS)  # smallest (target - tolerance)
 

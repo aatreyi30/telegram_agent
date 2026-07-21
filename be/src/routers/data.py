@@ -101,8 +101,10 @@ def posts(page: int = 1, page_size: int = 20):
 
 
 @router.get("/queue")
-def queue(page: int = 1, page_size: int = 20):
-    return ok(service.queue(page=page, page_size=page_size))
+def queue(page: int = 1, page_size: int = 20, date: str | None = None,
+          post_type: str | None = None, status: str | None = None, sort: str = "soonest"):
+    return ok(service.queue(page=page, page_size=page_size, date=date,
+                            post_type=post_type, status=status, sort=sort))
 
 
 @router.get("/competitors")

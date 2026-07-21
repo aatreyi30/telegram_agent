@@ -31,6 +31,11 @@ logger = get_logger(__name__)
 # permanent-failure signals in a publish note -> BLOCKED, do not retry
 _PERMANENT_STATUSES = {PostStatus.BLOCKED}
 
+# A real send finishes in seconds. A post left in SENDING far longer than that means the
+# worker died between "claim (mark SENDING)" and "record outcome" — it's stranded, because
+# _due_ids only ever re-selects QUEUED/RETRY. Reclaim it after this many minutes.
+_STALE_SENDING_MIN = 10
+
 
 def backoff_seconds(attempts: int) -> int:
     """Exponential backoff, capped at 1 hour: 60, 120, 240, ... <= 3600."""
@@ -63,14 +68,32 @@ class PostingScheduler:
             ).all()
             return list(rows)
 
+    def _reclaim_stale_sending(self, now: datetime) -> int:
+        """Reset posts stranded in SENDING (worker died mid-send) back to QUEUED so the
+        next tick reprocesses them — otherwise they sit past their fire time forever."""
+        cutoff = now - timedelta(minutes=_STALE_SENDING_MIN)
+        with session_scope() as s:
+            stale = s.scalars(select(ScheduledPost).where(
+                ScheduledPost.status == ScheduleStatus.SENDING,
+                ScheduledPost.scheduled_at < cutoff)).all()
+            for r in stale:
+                r.status = ScheduleStatus.QUEUED
+                r.last_error = "reclaimed: stuck in 'sending' (worker restarted mid-send)"
+            n = len(stale)
+        if n:
+            logger.warning("[scheduler] reclaimed %d stale 'sending' post(s) -> queued", n)
+        return n
+
     def process_due(self, now: datetime | None = None, publish_fn=None,
                     pacing_seconds: float | None = None) -> dict:
         """Process every due item once. Returns a stats dict."""
         now = now or datetime.now(timezone.utc)
         publish_fn = publish_fn or _default_publish_fn
         pacing = self.send_pacing_seconds if pacing_seconds is None else pacing_seconds
-        stats = {"due": 0, "published": 0, "blocked": 0, "retried": 0, "failed": 0, "errors": 0}
+        stats = {"due": 0, "published": 0, "blocked": 0, "retried": 0, "failed": 0,
+                 "errors": 0, "reclaimed": 0}
 
+        stats["reclaimed"] = self._reclaim_stale_sending(now)
         due_ids = self._due_ids(now)
         stats["due"] = len(due_ids)
         for i, sid in enumerate(due_ids):

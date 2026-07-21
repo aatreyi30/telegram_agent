@@ -236,9 +236,12 @@ def j_learning() -> dict:
 def j_queue_processor() -> dict:
     from src.services.automation.scheduler import PostingScheduler
     stats = PostingScheduler().process_due(pacing_seconds=0)
+    reclaimed = stats.get("reclaimed", 0)
+    detail = f"{stats.get('due',0)} due · {stats.get('blocked',0)} blocked (send gated on admin)"
+    if reclaimed:
+        detail += f" · reclaimed {reclaimed} stuck 'sending'"
     return {"processed": stats.get("due", 0), "success": stats.get("published", 0),
-            "failure": stats.get("failed", 0),
-            "detail": f"{stats.get('due',0)} due · {stats.get('blocked',0)} blocked (send gated on admin)"}
+            "failure": stats.get("failed", 0), "detail": detail}
 
 
 def _url_health(limit: int) -> dict:
