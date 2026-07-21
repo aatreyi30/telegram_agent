@@ -1121,6 +1121,9 @@ def dev_publish_drafts_cmd(
                                                "e.g. 2026-07-13 (must match a plan's target_date)"),
     include_sent: bool = typer.Option(False, "--include-sent",
                                       help="Also re-send drafts already dev-sent earlier (off by default)"),
+    limit: int = typer.Option(0, "--limit", help="Only send the first N drafts (0 = all)"),
+    no_images: bool = typer.Option(False, "--no-images",
+                                   help="Send text-only; skip attaching the deal's feed image"),
     pace_seconds: float = typer.Option(1.5, help="Delay between sends"),
 ) -> None:
     """DEV ONLY: push ALREADY-GENERATED jit_fill drafts for --day straight to `chat`,
@@ -1140,17 +1143,20 @@ def dev_publish_drafts_cmd(
     if not ids:
         console.print(f"[yellow]No pending drafts found for {day}.[/yellow]")
         raise typer.Exit(code=0)
+    if limit > 0:
+        ids = ids[:limit]
     console.print(f"Sending {len(ids)} draft(s) for {day} to {chat!r}...")
     try:
-        results = publish_drafts(ids, chat, pace_seconds=pace_seconds)
+        results = publish_drafts(ids, chat, pace_seconds=pace_seconds, with_images=not no_images)
     except Exception as e:  # noqa: BLE001 — surface any Telethon/config error directly to the operator
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1)
     ok = sum(1 for r in results if r["ok"])
+    with_img = sum(1 for r in results if r.get("image"))
     for r in results:
         if not r["ok"]:
             console.print(f"[red]  draft #{r['draft_id']} failed: {r['note']}[/red]")
-    console.print(f"[green]Sent {ok}/{len(results)}[/green]")
+    console.print(f"[green]Sent {ok}/{len(results)} ({with_img} with image)[/green]")
 
 
 @app.command("coach")

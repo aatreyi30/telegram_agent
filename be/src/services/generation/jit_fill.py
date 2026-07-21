@@ -2,9 +2,11 @@
 
 The AI daily plan (CampaignPlan.blueprint["post_slots"]) sets each post's window, type
 (single/loot), theme, and merchant. Every minute this worker fills slots due within a
-3-minute lookahead: scrape the live pool, pick fresh item(s) matching theme/merchant
-(broadening on a miss), AI-write single deals (deterministic template for loots and as
-fallback), then queue at the slot time. Idempotent per slot via a tagged GeneratedPost.
+3-minute lookahead (plus a bounded backfill for slots recently missed — G9): scrape the
+live pool, pick fresh item(s) matching theme/merchant (broadening on a miss), AI-write
+single deals (deterministic template for loots and as fallback), then queue at the slot
+time. Idempotent per slot via a tagged GeneratedPost. ~5 slots/day, evenly spread, are
+picked deterministically to carry an image (§8b); the rest stay text-only.
 """
 
 from __future__ import annotations
@@ -35,9 +37,11 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 LOOKAHEAD_MIN = 3      # fill a slot this many minutes before it fires
+BACKFILL_MIN = 30      # G9: also fill slots that fired up to this long ago, once
 SPACING_MIN = 2        # gap between consecutive posts sharing one window
 _SLOT_TAG = "aislot"   # GeneratedPost.selection_bucket prefix marking a filled slot
 LOOT_ITEMS_PER_POST = 10  # distinct categories bundled into one loot post
+IMAGE_POSTS_PER_DAY = 5   # §8b: image budget — this many posts/day carry a photo
 
 _HHMM = re.compile(r"(\d{1,2}):(\d{2})")
 
@@ -64,6 +68,23 @@ def _expand_slots(post_slots: list[dict], base_day) -> list[tuple[datetime, dict
             fire = (base + timedelta(minutes=SPACING_MIN * sub)).astimezone(timezone.utc)
             out.append((fire, slot, si, sub))
     return out
+
+
+def _image_slot_indices(n: int, k: int = IMAGE_POSTS_PER_DAY) -> set[int]:
+    """`k` evenly-spaced positions in an ordered list of length `n` (all of them if
+    `n <= k`). Pure + deterministic — the same plan always yields the same image
+    slots, no runtime counter/race. Used against the day's FULL slot list, not the
+    due-now subset, so the image slots don't shift with cron timing."""
+    if n <= k:
+        return set(range(n))
+    return {min(round((i + 1) * n / (k + 1)), n - 1) for i in range(k)}
+
+
+def _image_slot_keys(full_slots: list[tuple[datetime, dict, int, int]]) -> set[tuple[int, int]]:
+    """(slot_index, sub_index) pairs — from `full_slots` (all of _expand_slots, not
+    just due-now) — chosen as the day's ~5 image posts."""
+    idx = _image_slot_indices(len(full_slots))
+    return {(full_slots[i][2], full_slots[i][3]) for i in idx}
 
 
 def _norm(v: str | None) -> str:
@@ -177,6 +198,19 @@ def _already_filled(s: Session, key: str) -> bool:
                     .where(GeneratedPost.selection_bucket == key).limit(1)) is not None
 
 
+def _is_due(fire: datetime, now: datetime, horizon: datetime, all_slots: bool,
+           backfill_min: int = BACKFILL_MIN) -> bool:
+    """G9: due if within the forward lookahead (`now..horizon`), OR — bounded backfill
+    — it fired within the last `backfill_min` minutes and was never filled (e.g. the
+    app was down). Never reaches further back than that, so it can't spam-post stale
+    slots. `all_slots` (offline backfill mode) ignores fire time entirely."""
+    if all_slots:
+        return True
+    if now <= fire <= horizon:
+        return True
+    return now - timedelta(minutes=backfill_min) <= fire < now
+
+
 def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
                    day=None, all_slots: bool = False, cap_per_type: int | None = None) -> dict:
     from src.services.analytics.periods import ist_today
@@ -213,12 +247,21 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
     slots = (plan.blueprint or {}).get("post_slots") or []
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(minutes=lookahead_min)
+    # Full ordered slot list for the day — the image budget (§8b) is picked against
+    # this, not the due-now subset, so which slots get a photo never shifts with when
+    # cron happens to run.
+    full_slots = _expand_slots(slots, day)
+    image_keys = _image_slot_keys(full_slots)
     # all_slots (offline backfill) fills every not-yet-filled slot regardless of fire
-    # time; each still enqueues at its real slot time. Normal cron uses the lookahead.
-    def _is_due(fire):
-        return True if all_slots else (now <= fire <= horizon)
-    due = [(fire, slot, si, sub) for (fire, slot, si, sub) in _expand_slots(slots, day)
-           if _is_due(fire) and not _already_filled(s, f"{_SLOT_TAG}:{plan.id}:{si}:{sub}")]
+    # time; each still enqueues at its real slot time. Normal cron uses the lookahead
+    # plus a bounded G9 backfill for recently-missed slots (see _is_due).
+    due = [(fire, slot, si, sub) for (fire, slot, si, sub) in full_slots
+           if _is_due(fire, now, horizon, all_slots)
+           and not _already_filled(s, f"{_SLOT_TAG}:{plan.id}:{si}:{sub}")]
+    for fire, slot, si, sub in due:
+        if fire < now:
+            logger.info("[jit_fill] G9 backfilling missed slot %d:%d (fired %s, %.0fmin ago)",
+                        si, sub, fire.isoformat(), (now - fire).total_seconds() / 60)
     # Optional hard cap (test channels): keep at most `cap_per_type` loot + `cap_per_type`
     # deal posts regardless of how many the AI plan produced. Fire-time order preserved.
     if cap_per_type:
@@ -288,6 +331,7 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
             rank_score = max((e.discount_percent or 0) for e in enriched)
             primary_merchant = enriched[0].merchant_key
             used_urls = [r.get("original_url") for r in raws]
+            image_candidate = next((e.image for e in enriched if e.image), None)
         else:
             # DEAL: one specific product, AI-written copy (template fallback on failure).
             raw, match = _pick_fresh(pool, slot.get("theme"), slot.get("merchant"), used)
@@ -316,13 +360,17 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
             rank_score = deal.discount_percent or 0
             primary_merchant = deal.merchant_key
             used_urls = [raw.get("original_url")]
+            image_candidate = deal.image
 
         key = f"{_SLOT_TAG}:{plan.id}:{si}:{sub}"
+        # §8b image budget: only the ~5 slots picked in image_keys carry a photo, and
+        # only if the chosen deal actually had one — every other draft stays text-only.
+        image_url = image_candidate if (si, sub) in image_keys else None
         gp = GeneratedPost(
             generated_at=now, post_type=slot.get("type") or "single", selection_bucket=key,
             deal_ids=deal_ids, rendered_text=text,
             format_meta={"source": source, "match": match, "affiliate": aff_meta,
-                         "primary_merchant": primary_merchant,
+                         "primary_merchant": primary_merchant, "image_url": image_url,
                          "slot": {"theme": slot.get("theme"), "merchant": slot.get("merchant")}},
             rank_score=rank_score, status=PostStatus.DRAFT,
             strategy_rationale=slot.get("why") or "",
@@ -374,6 +422,21 @@ def _selfcheck() -> None:
     assert tier == "any", tier                                        # theme broaden -> tier tagged
     it, tier = _pick_fresh(pool, "fashion", "ajio", {"a"})            # only fashion item is used
     assert it["original_url"] == "b" and tier == "any", (it, tier)   # -> broadens past used
+
+    # §8b: ~5 evenly-spaced image slots; short days give every slot an image.
+    idx24 = _image_slot_indices(24)
+    assert len(idx24) == 5 and idx24 == {4, 8, 12, 16, 20}, idx24
+    assert _image_slot_indices(3) == {0, 1, 2}                        # fewer than k -> all
+    assert _image_slot_indices(5) == {0, 1, 2, 3, 4}                  # exactly k -> all
+
+    # G9: backfill fires within the last BACKFILL_MIN once, never further back, never
+    # ahead of the normal lookahead horizon.
+    t0 = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    horizon = t0 + timedelta(minutes=LOOKAHEAD_MIN)
+    assert _is_due(t0 + timedelta(minutes=1), t0, horizon, False)              # forward window
+    assert _is_due(t0 - timedelta(minutes=10), t0, horizon, False)             # recently missed
+    assert not _is_due(t0 - timedelta(minutes=BACKFILL_MIN + 1), t0, horizon, False)  # too old
+    assert _is_due(t0 - timedelta(minutes=BACKFILL_MIN * 2), t0, horizon, True)       # all_slots override
     print("jit_fill selfcheck ok")
 
 
