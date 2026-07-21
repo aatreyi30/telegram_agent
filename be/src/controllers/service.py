@@ -731,10 +731,12 @@ def _today_details(s, recommended_posts: int):
 
 
 def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
-                        directive: str | None = None) -> dict:
+                        directive: str | None = None, recent_max_30d: int | None = None) -> dict:
     """The cache-miss generation path for the daily AI plan: call the planner
     (honoring ``directive`` if given), fact-check its cited numbers against the same
     facts it was grounded on, and persist a `CampaignPlan` row pinned to ``day``.
+    ``recent_max_30d`` (when the caller has it) feeds the G10 persist-time clamp —
+    ``recommended`` doubles as the clamp's recent-median bound.
 
     Shared by `daily_brief` (normal first-request-of-the-day miss) and
     `regenerate_daily` (forced fresh generation after deleting the stale cache row)
@@ -761,9 +763,17 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
     fc_status = None
     row = None
     if ai_ok:
-        fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
-        fc_status = "pass" if fc["status"] == "passed" else "warn"
-        row = persist_ai_plan(s, {**ai_res, "factcheck": fc})
+        # G6: a deterministic fallback plan carries no cited_numbers to fact-check —
+        # tag it "fallback" directly (persist_ai_plan/daily_brief both special-case
+        # this status) instead of running it through check_cited_numbers.
+        if plan.get("is_fallback"):
+            fc = {"status": "fallback"}
+            fc_status = "fallback"
+        else:
+            fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
+            fc_status = "pass" if fc["status"] == "passed" else "warn"
+        row = persist_ai_plan(s, {**ai_res, "factcheck": fc},
+                              recent_median=recommended, recent_max_30d=recent_max_30d)
         if row is not None:
             # Pin the cache key to the day we actually planned for — the AI's
             # self-reported "date" inside the plan JSON isn't reliable enough
@@ -803,6 +813,10 @@ def ensure_daily_ai_plan(s, day):
     # is no posting history at all.
     recommended = _traj["recent_cadence"] or round(_traj["lifetime_baseline"] or 0)
     windows, allocation, merchants, _ = _today_details(s, recommended)
+    # Same clamp ceiling `daily_brief` uses (G10) — computed here too so the cron
+    # path clamps at persist time exactly like the dashboard path does.
+    traj30 = ctx.posting_trajectory(s, days=30, end_day=day - timedelta(days=1))
+    recent_max_30d = max((d["posts"] for d in traj30["days"]), default=0)
     evt = None
     try:
         evs = upcoming_events(s, day, within_days=14)
@@ -812,7 +826,8 @@ def ensure_daily_ai_plan(s, day):
                    "date_confidence": e.date_confidence}
     except Exception:
         evt = None
-    return _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt).get("row")
+    return _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
+                              recent_max_30d=recent_max_30d).get("row")
 
 
 def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
@@ -897,17 +912,21 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
             ai_ok = True
             plan = cached.blueprint or {}
             digest = cached.ai_digest or ""
-            fc_status = "pass" if cached.factcheck_status == "passed" else "warn"
+            fc_status = ("fallback" if cached.factcheck_status == "fallback"
+                        else "pass" if cached.factcheck_status == "passed" else "warn")
             plan_row = cached
         else:
             gen = _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
-                                      directive=directive)
+                                      directive=directive, recent_max_30d=recent_max_30d)
             ai_ok, plan, digest, fc_status, plan_row = (
                 gen["ai_ok"], gen["plan"], gen["digest"], gen["fc_status"], gen["row"])
 
         if ai_ok and plan.get("recommended_posts") is not None:
-            recommended_final, was_clamped = ctx.clamp_recommended_posts(
-                plan.get("recommended_posts"), recommended, recent_max_30d)
+            # recommended_posts is already clamped at persist time (G10); read the
+            # recorded flag rather than re-clamping (which would see the clamped value
+            # as in-range and report was_clamped=False). Also survives the cache-hit path.
+            recommended_final = plan.get("recommended_posts")
+            was_clamped = bool(plan.get("plan_clamped"))
             ai_why = plan.get("cadence_why")
             cadence_why = ai_why if (not was_clamped and ai_why) else det_why
         else:
@@ -981,6 +1000,7 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
     themes = blueprint.get("daily_themes") or []
 
     ai_summary, ai_ok = "", False
+    ai_plan = None
     try:
         from src.ai.client import AIUnavailable
         from src.ai.planner import generate_week_plan
@@ -988,10 +1008,27 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
             res = generate_week_plan(s, week_start, directive=directive)
             ai_summary = res.get("digest") or "" if res.get("available") else ""
             ai_ok = bool(ai_summary)
+            if res.get("available"):
+                ai_plan = res.get("plan")
         except AIUnavailable:
             ai_summary = ""
     except Exception:
         ai_summary = ""
+
+    if ai_plan:
+        # G1 — the whole point of running the weekly AI is its read of last week's
+        # evidence (loot_deal_ratio, merchant_priorities, the per-day split); keep
+        # the deterministic engine's skeleton (posts_per_day, posting_windows,
+        # deal_type_allocation) for the rest, but let the AI's numbers survive into
+        # what's PERSISTED — previously only `blueprint` (the deterministic-only
+        # output) was stored, so `_current_week_plan`'s THIS_WEEK_DIRECTION always
+        # read empty (data_flow.md G1).
+        blueprint["loot_deal_ratio"] = ai_plan.get("loot_deal_ratio")
+        blueprint["merchant_priorities"] = ai_plan.get("merchant_priorities")
+        blueprint["direction"] = ai_plan.get("direction")
+        if ai_plan.get("daily_themes"):
+            blueprint["daily_themes"] = ai_plan["daily_themes"]
+        themes = blueprint.get("daily_themes") or []
 
     if wk is not None:
         # Row already exists for this week (e.g. blueprint-only from a legitimate
@@ -1242,15 +1279,65 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
     return result
 
 
-def queue(page: int = 1, page_size: int = 20) -> dict:
+def queue(page: int = 1, page_size: int = 20, date: str | None = None,
+          post_type: str | None = None, status: str | None = None,
+          sort: str = "soonest") -> dict:
+    """Posting schedule, filterable + sortable (all state comes from URL params on the FE).
+
+    - ``date``: IST day (YYYY-MM-DD) — rows whose fire time falls on that IST day.
+    - ``post_type``: 'single' | 'loot' (loot = the post_type carries 'loot'/'collection').
+    - ``status``: one ScheduledPost status (queued/sending/published/blocked/…).
+    - ``sort``: 'newest' (default, latest fire first) | 'oldest'.
+
+    `counts` reflects the date+type scope (so the status chips stay a drill-in breakdown);
+    `total` (pagination) reflects every filter including status.
+    """
+    from datetime import date as _date_cls, datetime, timezone
+    from sqlalchemy import or_
+    from src.services.analytics.periods import ist_day_bounds_utc
     page, page_size, offset = _clamp_page(page, page_size)
+    join_gp = post_type in ("single", "loot")
+    scope = []  # date + type conditions — the "what am I looking at" view
+    if date:
+        try:
+            lo, hi = ist_day_bounds_utc(_date_cls.fromisoformat(date))
+            scope += [ScheduledPost.scheduled_at >= lo.replace(tzinfo=None),
+                      ScheduledPost.scheduled_at < hi.replace(tzinfo=None)]
+        except (ValueError, TypeError):
+            pass
+    if join_gp:
+        loot = or_(GeneratedPost.post_type.ilike("%loot%"),
+                   GeneratedPost.post_type.ilike("%collection%"))
+        scope.append(loot if post_type == "loot" else ~loot)
+
+    def scoped(sel):
+        if join_gp:
+            sel = sel.join(GeneratedPost, ScheduledPost.generated_post_id == GeneratedPost.id)
+        for c in scope:
+            sel = sel.where(c)
+        return sel
+
     with session_scope() as s:
         counts = dict(s.execute(
-            select(ScheduledPost.status, func.count()).group_by(ScheduledPost.status)).all())
-        total = s.scalar(select(func.count()).select_from(ScheduledPost)) or 0
-        rows = s.scalars(select(ScheduledPost)
-                         .order_by(ScheduledPost.scheduled_at)
-                         .offset(offset).limit(page_size)).all()
+            scoped(select(ScheduledPost.status, func.count()))
+            .group_by(ScheduledPost.status)).all())
+        cnt_sel = scoped(select(func.count()).select_from(ScheduledPost))
+        row_sel = scoped(select(ScheduledPost))
+        if status:
+            cnt_sel = cnt_sel.where(ScheduledPost.status == status)
+            row_sel = row_sel.where(ScheduledPost.status == status)
+        total = s.scalar(cnt_sel) or 0
+        # a posting schedule reads best soonest-first (the next post to fire at the top),
+        # so ascending is the default; only an explicit "latest" flips to furthest-first.
+        # Vocabulary is exactly {soonest (default), latest} — no newest/oldest aliases.
+        descending = sort == "latest"
+        order = (ScheduledPost.scheduled_at.desc() if descending
+                 else ScheduledPost.scheduled_at.asc())
+        rows = s.scalars(row_sel.order_by(order).offset(offset).limit(page_size)).all()
+        # a post is OVERDUE if its fire time has passed but it hasn't been delivered
+        # (still queued/sending/retry) — i.e. it should have gone out and didn't.
+        _now = datetime.now(timezone.utc).replace(tzinfo=None)
+        _pending = {ScheduleStatus.QUEUED, ScheduleStatus.SENDING, ScheduleStatus.RETRY}
         # attach each queued draft's real content so the schedule is legible: the post
         # text (what actually goes out), its type and merchant — not just the internal
         # selection_bucket key the old UI showed.
@@ -1271,6 +1358,8 @@ def queue(page: int = 1, page_size: int = 20) -> dict:
                 "bucket": gp.selection_bucket if gp is not None else None,
                 "status": r.status,
                 "scheduled_at": r.scheduled_at.isoformat() if r.scheduled_at else None,
+                "overdue": bool(r.scheduled_at and r.status in _pending
+                                and r.scheduled_at < _now),
                 "attempts": f"{r.attempts}/{r.max_attempts}",
                 "note": (r.last_error or "")})
     return {"counts": counts, "items": items, **_page_meta(total, page, page_size)}

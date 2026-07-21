@@ -12,9 +12,19 @@ from src.ai.client import AIClient, AIUnavailable
 from src.ai.context import planning_context, to_json
 from src.ai.prompts import PLAN_INSTRUCTIONS as _PLAN_INSTRUCTIONS
 from src.ai.prompts import WEEK_PLAN_INSTRUCTIONS as _WEEK_PLAN_INSTRUCTIONS
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 PLAN_SCHEMA_KEYS = ("date", "recommended_posts", "cadence_why", "post_slots",
                     "emphasis", "watch", "cited_numbers")
+
+# G3/G6 shared defaults: a 60/40 single-lean split (single out-performs loot in the
+# live stats today) with a hard 30% floor per type so neither ever drops to zero —
+# see data_flow.md §2/§6. Used both as the deterministic fallback's split and to
+# fill in a share the weekly AI left out (_parse_week_plan below).
+_DEFAULT_LOOT_SHARE = 0.4
+_MIN_TYPE_SHARE = 0.3
 
 
 def parse_plan(raw: str) -> dict:
@@ -31,7 +41,22 @@ def parse_plan(raw: str) -> dict:
     data.setdefault("cadence_why", "")
     if not isinstance(data.get("post_slots"), list):
         raise ValueError("post_slots must be a list")
+    _check_type_mix(data["post_slots"])
     return data
+
+
+def _check_type_mix(slots: list[dict]) -> None:
+    """G3 post-parse nudge — the prompt's variety floor is the primary enforcement;
+    this just logs when the model still collapsed a day with enough slots to show a
+    mix into one single type, so a regression is visible without failing the plan."""
+    total = sum(max(int(sl.get("count") or 1), 1) for sl in slots)
+    if total < 4:
+        return
+    types = {(sl.get("type") or "single") for sl in slots}
+    if len(types) < 2:
+        logger.warning(
+            "[ai.planner] day plan returned only type(s) %r across %d slots — no "
+            "loot/single mix despite the variety floor in PLAN_INSTRUCTIONS", types, total)
 
 
 def _split_digest_and_plan(raw: str) -> tuple[str, str]:
@@ -165,6 +190,67 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     }
 
 
+def _fallback_day_plan(day, plan_ctx: dict) -> dict:
+    """G6 — a REAL deterministic day plan for when the AI call fails or returns
+    something unparseable. The channel must never go silent on an AI outage, so this
+    covers every POSTING_WINDOW from ``plan_ctx`` (already computed for the AI call),
+    splits each window's slots between `single`/`collection` by the week's
+    loot_deal_ratio (or the same 60/40 single-lean default + 30% floor the prompt
+    uses), and assigns merchants/categories straight from the already-ranked
+    MERCHANT_MIX/available categories. Marked ``is_fallback`` so callers/persist
+    know it's a stand-in, not a grounded plan."""
+    windows = plan_ctx.get("posting_windows") or []
+    merchants = [m["merchant"] for m in (plan_ctx.get("merchant_mix") or []) if m.get("merchant")]
+    categories = plan_ctx.get("available_categories") or []
+    recommended = int(plan_ctx.get("recommended_posts")
+                       or sum((w.get("posts") or 0) for w in windows) or 1)
+
+    direction = plan_ctx.get("this_week_direction") or {}
+    ratio = direction.get("loot_deal_ratio") or {}
+    loot_n, single_n = ratio.get("loot"), ratio.get("deal")
+    if loot_n or single_n:
+        total_r = (loot_n or 0) + (single_n or 0) or 1
+        loot_share = (loot_n or 0) / total_r
+        ratio_basis = "this week's loot_deal_ratio"
+    else:
+        loot_share = _DEFAULT_LOOT_SHARE
+        ratio_basis = "the default 60/40 single-lean split (no week direction yet)"
+    loot_share = min(max(loot_share, _MIN_TYPE_SHARE), 1 - _MIN_TYPE_SHARE)
+
+    if not windows:
+        windows = [{"part": "all day", "hours": "09:00-21:00", "posts": recommended}]
+    win_total = sum(max(int(w.get("posts") or 0), 0) for w in windows) or len(windows)
+
+    slots = []
+    why = (f"FALLBACK PLAN (AI unavailable) — deterministic split holding {ratio_basis} "
+           f"(~{loot_share:.0%} loot) with the 30%-floor; merchant/category picked by "
+           "recent share from MERCHANT_MIX, not model reasoning. Regenerate once the AI "
+           "planner is back for a grounded, per-slot rationale.")
+    for i, w in enumerate(windows):
+        n = max(round((w.get("posts") or 0) * recommended / win_total), 1) if win_total else 1
+        loot_c = min(max(round(n * loot_share), 0), n)
+        single_c = n - loot_c
+        hours = w.get("hours") or "09:00-21:00"
+        merchant = merchants[i % len(merchants)] if merchants else ""
+        category = categories[i % len(categories)] if categories else ""
+        if single_c > 0:
+            slots.append({"type": "single", "window_ist": hours, "count": single_c,
+                          "theme": category, "merchant": merchant, "max_price": None,
+                          "why": why})
+        if loot_c > 0:
+            slots.append({"type": "collection", "window_ist": hours, "count": loot_c,
+                          "theme": category, "merchant": merchant, "max_price": None,
+                          "why": why})
+    return {
+        "date": day.isoformat(), "recommended_posts": recommended,
+        "cadence_why": "AI unavailable — holding the recent posting cadence deterministically.",
+        "post_slots": slots,
+        "emphasis": "keep posting — deterministic fallback active",
+        "watch": "regenerate once the AI planner is back for a grounded plan",
+        "cited_numbers": [], "is_fallback": True,
+    }
+
+
 def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
                        directive: str | None = None) -> dict:
     """Grounded AI day plan for ``day`` (default: latest owned day). Returns the raw
@@ -250,13 +336,27 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         raw = ai.complete(user, system_extra=_PLAN_INSTRUCTIONS, max_tokens=3200,
                           trace_call="day_plan")
     except AIUnavailable as e:
-        return {"available": False, "reason": str(e), "plan": None, "digest": "", "facts": facts}
+        # G6 — never go silent: the channel still needs slots even when the AI is
+        # down, so fall back to a real deterministic plan instead of an empty one.
+        logger.warning("[ai.planner] AI unavailable for day plan (%s) — using "
+                       "deterministic fallback", e)
+        fallback = _fallback_day_plan(day, plan_ctx)
+        return {"available": True, "digest": "AI planner unavailable "
+                f"({e}) — a deterministic fallback plan is active (covers every "
+                "posting window with a loot/single mix); regenerate once the AI "
+                "is back for a grounded plan.", "plan": fallback, "facts": facts,
+                "is_fallback": True}
     digest, plan_text = _split_digest_and_plan(raw)
     try:
         plan = parse_plan(plan_text)
     except ValueError:
-        return {"available": False, "reason": "unparseable plan", "plan": None,
-                "digest": digest, "facts": facts}
+        logger.warning("[ai.planner] unparseable day plan output — using "
+                       "deterministic fallback")
+        fallback = _fallback_day_plan(day, plan_ctx)
+        return {"available": True, "digest": digest or (
+                "AI planner returned an unparseable plan — a deterministic "
+                "fallback plan is active; regenerate once the AI is back for a "
+                "grounded plan."), "plan": fallback, "facts": facts, "is_fallback": True}
     return {"available": True, "digest": digest, "plan": plan, "facts": facts}
 
 
@@ -272,6 +372,20 @@ def _parse_week_plan(raw: str) -> dict:
     data.setdefault("cited_numbers", [])
     if not isinstance(data["daily_themes"], list):
         raise ValueError("daily_themes must be a list")
+    for t in data["daily_themes"]:
+        if not isinstance(t, dict):
+            continue
+        # G2: daily_themes carries a per-day loot/single SPLIT now, not a single
+        # theme_focus label — fill in whichever share the model left out so every
+        # reader downstream (the daily prompt's THIS_WEEK_THEME) always sees both.
+        loot, single = t.get("loot_share"), t.get("single_share")
+        if loot is None and single is None:
+            loot, single = _DEFAULT_LOOT_SHARE, 1 - _DEFAULT_LOOT_SHARE
+        elif loot is None:
+            loot = 1 - single
+        elif single is None:
+            single = 1 - loot
+        t["loot_share"], t["single_share"] = round(loot, 3), round(single, 3)
     return data
 
 
@@ -326,3 +440,58 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
                 "digest": digest, "facts": facts}
     plan.setdefault("week_start", week_start.isoformat())
     return {"available": True, "digest": digest, "plan": plan, "facts": facts}
+
+
+def _demo() -> None:
+    """Runnable self-check (no DB): parse_plan + its type-mix nudge, the weekly
+    loot/single-share normalization, and the deterministic fallback actually
+    mixing both types across windows."""
+    from datetime import date
+
+    plan = parse_plan(
+        '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x",'
+        '"post_slots":[{"type":"single","window_ist":"09:00-12:00","count":8,'
+        '"theme":"electronics","merchant":"amazon","max_price":null,"why":"x"}],'
+        '"emphasis":"e","watch":"w","cited_numbers":[]}'
+    )
+    assert plan["recommended_posts"] == 8
+    assert len(plan["post_slots"]) == 1  # _check_type_mix only logs, never raises
+
+    week = _parse_week_plan(
+        '{"week_start":"2026-07-20","direction":"d",'
+        '"loot_deal_ratio":{"loot":4,"deal":6},"merchant_priorities":[],'
+        '"daily_themes":[{"day":"mon","single_share":0.7,"posts_planned":8}],'
+        '"why":"w","cited_numbers":[]}'
+    )
+    mon = week["daily_themes"][0]
+    assert abs(mon["loot_share"] - 0.3) < 1e-6
+    assert abs(mon["single_share"] - 0.7) < 1e-6
+
+    ctx = {
+        "posting_windows": [{"part": "morning", "hours": "09:00-12:00", "posts": 4},
+                            {"part": "evening", "hours": "18:00-21:00", "posts": 4}],
+        "merchant_mix": [{"merchant": "amazon"}, {"merchant": "flipkart"}],
+        "available_categories": ["electronics", "fashion"],
+        "recommended_posts": 8,
+        "this_week_direction": {"loot_deal_ratio": {"loot": 4, "deal": 6}},
+    }
+    fb = _fallback_day_plan(date.fromisoformat("2026-07-21"), ctx)
+    assert fb["is_fallback"] is True
+    types = {sl["type"] for sl in fb["post_slots"]}
+    assert types == {"single", "collection"}, f"fallback did not mix types: {types}"
+    assert sum(sl["count"] for sl in fb["post_slots"]) == 8
+
+    # no week direction / no merchant/category data at all — still real, still mixed
+    fb2 = _fallback_day_plan(date.fromisoformat("2026-07-21"), {
+        "posting_windows": [{"hours": "09:00-12:00", "posts": 5},
+                            {"hours": "18:00-21:00", "posts": 5}],
+        "recommended_posts": 10,
+    })
+    assert {sl["type"] for sl in fb2["post_slots"]} == {"single", "collection"}
+    assert all(sl["merchant"] == "" and sl["theme"] == "" for sl in fb2["post_slots"])
+
+    print("ai/planner.py self-check OK")
+
+
+if __name__ == "__main__":
+    _demo()

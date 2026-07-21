@@ -10,6 +10,17 @@ PLAN_INSTRUCTIONS = (
     "the one the evidence says will earn the most views/forwards for the audience you "
     "have. Views are the proxy you can measure per slot; keep that honest.\n\n"
 
+    "WHAT YOU'RE SCHEDULING: this channel runs two post types side by side, every day. "
+    "A `single` deal is one product at one merchant — sharp and easy to scan, the right "
+    "call when one price/discount is compelling enough to carry the post on its own. A "
+    "`collection` (a loot board) bundles several categories into one post, each its own "
+    "link, often under a price cap ('Under ₹499') — the right call when the value is in "
+    "BREADTH (several decent options worth a browse) rather than any one standout price. "
+    "Post a single when a specific deal's number is the story; post a loot when giving "
+    "the audience a spread to pick from earns more attention than any single item would. "
+    "Both types run across the SAME day, spread over the day's windows — a day is never "
+    "handed to one type alone.\n\n"
+
     "INSTRUCTION: Using the DATA supplied in the user message (YESTERDAY's actual "
     "results, a 14-day POSTING TRAJECTORY, the channel's RECENT_CADENCE, a stale "
     "LIFETIME_BASELINE, post-type performance, POSTING_WINDOWS with any historical "
@@ -42,14 +53,22 @@ PLAN_INSTRUCTIONS = (
     "low-activity history and does not describe current behaviour.\n"
     "3. Build post_slots so every window listed in POSTING_WINDOWS is covered — one "
     "slot per window at minimum, splitting a window into multiple slots when it "
-    "carries many posts. Never drop a window silently. Across all slots, the `count` "
-    "values should add up to roughly recommended_posts, and the theme/merchant spread "
-    "should reflect DEAL_TYPE_ALLOCATION and MERCHANT_MIX. If THIS_WEEK_THEME is "
-    "present, stay aligned with it unless the DATA clearly argues otherwise (and say "
-    "so if you deviate). If THIS_WEEK_DIRECTION is present, honor its loot_deal_ratio "
-    "(the week's target loot-vs-single mix) when assigning slot types, and prefer its "
-    "merchant_priorities when picking merchants — unless today's DATA clearly argues "
-    "otherwise, in which case say why you deviated. Each slot's `theme` MUST be one of "
+    "carries many posts (this is exactly where a window gets both a `single` slot and "
+    "a `collection` slot, rather than one type for its whole span). Never drop a "
+    "window silently. Across all slots, the `count` values should add up to roughly "
+    "recommended_posts, and the theme/merchant spread should reflect "
+    "DEAL_TYPE_ALLOCATION and MERCHANT_MIX.\n"
+    "   MIX BOTH TYPES ACROSS THE DAY. Split post_slots between `single` and "
+    "`collection` per THIS_WEEK_DIRECTION's loot_deal_ratio when present (e.g. a "
+    "loot:deal of 4:6 means today runs roughly 40% collection / 60% single, spread "
+    "across the windows) — with no THIS_WEEK_DIRECTION, use a 60% single / 40% "
+    "collection default. Whatever the ratio, give EACH type at least 30% of today's "
+    "slots (round toward the floor if the raw split would leave a type under it) — "
+    "running both types every day is the design, not a fallback. If THIS_WEEK_THEME "
+    "is present, stay aligned with its day-level split unless the DATA clearly argues "
+    "otherwise (and say so if you deviate). If THIS_WEEK_DIRECTION is present, prefer "
+    "its merchant_priorities when picking merchants — unless today's DATA clearly "
+    "argues otherwise, in which case say why you deviated. Each slot's `theme` MUST be one of "
     "the exact values in AVAILABLE_CATEGORIES and each `merchant` MUST be one of the "
     "exact values in AVAILABLE_MERCHANTS — these are the categories/merchants actually "
     "present in today's live deal feed, so a slot naming anything outside these lists "
@@ -57,12 +76,15 @@ PLAN_INSTRUCTIONS = (
     "that field an empty string rather than inventing a value.\n"
     "4. For each slot, write a `why` of 3-4 sentences of real reasoning (no "
     "sub-bullets) covering:\n"
-    "   a. TIMING — cite the actual hourly/day-part number backing this window if one "
-    "is present in POSTING_WINDOWS or post-type performance; if no historical number "
-    "exists for this window, say so plainly (e.g. 'no historical hourly data yet for "
-    "this slot') instead of generic filler like 'this is a peak hour'. Use DAY_OF_WEEK "
-    "when it's relevant to a weekday-vs-weekend timing pattern the DATA actually "
-    "supports — don't assert a weekday/weekend effect that isn't backed by a number.\n"
+    "   a. TYPE & TIMING — say which type this slot is (`single` or `collection`) and "
+    "justify THAT choice with a number: cite the type's own avg_views_per_day from "
+    "POST_TYPE_PERFORMANCE/DEAL_TYPE_ALLOCATION (why single vs. collection earns more "
+    "here), then cite the actual hourly/day-part number backing this window if one is "
+    "present in POSTING_WINDOWS; if no historical number exists for this window, say so "
+    "plainly (e.g. 'no historical hourly data yet for this slot') instead of generic "
+    "filler like 'this is a peak hour'. Use DAY_OF_WEEK when it's relevant to a "
+    "weekday-vs-weekend timing pattern the DATA actually supports — don't assert a "
+    "weekday/weekend effect that isn't backed by a number.\n"
     "   b. MERCHANT FIT, AS A DECISION vs THE NEXT-BEST — cite the chosen merchant's "
     "recent_share, avg_views_per_day, sample_size, and basis from MERCHANT_MIX, AND "
     "name the specific runner-up merchant you passed over for this slot with ITS "
@@ -106,8 +128,9 @@ PLAN_INSTRUCTIONS = (
     '"cadence_why":"<why this many, grounded in RECENT_CADENCE/trajectory>",'
     '"post_slots":[{"type":"single|collection","window_ist":"HH:MM-HH:MM",'
     '"count":<int>,"theme":"<category>","merchant":"<merchant>","max_price":<int or null>,'
-    '"why":"<3-4 sentences: timing + merchant-fit-vs-next-best + '
-    'expected-outcome/continuity-with-yesterday + event if relevant>"}],'
+    '"why":"<3-4 sentences: type-choice(single vs collection)-with-stat + timing + '
+    'merchant-fit-vs-next-best + expected-outcome/continuity-with-yesterday + event '
+    'if relevant>"}],'
     '"emphasis":"<one line>","watch":"<one line>","cited_numbers":[<numbers you used>]}\n'
     "No text before the digest and no text after the closing brace.\n"
     "max_price: OPTIONAL and only for `collection` (loot) slots — set an integer rupee "
@@ -166,8 +189,12 @@ WEEK_PLAN_INSTRUCTIONS = (
     "higher avg_views_per_day type, but never drop the other to zero (keep variety).\n"
     "3. List merchant_priorities from MERCHANT_OPPORTUNITIES — the merchants to feature "
     "more this week — each with the specific number that justifies it.\n"
-    "4. Set a per-day theme_focus for all 7 days (mon-sun), each 'loot_deal' or "
-    "'single_deal', spread so the week's mix reflects loot_deal_ratio.\n"
+    "4. Set a per-day loot/single SPLIT for all 7 days (mon-sun) — each day names its "
+    "own loot_share (0-1; single_share is its complement) and posts_planned, composing "
+    "to the week's loot_deal_ratio overall. Vary a day's share around the week average "
+    "when the DATA supports it (e.g. weekend browsing vs weekday urgency), but keep "
+    "EACH type at least 30% on every single day — every day runs both types, never one "
+    "alone; a day is a mix, not a label.\n"
     "5. If a block titled OPERATOR DIRECTIVE appears after the DATA, it is a human "
     "operator's steering instruction and takes priority over your judgement calls — honor "
     "it in the direction/digest. If it conflicts with what the DATA supports, say plainly "
@@ -180,10 +207,12 @@ WEEK_PLAN_INSTRUCTIONS = (
     '{"week_start":"YYYY-MM-DD","direction":"<one line, the week\'s focus>",'
     '"loot_deal_ratio":{"loot":<int>,"deal":<int>},'
     '"merchant_priorities":[{"merchant":"<name>","why":"<reason citing its number>"}],'
-    '"daily_themes":[{"day":"mon","theme_focus":"loot_deal|single_deal","posts_planned":<int>}],'
+    '"daily_themes":[{"day":"mon","loot_share":<0-1 float>,"single_share":<0-1 float>,'
+    '"posts_planned":<int>}],'
     '"why":"<how last week\'s numbers drove this direction>","cited_numbers":[<numbers you used>]}\n'
-    "daily_themes MUST contain exactly 7 entries, mon through sun. No text before the "
-    "digest and no text after the closing brace.\n\n"
+    "daily_themes MUST contain exactly 7 entries, mon through sun, each with BOTH "
+    "loot_share and single_share summing to ~1 and neither below 0.3. No text before "
+    "the digest and no text after the closing brace.\n\n"
 
     "GUARDRAILS:\n"
     "- Use ONLY numbers present in the DATA. Never invent a merchant, number, or type.\n"

@@ -22,10 +22,53 @@ def _parse_date(s: str | None) -> date | None:
         return None
 
 
-def persist_ai_plan(s: Session, result: dict) -> CampaignPlan | None:
+def _rescale_slot_counts(plan: dict, target_total: int) -> None:
+    """G10 — proportionally rescale ``post_slots``' ``count`` fields (in place) so
+    they sum to ``target_total`` instead of whatever the model proposed. jit_fill
+    reads ``post_slots`` directly to decide how many posts to actually make, so
+    without this the clamp only ever changed the DISPLAYED recommended_posts —
+    the executed plan stayed at the model's raw (unclamped) count."""
+    slots = plan.get("post_slots") or []
+    raw_total = sum(max(int(sl.get("count") or 0), 0) for sl in slots)
+    if not slots or raw_total <= 0 or raw_total == target_total:
+        return
+    scaled = [max(round((sl.get("count") or 0) * target_total / raw_total), 0) for sl in slots]
+    if target_total > 0 and sum(scaled) == 0:
+        scaled[0] = 1
+    drift = target_total - sum(scaled)
+    if drift:
+        i = max(range(len(scaled)), key=lambda k: scaled[k])
+        scaled[i] = max(scaled[i] + drift, 0)
+    for sl, c in zip(slots, scaled):
+        sl["count"] = c
+
+
+def persist_ai_plan(
+    s: Session, result: dict,
+    recent_median: int | None = None, recent_max_30d: int | None = None,
+) -> CampaignPlan | None:
+    """``recent_median``/``recent_max_30d`` are the same clamp bounds
+    ``daily_brief`` uses for DISPLAY (``ctx.clamp_recommended_posts``) — passing
+    them here applies that clamp at PERSIST time too (G10), so the stored
+    blueprint jit_fill executes matches what's shown instead of drifting from it."""
     if not result.get("available") or not result.get("plan"):
         return None
     plan = result["plan"]
+    if recent_median is not None and plan.get("recommended_posts") is not None:
+        from src.ai.context import clamp_recommended_posts
+        clamped, was_clamped = clamp_recommended_posts(
+            plan["recommended_posts"], recent_median, recent_max_30d)
+        # Record the outcome IN the blueprint so daily_brief (and cache-hit reads)
+        # can surface "we clipped the AI's number" without re-deriving it from the
+        # already-clamped value — re-clamping a clamped number always looks in-range.
+        plan["plan_clamped"] = was_clamped
+        if was_clamped:
+            plan["recommended_posts"] = clamped
+        # Reconcile slot counts to the final recommended_posts ALWAYS (not only on a
+        # clamp): the model routinely lets post_slots' counts drift from its own stated
+        # recommended_posts, and jit_fill executes the slot counts — so without this the
+        # day would post the drifted total (e.g. 71) instead of the planned cadence (34).
+        _rescale_slot_counts(plan, plan["recommended_posts"])
     fc = result.get("factcheck", {"status": "skipped"})
     target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
@@ -34,7 +77,7 @@ def persist_ai_plan(s: Session, result: dict) -> CampaignPlan | None:
         target_date=target_date,
         blueprint=plan,
         expected_outcome={"emphasis": plan.get("emphasis"), "watch": plan.get("watch")},
-        confidence={"passed": 0.6, "warn": 0.45}.get(fc.get("status"), 0.3),
+        confidence={"passed": 0.6, "warn": 0.45, "fallback": 0.2}.get(fc.get("status"), 0.3),
         generated_at=datetime.now(timezone.utc),
         is_ai_generated=True,
         ai_digest=result.get("digest", ""),
@@ -76,7 +119,12 @@ def persist_weekly_plan(
 ) -> CampaignPlan | None:
     """Insert a fresh WEEKLY ``CampaignPlan`` row keyed by calendar week (Monday
     ``week_start``) — the create-path ``weekly_brief()`` was missing (it could
-    only ever UPDATE a row that already existed, never make one)."""
+    only ever UPDATE a row that already existed, never make one).
+
+    ``blueprint`` is expected to already carry the AI's parsed ``loot_deal_ratio``/
+    ``merchant_priorities``/``daily_themes`` merged in (G1) — the caller
+    (``_weekly_ai_generate``) does that merge, since it's the one place both the
+    deterministic skeleton and the AI's parsed plan are in scope together."""
     row = CampaignPlan(
         plan_type=PlanType.WEEKLY,
         title=f"Weekly plan — week of {week_start.isoformat()}",
