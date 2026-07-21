@@ -58,13 +58,14 @@ def create_app() -> FastAPI:
                   lifespan=_lifespan,
                   description="DealWing — Telegram deal-channel growth OS.")
 
-    # CORS: exact origins from CORS_ORIGIN (comma-separated) PLUS any *.vercel.app
-    # domain (so preview + prod deploys of the frontend work without reconfig).
+    # CORS: exact origins from CORS_ORIGIN (comma-separated) PLUS, via regex, any
+    # *.vercel.app deploy (preview + prod frontend, no reconfig) AND any localhost port
+    # (dev: Next.js 3000, Vite 5173, etc. — so the FE port never causes a CORS block).
     origins = [o.strip() for o in (settings.cors_origin or "").split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins or ["*"],
-        allow_origin_regex=r"https://.*\.vercel\.app",
+        allow_origin_regex=r"https://.*\.vercel\.app|http://(localhost|127\.0\.0\.1):\d+",
         allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
     )
     register_error_handlers(app)
