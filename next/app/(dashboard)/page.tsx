@@ -206,7 +206,7 @@ export default function OverviewPage() {
 
 function DraftsQueueCard() {
   const drafts = useDrafts(1, 1);
-  const queue = useQueue(1, 1);
+  const queue = useQueue({ page: 1 }, 1);
 
   return (
     <Card className="rounded-xl">

@@ -64,6 +64,11 @@ function OrgTab() {
                 </div>
               </div>
               <div className="space-y-1.5">
+                <Label>Myntra deeplink</Label>
+                <Input placeholder="https://ww44.affinity.net/sssweb?enk=...&d=<encoded_deal>" value={data.settings?.grabon_myntra_deeplink || ""} onChange={(e) => setS("grabon_myntra_deeplink", e.target.value)} />
+                <p className="text-xs text-muted-foreground">Myntra affiliate template — the product link is URL-encoded and dropped in where <code>&lt;encoded_deal&gt;</code> appears.</p>
+              </div>
+              <div className="space-y-1.5">
                 <Label>Shortener URL</Label>
                 <Input placeholder="https://grbn.in" value={data.settings?.grabon_shortener_url || ""} onChange={(e) => setS("grabon_shortener_url", e.target.value)} />
                 <p className="text-xs text-muted-foreground">Base of your short-link service — every posted link is shortened through it for click tracking.</p>

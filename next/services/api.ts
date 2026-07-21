@@ -1,6 +1,6 @@
 import axios from "axios";
 
-// NEXT_PUBLIC_API_URL (e.g. http://localhost:8080) points the browser directly
+// NEXT_PUBLIC_API_URL (e.g. http://localhost:8000) points the browser directly
 // at the backend. Falls back to a relative "/api" (relying on next.config.ts's
 // rewrite proxy) when unset, so local dev without the env var still works.
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ? `${process.env.NEXT_PUBLIC_API_URL}/api` : "/api";

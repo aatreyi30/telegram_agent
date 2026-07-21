@@ -131,7 +131,12 @@ const _dateTime = new Intl.DateTimeFormat("en-IN", { timeZone: IST, day: "numeri
 
 function _parse(iso?: string | null): Date | null {
   if (!iso) return null;
-  const d = typeof iso === "string" ? parseISO(iso) : new Date(iso);
+  // The backend sends naive UTC ISO strings (no 'Z'/offset). date-fns parseISO would
+  // read a timezone-less string as the VIEWER's local time — off by their UTC offset.
+  // Append 'Z' when there's no timezone marker so it's correctly read as UTC, then
+  // istDate/istDateTime/relative convert to IST properly.
+  const s = /([Zz]|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : iso + "Z";
+  const d = parseISO(s);
   return isNaN(d.getTime()) ? null : d;
 }
 

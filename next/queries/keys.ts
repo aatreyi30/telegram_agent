@@ -7,7 +7,8 @@ export const queryKeys = {
   drafts: (page: number) => ["drafts", page] as const,
   draftsAll: () => ["drafts"] as const,
   posts: (page: number) => ["posts", page] as const,
-  queue: (page: number) => ["queue", page] as const,
+  queue: (page: number, date = "", type = "", status = "", sort = "soonest") =>
+    ["queue", page, date, type, status, sort] as const,
   competitors: () => ["competitors"] as const,
   competitorDashboard: (window?: number | null) => ["competitor-dashboard", window] as const,
   competitorDashboardTrends: (days?: number) => ["competitor-dashboard-trends", days] as const,
