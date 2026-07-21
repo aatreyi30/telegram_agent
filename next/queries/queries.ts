@@ -53,10 +53,16 @@ export function usePosts(page: number, pageSize = 20) {
     queryFn: () => api.get<PostsResponse>(`/posts?page=${page}&page_size=${pageSize}`),
   });
 }
-export function useQueue(page: number, pageSize = 15) {
+export interface QueueFilters { page: number; date?: string; type?: string; status?: string; sort?: string; }
+export function useQueue(f: QueueFilters, pageSize = 15) {
+  const p = new URLSearchParams({ page: String(f.page), page_size: String(pageSize) });
+  if (f.date) p.set("date", f.date);
+  if (f.type) p.set("post_type", f.type);   // URL uses `type`; API expects `post_type`
+  if (f.status) p.set("status", f.status);
+  if (f.sort) p.set("sort", f.sort);
   return useQuery({
-    queryKey: queryKeys.queue(page),
-    queryFn: () => api.get<QueueResponse>(`/queue?page=${page}&page_size=${pageSize}`),
+    queryKey: queryKeys.queue(f.page, f.date, f.type, f.status, f.sort),
+    queryFn: () => api.get<QueueResponse>(`/queue?${p.toString()}`),
   });
 }
 export function useCompetitors() {

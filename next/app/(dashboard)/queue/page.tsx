@@ -1,12 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Clock01Icon, Sent02Icon } from "@hugeicons/core-free-icons";
 import { Async, Empty } from "@/components/Async";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/PageHeader";
 import { PostPreview } from "@/components/PostPreview";
 import { StatusPill, StatusCounts } from "@/components/StatusPill";
@@ -40,17 +43,74 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
   );
 }
 
-export default function QueuePage() {
-  const [page, setPage] = useState(1);
+function QueueInner() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const sp = useSearchParams();
+  const page = Math.max(1, Number(sp.get("page") || 1));
+  const date = sp.get("date") || "";
+  const type = sp.get("type") || "";
+  const status = sp.get("status") || "";
+  const sort = sp.get("sort") || "soonest";
   const [active, setActive] = useState<QueueItem | null>(null);
-  const q = useQueue(page);
+  const q = useQueue({ page, date, type, status, sort });
+
+  // all filter/sort/page state lives in the URL — one helper writes it
+  function update(patch: Record<string, string>, keepPage = false) {
+    const p = new URLSearchParams(sp.toString());
+    for (const [k, v] of Object.entries(patch)) v ? p.set(k, v) : p.delete(k);
+    if (!keepPage) p.delete("page"); // any filter change returns to page 1
+    router.replace(p.toString() ? `${pathname}?${p}` : pathname, { scroll: false });
+  }
+  const hasFilters = !!(date || type || status) || sort !== "soonest";
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Posting schedule"
-        subtitle="Every post lined up to go out, newest first. Click a row to see exactly what will be sent."
+        subtitle="Every post lined up to go out. Filter by date, type or status, and click a row to see exactly what will be sent."
       />
+
+      {/* filters — all reflected in the URL */}
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => update({ date: e.target.value })}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs"
+          aria-label="Filter by date"
+        />
+        <Select value={type || "all"} onValueChange={(v) => update({ type: v === "all" ? "" : v })}>
+          <SelectTrigger className="h-9 w-[130px]" aria-label="Filter by type"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All types</SelectItem>
+            <SelectItem value="single">Single deal</SelectItem>
+            <SelectItem value="loot">Loot board</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={status || "all"} onValueChange={(v) => update({ status: v === "all" ? "" : v })}>
+          <SelectTrigger className="h-9 w-[140px]" aria-label="Filter by status"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All statuses</SelectItem>
+            <SelectItem value="queued">Queued</SelectItem>
+            <SelectItem value="sending">Sending</SelectItem>
+            <SelectItem value="published">Published</SelectItem>
+            <SelectItem value="blocked">Blocked</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={sort} onValueChange={(v) => update({ sort: v })}>
+          <SelectTrigger className="h-9 w-[140px]" aria-label="Sort by date"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="soonest">Soonest first</SelectItem>
+            <SelectItem value="latest">Latest first</SelectItem>
+          </SelectContent>
+        </Select>
+        {hasFilters && (
+          <Button variant="ghost" size="sm" onClick={() => router.replace(pathname, { scroll: false })}>
+            Clear
+          </Button>
+        )}
+      </div>
 
       <Async q={q} rows={3}>
         {(d) => (
@@ -88,17 +148,24 @@ export default function QueuePage() {
                               </div>
                               <div className="text-xs text-muted-foreground">{istDateTime(r.scheduled_at)}</div>
                             </div>
-                            <StatusPill status={r.status} className="shrink-0" />
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              {r.overdue && <Badge variant="warning">Overdue</Badge>}
+                              <StatusPill status={r.status} />
+                            </div>
                           </button>
                         </li>
                       ))}
                     </ul>
                   </CardContent>
                 </Card>
-                <PagedNav page={d.page} pages={d.pages} onPageChange={setPage} />
+                <PagedNav page={d.page} pages={d.pages} onPageChange={(n) => update({ page: String(n) }, true)} />
               </>
             ) : (
-              <Empty>Nothing scheduled yet. The agent fills each slot from your daily plan a few minutes before it fires.</Empty>
+              <Empty>
+                {hasFilters
+                  ? "No posts match these filters. Adjust or clear them."
+                  : "Nothing scheduled yet. The agent fills each slot from your daily plan a few minutes before it fires."}
+              </Empty>
             )}
           </div>
         )}
@@ -125,7 +192,12 @@ export default function QueuePage() {
                 <div className="rounded-lg border">
                   <div className="divide-y divide-border px-3">
                     <DetailRow label="Fires"><span className="font-medium">{relative(active.scheduled_at)}</span> · {istDateTime(active.scheduled_at)}</DetailRow>
-                    <DetailRow label="Status"><StatusPill status={active.status} /></DetailRow>
+                    <DetailRow label="Status">
+                      <span className="inline-flex items-center gap-1.5">
+                        {active.overdue && <Badge variant="warning">Overdue</Badge>}
+                        <StatusPill status={active.status} />
+                      </span>
+                    </DetailRow>
                     <DetailRow label="Earnings"><MoneyBadge affiliateStatus={active.affiliate_status} merchant={active.merchant} /></DetailRow>
                     <DetailRow label="Channel"><span className="font-mono text-xs">{active.channel || "—"}</span></DetailRow>
                     <DetailRow label="Attempts">{active.attempts}</DetailRow>
@@ -142,5 +214,14 @@ export default function QueuePage() {
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+export default function QueuePage() {
+  // useSearchParams() must sit under a Suspense boundary (Next.js App Router).
+  return (
+    <Suspense fallback={<div className="h-40" />}>
+      <QueueInner />
+    </Suspense>
   );
 }

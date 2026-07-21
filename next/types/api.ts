@@ -130,7 +130,7 @@ export interface QueueItem {
   id: number; post_id: number | null; channel: string | null;
   post_type: string | null; merchant: string | null; affiliate_status: string | null;
   text: string | null; bucket: string | null;
-  status: string; scheduled_at: string | null; attempts: string; note: string;
+  status: string; scheduled_at: string | null; overdue?: boolean; attempts: string; note: string;
 }
 
 export interface QueueResponse extends PageMeta { counts: Record<string, number>; items: QueueItem[]; }
@@ -222,6 +222,7 @@ export type PostTemplateKey = keyof PostTemplates;
 
 export interface OrgSettings {
   grabon_shortener_url?: string; grabon_amazon_tag?: string; grabon_flipkart_params?: string;
+  grabon_myntra_deeplink?: string;
   grabon_shorten_all?: boolean; preferred_categories?: string[];
   auto_discover_competitors?: boolean; post_templates?: PostTemplates; [key: string]: unknown;
 }
