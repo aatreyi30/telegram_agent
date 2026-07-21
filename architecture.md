@@ -13,7 +13,7 @@ flowchart LR
     subgraph SRC["External sources"]
         TG_OWN["Telegram\n(our channel)\nMTProto"]
         TG_COMP["Telegram\n(competitor channels)\nMTProto / t.me/s scrape"]
-        DEAL_API["GrabCash Deals API"]
+        DEAL_API["GrabCash Export API\n(per-retailer, key= query param)"]
         MERCH["Merchant sites\n(Amazon, Flipkart, Boat...)"]
     end
 
@@ -121,7 +121,7 @@ flowchart LR
 | **Our own channel** | Telegram MTProto (Telethon, logged-in session — full access) | `OwnedChannelCollector` | Full post history, live views/forwards/reactions, subscriber count, admin stats | `posts`, `post_metric_snapshots`, `participant_snapshots`, `daily_subscriber_stats` |
 | **Competitor channels** | MTProto if visible, else public `t.me/s` HTML scrape (approximate views only) | `CompetitorCollector` | Post text, approximate views (`views_text`) or exact views if Telethon works | `competitor_posts` |
 | **New competitors** | Telegram search + AI-assisted handle verification, **or** manual add via Settings → Competitors (`POST /api/competitors`) | `discovery.py`, `services/collection/onboarding.py` | New candidate channels, classified Direct (platform) vs Indirect (channel-only). A manually-added competitor immediately runs a one-time 7-day backfill + link-resolution + normalization + intelligence pass, then falls into the normal scheduler like any other competitor. | `competitors` |
-| **Deal catalogue** | GrabCash Deals API (httpx, Camoufox stealth-browser fallback on 403) | `DealSourceClient` → `DealEnrichmentEngine` | Priced, validated, ranked deal objects | `enriched_deals` |
+| **Deal catalogue** | GrabCash **export** API — `GET /api/v1/export/deals?key=<API_SECRET_KEY>&retailer=<r>&page_size=<N>&page=<P>` (auth is the `key` query param, not a header), one call **per allowed retailer** (amazon, flipkart, myntra, ajio) merged into one pool; response is `{total, items}`; httpx, Camoufox stealth-browser fallback on 403 | `DealSourceClient` → `DealEnrichmentEngine` | Priced, validated, ranked deal objects, every item carrying `image_url`; myntra is now sourceable (the old combined endpoint returned zero myntra) | `enriched_deals` |
 | **Merchant product pages** | Per-merchant scrapers (Amazon/Flipkart/Boat/Reliance); Ajio/Nykaa/Croma/Zepto/Blinkit are **known-blocked**, never scraped | `MerchantEnrichmentCollector` | Price, MRP, availability | `merchant_products`, `product_price_snapshots` |
 | **Shortlinks in our posts** | Async httpx redirect-following — HTTP 3xx **plus** `<meta http-equiv=refresh>` / simple-JS (`window.location`, `location.replace`) bounces (≤2 extra hops, honors the refresh delay capped at 2s), cached | `LinkResolutionEngine` | Final resolved URL → merchant domain (`tldextract` fallback for unlisted domains) | `extracted_links`, `discovered_domains`, backfills `normalized_posts.primary_merchant_key` |
 
@@ -261,8 +261,8 @@ flowchart TD
 | `growth_detection` | daily **05:30** | Build growth strategy + recommendations. Runs **before** `daily_plan` so the plan grounds on a fresh blueprint | Live |
 | `daily_report` | daily 05:15 | Persist `daily_channel_reports` | Live |
 | `daily_plan` | daily **06:00** | Generate today's **AI daily plan** (per-post slots: window/type/theme/merchant) via `ensure_daily_ai_plan`. **No longer pre-renders drafts** — slots are filled just-in-time | Live |
-| `jit_fill` | 1 min | For each AI-plan slot due within a 3-min lookahead: scrape the live pool, pick a fresh item matching theme/merchant (broadens + logs on miss), AI-write the post (template fallback), write `generated_posts` + enqueue. Idempotent per slot | Live |
-| `weekly_report` | Mon 08:30 | Deterministic weekly plan (`CampaignPlanningEngine`) + **AI weekly plan** (`generate_week_plan` → persisted as the WEEKLY `campaign_plans` row the daily planner reads) | Live |
+| `jit_fill` | 1 min | For each AI-plan slot due within a 3-min lookahead (plus a bounded 30-min missed-slot backfill so a slot whose fire time just passed still fills once): scrape the live pool, pick a fresh item matching theme/merchant (broadens + logs on miss), AI-write the post (template fallback), write `generated_posts` + enqueue. ~5 evenly-spaced slots/day are picked as "image slots" (deal's `image_url` stashed in `format_meta`, attached on send) — the rest are text-only. Idempotent per slot | Live |
+| `weekly_report` | Mon 08:30 | Deterministic weekly plan (`CampaignPlanningEngine`) + **AI weekly plan** (`generate_week_plan` → persisted as the WEEKLY `campaign_plans` row the daily planner reads). The AI's `loot_deal_ratio`/`merchant_priorities` are now kept in the persisted blueprint (previously the deterministic blueprint overwrote them), so `THIS_WEEK_DIRECTION` actually reaches the daily planner | Live |
 | `weekly_retro` | Mon 07:30 | Compare last week's predictions vs actuals (before `weekly_report`) | Live |
 | `queue_processor` | 1 min | Publish due `scheduled_posts` | Live (send gated on admin rights + sign-off) |
 | `notification_engine` | 5 min | Flag blocked posts / failed runs | Live |
@@ -309,7 +309,7 @@ The end-to-end flow one post travels, grouped into pre-posting / during / post.
 | Step | Job (cadence) | What happens | Reads → Writes |
 |---|---|---|---|
 | Retro | `weekly_retro` (Mon 07:30) | Compare last week's predictions vs actuals | `post_predictions` + `post_outcomes` → `weekly_retros` |
-| Weekly plan | `weekly_report` (Mon 08:30) | Deterministic weekly blueprint + AI `generate_week_plan` → week theme / direction / loot-deal ratio | reports/profiles → `campaign_plans` (WEEKLY) |
+| Weekly plan | `weekly_report` (Mon 08:30) | Deterministic weekly blueprint + AI `generate_week_plan` → week theme / direction / loot-deal ratio; the AI's `loot_deal_ratio` + `merchant_priorities` are persisted into the blueprint (no longer overwritten by the deterministic pass), and `daily_themes` carries a per-day loot/single split rather than one label | reports/profiles → `campaign_plans` (WEEKLY) |
 
 The WEEKLY row is what the daily planner reads as `this_week_theme` / `direction`.
 
@@ -320,19 +320,19 @@ The WEEKLY row is what the daily planner reads as `this_week_theme` / `direction
 | `telegram_sync` (5m) / `competitor_sync` (10m) | Pull new owned + competitor posts | Telegram → `posts`, `competitor_posts` |
 | `normalize_posts` (5m) | Raw → structured | → `normalized_posts` |
 | `link_resolution` (15m) | Resolve shortlinks → merchant | → `extracted_links.merchant_key` |
-| `merchant_feed_sync` (30m) | Pull the deal pool from GrabCash | → `enriched_deals` |
+| `merchant_feed_sync` (30m) | Pull the deal pool from the GrabCash export API, one query per allowed retailer, merged | → `enriched_deals` |
 | `learning` (02:00) | Rebuild "what's working" from matured metrics | → `channel_style_profiles`, `post_type_performance`, `learning_records` |
 | `daily_report` (05:15) | Persist yesterday's aggregates | → `daily_channel_reports` |
 | `growth_detection` (05:30) | Learning + reports → strategy blueprint (windows, content mix) | → `growth_strategies` |
-| **`daily_plan` (06:00)** | `ensure_daily_ai_plan`: weekly theme + blueprint + reports + `available_deals` + 14-day trajectory → AI `generate_day_plan` → deterministic factcheck → persist | → **`campaign_plans` (DAILY, `post_slots`)** |
+| **`daily_plan` (06:00)** | `ensure_daily_ai_plan`: weekly theme + blueprint + reports + `available_deals` + 14-day trajectory → AI `generate_day_plan` → deterministic factcheck → `persist_ai_plan` clamps `recommended_posts` to the recent-cadence bound **and** always rescales `post_slots` counts to sum to it (records a `plan_clamped` flag), so `jit_fill` executes the reconciled counts, not the model's drifted total | → **`campaign_plans` (DAILY, `post_slots`)** |
 
-The `post_slots` (window / type / theme / merchant) are the day's source of truth. `available_deals` (from `enriched_deals`, no scoring) supplies the merchant/category vocabulary the slots must use.
+The `post_slots` (window / type / theme / merchant) are the day's source of truth, and now distribute **both `single` and `collection`(loot) slots across the day's windows** per the week's `loot_deal_ratio` (~30% floor per type) — previously each day was one type only, which produced single-only days; each slot's `why` also justifies its type choice. `available_deals` (from `enriched_deals`, no scoring) supplies the merchant/category vocabulary the slots must use.
 
 ### Phase 2 — PRE-POSTING: fill each slot just-in-time
 
 | Job (cadence) | What happens | Reads → Writes |
 |---|---|---|
-| **`jit_fill` (every 1m)** | For each slot due within a 3-min lookahead: scrape the live pool → pick a fresh item matching theme/merchant (loot = distinct categories; deal = one product) → apply our affiliate link → AI copy (`write_for_item`/`write_for_loot`, template fallback) → draft + queue at the slot's fire time + baseline prediction | `campaign_plans` + live deals → `generated_posts`, `scheduled_posts`, `post_predictions` |
+| **`jit_fill` (every 1m)** | For each slot due within a 3-min lookahead (+ bounded 30-min missed-slot backfill): scrape the live pool → pick a fresh item matching theme/merchant (loot = distinct categories; deal = one product) → apply our affiliate link → AI copy (`write_for_item`/`write_for_loot`, template fallback) → draft + queue at the slot's fire time + baseline prediction. ~5 evenly-spaced slots/day are picked as image slots — that deal's `image_url` is stashed in `format_meta` and the send path attaches a photo only there, rest text-only | `campaign_plans` + live deals → `generated_posts`, `scheduled_posts`, `post_predictions` |
 
 Content is scraped fresh ~3 min before it fires — per-minute, not one batch.
 
@@ -340,7 +340,7 @@ Content is scraped fresh ~3 min before it fires — per-minute, not one batch.
 
 | Job (cadence) | What happens | Reads → Writes |
 |---|---|---|
-| **`queue_processor` (every 1m)** | Publish due `scheduled_posts` → `Publisher.publish`: revalidate deal → verify admin rights → send → set status | → status `PUBLISHED`/`BLOCKED`/`RETRY`/`FAILED` |
+| **`queue_processor` (every 1m)** | Publish due `scheduled_posts` → `Publisher.publish`: revalidate deal → verify admin rights → send → set status → `repredict_and_link_on_publish` matches the published Post on the **destination** channel (`channel_ref`), not the draft's authoring channel | → status `PUBLISHED`/`BLOCKED`/`RETRY`/`FAILED` |
 
 The real send is **hard-gated** (`_check_and_publish` returns `False` — never posts to the owned channel). Dev testing posts to a test chat via `dev_send`. Retries 60→120→240s, max 3.
 
@@ -349,9 +349,11 @@ The real send is **hard-gated** (`_check_and_publish` returns `False` — never 
 | Job (cadence) | What happens | Reads → Writes |
 |---|---|---|
 | `stats_refresh` (30m) | Re-check views/forwards/reactions | → `posts`, `post_metric_snapshots` |
-| `outcome_collector` (15m) | Advance each post through T+1h / 6h / 24h view snapshots | → `post_outcomes` |
+| `outcome_collector` (15m) | Advance each post through T+1h / 6h / 24h view snapshots; also runs a `backfill_post_links` pass each tick so a prediction's `post_id` links the moment a tracked channel receives the post | → `post_outcomes` |
 | `weekly_retro` (Mon) | Predictions vs actuals → next weekly plan | closes the weekly loop |
 | `learning` (next 02:00) | Re-read matured metrics → feed tomorrow's plan | **closes the daily loop** |
+
+Predictions now link to their published Post as soon as a tracked channel receives it — but the predict→outcome→retro loop still can't fully close until the account has channel-admin rights on a tracked channel.
 
 > **Jobs vs Queue (dashboard):** `scheduler_runs` (Jobs page) = the cron machinery — which background jobs run and their health. `scheduled_posts` (Queue page) = the product — individual posts waiting to publish. The `queue_processor` *job* drains the *queue*.
 
@@ -381,7 +383,7 @@ flowchart LR
 - **Every AI call uses a real system prompt.** `AIClient.complete()` puts `GROUNDING_SYSTEM` + the call's instruction block in the *system* role. The planner, coach and copywriter all pass their instructions via `system_extra=`.
 - **Scheduled draft text is AI-first with a deterministic fallback.** `jit_fill` calls `Copywriter.write_for_item()` — it hands the model the slot's freshly-scraped deal plus the org's saved deal/loot **post template as the "winning-format" exemplar** — and only if the AI is unavailable does it fall back to `PostFormatter` template rendering. The post-text templates are **editable** and live in `organizations.settings["post_templates"]` (seeded from code defaults; safe-rendered so a bad edit can never crash generation). The older fully-deterministic engines (`engine.py`) still back the opt-in `/run/generate-live` path.
 - `insight_writer.narrate()` is a small AI-assist used *inside* the Growth/Reasoning engines to phrase a "why" sentence from evidence — always has a deterministic fallback string if AI is unavailable.
-- **The planner degrades gracefully without AI.** When the AI is unavailable (`ai_available:false`), `/plan/daily` still returns a full deterministic plan — `posting_windows`, `deal_type_allocation`, and `merchant_allocation` are computed by `CampaignPlanningEngine` from real history (see §7 note on cold-start fallbacks). Only the free-text digest / AI-only slots go empty, and `jit_fill` falls back to template-rendered copy.
+- **The planner degrades gracefully without AI.** When the AI is unavailable (`ai_available:false`), `/plan/daily` still returns a full deterministic plan — `posting_windows`, `deal_type_allocation`, and `merchant_allocation` are computed by `CampaignPlanningEngine` from real history (see §7 note on cold-start fallbacks). And when the AI is unavailable **or returns unparseable output**, `generate_day_plan` itself now returns a real deterministic day plan — every posting window × the loot:deal ratio × top merchants, both types present, tagged `is_fallback` — instead of an empty/`available:false` plan, so the channel never goes silent. Only the free-text digest goes empty, and `jit_fill` falls back to template-rendered copy.
 
 ---
 
@@ -399,7 +401,7 @@ flowchart LR
 | # | Call (fn · file) | Prompt · trace `call` | Trigger | Input (user message) | Output | Params | Persisted |
 |---|---|---|---|---|---|---|---|
 | 1 | `generate_day_plan` · `ai/planner.py` | `PLAN_INSTRUCTIONS` · `day_plan` | `daily_plan` job 06:00 · regenerate | yesterday report, 14d trajectory, cadence, `available_deals`, posting windows, deal-type alloc, week theme, directive + **steering history** | digest (**doubles as daily briefing**: went-well/badly + do-today) + `===PLAN===` + `post_slots` JSON | `3200`, effort | `campaign_plans` DAILY (fact-checked) + `ai_traces` |
-| 2 | `generate_week_plan` · `ai/planner.py` | `WEEK_PLAN_INSTRUCTIONS` · `week_plan` | `weekly_report` job Mon · `/plan/weekly` · regenerate | last-week evidence: post-type perf, merchant opps, follower deltas, retro, directive | digest (**doubles as weekly retro**: win/concern/what-to-change) + `daily_themes`/`direction`/`loot_deal_ratio` JSON | `2000`, effort | `campaign_plans` WEEKLY + `ai_traces` |
+| 2 | `generate_week_plan` · `ai/planner.py` | `WEEK_PLAN_INSTRUCTIONS` · `week_plan` | `weekly_report` job Mon · `/plan/weekly` · regenerate | last-week evidence: post-type perf, merchant opps, follower deltas, retro, directive | digest (**doubles as weekly retro**: win/concern/what-to-change) + `daily_themes`(per-day loot/single split)/`direction`/`loot_deal_ratio`/`merchant_priorities` JSON | `2000`, effort | `campaign_plans` WEEKLY (ratio + priorities now persisted, not overwritten by the deterministic pass) + `ai_traces` |
 | 3 | `Copywriter.write_for_item` · `ai/copywriter.py` | `COPYWRITER_INSTRUCTIONS` · `copywriter_deal` | `jit_fill` (per **deal** slot, 1m) | PRODUCT, FORMAT_REFERENCE (`_deal_examples`), slot theme/merchant, CHANNEL_STYLE; `<link/>` swapped after | `<hook>/<name>/<price>/<cta>` tags → post | `600`, `low` | `generated_posts` + `ai_traces` |
 | 4 | `Copywriter.write_for_loot` · `ai/copywriter.py` | `LOOT_INSTRUCTIONS` · `copywriter_loot` | `jit_fill` (per **loot** slot) | ITEMS (label → `<LINK_n>`), price cap, `_loot_examples`, CHANNEL_STYLE | `<theme>/<items>` tags → loot | `600`, `low` | `generated_posts` + `ai_traces` |
 | 5 | `insight_writer.narrate` · `ai/insight_writer.py` | `NARRATE_SYSTEM` · `narrate` | inside Growth/Reasoning engines (daily) | kind + observation + evidence JSON | one grounded sentence (deterministic fallback on failure) | `120`, `low` | in `growth_*`/`reasoned_insights` + `ai_traces` |
@@ -425,7 +427,7 @@ flowchart LR
 | `/plan` | `/plan/daily`, `/plan/weekly` | `campaign_plans` (AI planner + briefing; weekly is keyed to a real IST calendar week and only calls the AI once per week, reusing the cached digest otherwise). Deterministic `posting_windows` / `deal_type_allocation` are computed by `CampaignPlanningEngine` and fall back to owned history when the growth blueprint is cold (§7). |
 | `/drafts` | `/drafts` | `generated_posts` |
 | `/queue` | `/queue` | `scheduled_posts` |
-| `/settings` | `/org`, `/users`, `/channels`, `/competitors` (GET + POST) | `organizations`, `users`, `channels`, `competitors` — the Competitors tab lists/adds competitors (Direct/Indirect); the **Post Templates** tab (owner-only) reads/writes `organizations.settings["post_templates"]` via `PATCH /org` (partial merge) |
+| `/settings` | `/org`, `/users`, `/channels`, `/competitors` (GET + POST) | `organizations`, `users`, `channels`, `competitors` — the Competitors tab lists/adds competitors (Direct/Indirect); the **Post Templates** tab (owner-only) reads/writes `organizations.settings["post_templates"]` via `PATCH /org` (partial merge); the **Org** tab also edits the affiliate config (amazon tag, flipkart params, myntra deeplink, shortener), DB-backed in `organizations.settings` |
 | `/schedulers` | `/schedulers/runs` | `scheduler_runs` — per-job cadence, priority, last status, last run, detail |
 
 ---
@@ -442,15 +444,15 @@ Backend rooted at `be/`, frontend at `next/`. Only the load-bearing files are li
 | **Request-time orchestration** | `controllers/service.py` (~1.5k lines) | The workhorse: `daily_brief()`, `_today_details()`, `weekly` plan assembly, overview/competitor dashboards. Most `/data` routes call into here. |
 | | `controllers/jobs.py` | `JobManager` — in-process pipeline/generate-live triggers behind `/run/*`. |
 | | `controllers/schedulers.py` | All cron jobs (APScheduler, IST). Off unless `SCHEDULERS_AUTOSTART=true`. |
-| | `controllers/accounts.py` | Org/user CRUD. `_EDITABLE_SETTINGS` allow-lists which `org.settings` keys `PATCH /org` may write (includes `post_templates`). |
+| | `controllers/accounts.py` | Org/user CRUD. `_EDITABLE_SETTINGS` allow-lists which `org.settings` keys `PATCH /org` may write (includes `post_templates`, and the affiliate config keys — amazon tag, flipkart params, `grabon_myntra_deeplink`, shortener). |
 | **Planning** | `services/planning/campaign.py` | `CampaignPlanningEngine`: `_recent_distribution` (owned 45-day merchant/deal-type counts), `_allocate_posts`/`_allocate_from_recent` (single vs loot mix — cold-start now derives the split from the Growth blueprint's competitor `content_mix_reference`, 60/40 only as last resort), `_recent_hourly_all`/`_recent_posting_windows` (posting-window fallback), `_daily_plan`, `_weekly_plan`, `_risks`. |
 | | `services/planning/posting_windows.py` | Shared pure `build_posting_plan(posts_per_day, hourly_all)` + `DAY_PARTS`. Reused by both `campaign.py` and `intelligence/growth.py` (single source of truth for day-part distribution). |
 | **Generation** | `services/generation/jit_fill.py` | **`fill_due_slots()`** — the just-in-time executor and the real posting path. Reads AI-plan `post_slots` due within a 3-min lookahead, scrapes the live pool, matches each slot's theme/merchant (`exact → theme → any` broadening, logged), AI-writes via `Copywriter.write_for_item` (template fallback), writes `generated_posts` + enqueues + a baseline `PostPrediction`. Idempotent per slot (`selection_bucket` tag). Has a `_selfcheck()`. |
 | | `services/generation/daily_planner.py` | **Retired** deterministic planner — only the `recently_used_urls()` 3-day dedup helper survives; the old `build_and_schedule_day()` was replaced by `jit_fill`. |
 | | `services/generation/formatting.py` | `PostFormatter` — deterministic post text (fallback path + `/run/generate-live`). `DEFAULT_POST_TEMPLATES`, safe `_render()` (falls back to default on any bad template). |
 | | `services/generation/engine.py` | `PostGenerationEngine`, `LiveDealGenerationEngine` (groups today's fresh deals by category), `ObservedPostGenerationEngine`. Pass `org.settings["post_templates"]` into `PostFormatter`. |
-| | `services/generation/deal_source.py` | `DealSourceClient` — live GrabCash feed (reads `DEAL_API_BASE`). |
-| | `services/affiliate/grabon.py` | `GrabOnAffiliateProvider` — Amazon/Flipkart affiliate params + `grbn.in` shortening. |
+| | `services/generation/deal_source.py` | `DealSourceClient` — live GrabCash **export** feed (`/api/v1/export/deals`, `key` query-param auth), queried once per allowed retailer (amazon/flipkart/myntra/ajio) and merged; Camoufox is the 403 fallback. Item field names unchanged, so `_map_item`/`_FIELD_ALIASES` didn't need to change. |
+| | `services/affiliate/grabon.py` | `GrabOnAffiliateProvider` — Amazon/Flipkart/**Myntra** affiliate rules (Myntra URL-encodes the product URL into an affinity deeplink template at its `<encoded_deal>` token) + `grbn.in` shortening; Ajio still has no rule. Config is **DB-backed** in `organizations.settings` (amazon tag, flipkart params, myntra deeplink, shortener), editable at Settings → Org; `registry._settings_for_org` reads it and the pipeline resolves the provider via `get_affiliate_provider(org=…)`. `config/settings.py:_DEFAULT_MYNTRA_DEEPLINK` is the env/fallback default. |
 | **Collection** | `services/collection/link_resolution.py` | `LinkResolutionEngine` — shortlink → merchant, incl. meta-refresh/JS follow (`_extract_html_redirect`, `_resolve_one`). |
 | | `services/collection/merchants/registry.py` | `MERCHANT_SEED`, `detect_merchant_key()` — the known-domain list. |
 | **Processing** | `services/processing/normalizer.py` | `PostNormalizer` — raw post → `normalized_posts` (merchant only from known domains; shortlink resolution is the later link-resolution pass). |
@@ -485,9 +487,11 @@ Backend rooted at `be/`, frontend at `next/`. Only the load-bearing files are li
 - **Schedulers off by default** (`SCHEDULERS_AUTOSTART=false`). Nothing ingests/plans automatically in dev — trigger via `scripts/collect_data.py` or the `/run/*` endpoints.
 - **Cold-start fallbacks (tiered, not a magic constant).** The plan must never come back empty just because Growth/learning hasn't run. `deal_type_allocation` falls back in order: owned recent single/loot split → the Growth cold-start blueprint's competitor-derived `content_mix_reference` (`{single_deal/loot_deal}` counts over comparable channels) → a neutral 60/40 single/loot default **only** when there's no owned history *and* no usable competitors. `posting_windows` falls back to `_recent_posting_windows` (owned hour distribution weighted by views, same `_owned_rows` source as the analytics chart). Only override these fallbacks when a real growth blueprint is present.
 - **Editable templates are safe by construction.** `PostFormatter._render()` catches template errors and falls back to `DEFAULT_POST_TEMPLATES`. When adding a new template string, add its default there and document its placeholders.
-- **SQLite pragmas** (`db/session.py`): `foreign_keys=ON`, `journal_mode=WAL`, `busy_timeout=5000` on every connection.
+- **SQLite pragmas** (`db/session.py`): `foreign_keys=ON`, `journal_mode=WAL`, `busy_timeout=30000`, `synchronous=NORMAL` on every connection — WAL + the raised timeout give concurrent-writer safety under the scheduler (multiple jobs writing at once no longer hit `database is locked`).
 - **Sync SQLAlchemy 2.0** throughout — use `session_scope()`; engines/sessionmakers are `lru_cache`d.
 - **IST is the product timezone.** Analytics/schedulers bucket by IST via `to_ist()`; timestamps in the DB are UTC.
+- **CORS** allows any `localhost`/`127.0.0.1` port plus `*.vercel.app` (dev frontend is Next.js on `:3000`).
+- The `duckduckgo_search`→`ddgs` rename `RuntimeWarning` is suppressed via a one-time `showwarning` wrapper in `services/collection/platform_detector.py`.
 
 ---
 

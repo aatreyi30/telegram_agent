@@ -7,16 +7,20 @@ analytics — every number labelled with the time window and sample it came from
 Two independent apps live side by side (not a monorepo):
 
 - **`be/`** — FastAPI backend: the intelligence engines, a JSON API, auth, and a CLI.
-- **`fe/`** — Vite + React + shadcn/ui frontend: landing page, login, and dashboard.
+- **`next/`** — Next.js (App Router) + TypeScript + shadcn/ui frontend: landing, login, dashboard.
 
-Each installs and runs on its own; the backend can also host the built frontend.
+Each installs and runs on its own (backend :8000, frontend :3000).
 
 ---
 
 ## Features
 
-- **Strategy‑compliant generation** — drafts follow the learned strategy (right post
-  types, right emojis, real affiliate links), and each draft explains *why*.
+- **Strategy‑compliant generation** — drafts follow the learned strategy (a real
+  loot + single-deal mix across the day, right emojis, real affiliate links), and each
+  draft explains *why*. ~5 posts/day carry the deal's product image; the rest are text.
+- **Live deal sourcing** — pulls today's deals from the GrabCash **export API** per
+  retailer (Amazon, Flipkart, Myntra, Ajio), each with a product image; affiliate links
+  for Amazon / Flipkart / Myntra are applied at draft time (configurable per-org).
 - **Explainable insights** — every recommendation shows the calculation, evidence, and
   the period + sample behind it.
 - **Honest analytics** — views by day / hour (IST) / weekday / post‑type / merchant, with
@@ -45,8 +49,8 @@ Each installs and runs on its own; the backend can also host the built frontend.
 │       └── ai/  auth/  db/     # LLM layer · auth (pbkdf2/HMAC) · SQLAlchemy models + session
 │   ├── tests/
 │   ├── Dockerfile  pyproject.toml  requirements*.txt  .env.example
-├── fe/                       # Vite + React + shadcn/ui
-│   └── src/{routes, features, components/ui, providers, services, hooks, lib, constants, types, styles}
+├── next/                     # Next.js (App Router) + TypeScript + shadcn/ui
+│   └── {app/(dashboard), components, queries, services, lib, types}
 ├── docker-compose.yml        # runs the backend container
 └── README.md
 ```
@@ -76,17 +80,19 @@ uvicorn src.main:app --reload --port 8000
 > `GET /api/health` is the liveness check. Log in via `POST /api/auth/login` to get a
 > Bearer token. Run backend commands from `be/` (the SQLite path is relative to the CWD).
 
-### Frontend (`fe/`)
+### Frontend (`next/`)
 
 ```bash
-cd fe
+cd next
 npm install
-npm run dev                    # Vite on :5173, proxies /api and /run to the backend :8000
-# or build for the backend to serve at /:
-npm run build                  # -> fe/dist
+npm run dev                    # Next.js on :3000
+# set NEXT_PUBLIC_API_URL=http://localhost:8000 in next/.env.local so the browser
+# calls the backend directly (unset falls back to a same-origin /api rewrite)
+npm run build && npm start     # production build
 ```
 
-Log in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` you set in `be/.env`.
+Log in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` you set in `be/.env`. The backend
+allows any `localhost` port for CORS in dev, so :3000 works out of the box.
 
 ### Docker (backend only)
 
@@ -127,7 +133,7 @@ authenticated client resolves it. Turning it **active** is the one manual step:
 ## Deployment
 
 Two independent deploys: the **backend on Railway or Render** (Docker) and the
-**frontend on Vercel** (static Vite build). Deploy the backend first — you need its
+**frontend on Vercel** (Next.js build). Deploy the backend first — you need its
 public URL for the frontend and its CORS setting.
 
 ### Backend → Railway
@@ -154,12 +160,12 @@ builds `be/Dockerfile`, attaches a 1 GB disk at `/app/data`, and prompts for the
 ### Frontend → Vercel
 
 1. **Add New Project** → import this repo.
-2. Set **Root Directory** to **`fe`** (Vercel auto-detects Vite from `fe/vercel.json`).
-3. Add an environment variable **`VITE_API_URL`** = your backend URL (no trailing
+2. Set **Root Directory** to **`next`** (Vercel auto-detects Next.js).
+3. Add an environment variable **`NEXT_PUBLIC_API_URL`** = your backend URL (no trailing
    slash), e.g. `https://dealwing-backend.up.railway.app`.
-4. Deploy. `vercel.json` rewrites all routes to `index.html` for the SPA router.
-5. Back on the backend, make sure `CORS_ORIGIN` equals the final Vercel URL
-   (any `*.vercel.app` preview domain is already allowed).
+4. Deploy.
+5. Back on the backend, `CORS_ORIGIN` may be your final Vercel URL, but any
+   `*.vercel.app` domain (and any `localhost` port in dev) is already allowed.
 
 ### Deploy notes (honest caveats)
 
@@ -167,9 +173,11 @@ builds `be/Dockerfile`, attaches a 1 GB disk at `/app/data`, and prompts for the
   replicas at 1 (`numReplicas`/`--workers 1`) so jobs don't double-fire.
 - **SQLite is ephemeral without the disk/volume** above — data resets on redeploy if
   you skip it. For heavier use, point `DB_URL` at managed Postgres.
-- **Deal scraping (GrabCash) may 403 from cloud IPs.** The source's Cloudflare has
-  been permissive from an India IP but can block US/EU datacenter ranges; if scraping
-  degrades on the host, the rest of the app (analytics, planning, UI) still runs.
+- **Deal sourcing (GrabCash export API) may 403 from cloud IPs.** `DealSourceClient`
+  pulls per-retailer from `/api/v1/export/deals` (query-param `key` auth); the source's
+  Cloudflare has been permissive from an India IP but can block US/EU datacenter ranges
+  (a Camoufox stealth-browser fallback retries on 403). If sourcing degrades on the host,
+  the rest of the app (analytics, planning, UI) still runs.
 - **Telegram login** needs an interactive first sign-in (a code). Generate the
   `*.session` locally, or run the login flow once against the deployed instance.
 
@@ -179,7 +187,7 @@ builds `be/Dockerfile`, attaches a 1 GB disk at `/app/data`, and prompts for the
 
 | Layer     | Stack                                                                 |
 | --------- | --------------------------------------------------------------------- |
-| Frontend  | Vite, React, TypeScript, TailwindCSS, shadcn/ui, TanStack Query, Axios, Recharts |
+| Frontend  | Next.js (App Router), React, TypeScript, TailwindCSS, shadcn/ui, TanStack Query, Axios, Recharts |
 | Backend   | FastAPI, Uvicorn, SQLAlchemy, Typer, APScheduler, OpenAI/Groq (LLM)   |
 | Auth      | PBKDF2 password hashing + HMAC‑signed tokens (stdlib)                 |
 | Storage   | SQLite (default)                                                      |
@@ -187,5 +195,7 @@ builds `be/Dockerfile`, attaches a 1 GB disk at `/app/data`, and prompts for the
 
 ## Configuration
 
-Backend settings are environment‑driven — see `be/.env.example`. Frontend settings
-(the API base URL) are in `fe/.env.example`. Secrets are never committed.
+Backend settings are environment‑driven — see `be/.env.example` (deal source key,
+affiliate defaults, AI provider, CORS, Telegram). Per-org affiliate config (Amazon tag,
+Flipkart params, Myntra deeplink, shortener) is DB-backed and editable at **Settings →
+Org**. The frontend's API base URL is `NEXT_PUBLIC_API_URL`. Secrets are never committed.
