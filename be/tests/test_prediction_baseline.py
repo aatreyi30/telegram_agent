@@ -165,6 +165,101 @@ def test_predict_end_to_end_with_subscriber_scaling():
     assert result["views_6h"] is None
 
 
+# --------------------------------------------------------------------------- #
+# G8 -- post_id linking: publish-time hook + the outcome-collector catch-up pass
+# --------------------------------------------------------------------------- #
+def _generated_post(s, channel_id, channel_ref, text):
+    from src.db.models_generation import GeneratedPost
+
+    gp = GeneratedPost(
+        channel_id=channel_id, generated_at=datetime.now(timezone.utc), post_type="single",
+        deal_ids=[], rendered_text=text, status="published", channel_ref=channel_ref,
+    )
+    s.add(gp)
+    s.flush()
+    return gp
+
+
+def _owned_post(s, channel_id, msg_id, text, media_type=None):
+    from src.db.models import Post
+    from src.services.collection.util import content_hash, extract_urls
+
+    digest = content_hash(text, extract_urls(text), media_type)
+    p = Post(channel_id=channel_id, tg_message_id=msg_id, posted_at=datetime.now(timezone.utc),
+             collected_at=datetime.now(timezone.utc), text=text, content_sha256=digest)
+    s.add(p)
+    s.flush()
+    return p
+
+
+def test_backfill_post_links_matches_on_destination_channel_not_draft_channel():
+    """A draft authored for channel A but actually sent to channel B (e.g. a
+    dev/test send) must link against B's Post, never A's -- the bug this fixes."""
+    from src.db.models import Channel
+    from src.db.models_prediction import PostPrediction
+    from src.db.session import session_scope
+    from src.services.analytics.prediction import backfill_post_links
+
+    with session_scope() as s:
+        drafted_for = Channel(tg_channel_id=401, username="prod_channel", title="Prod")
+        sent_to = Channel(tg_channel_id=402, username="test_channel", title="Test")
+        s.add_all([drafted_for, sent_to])
+        s.flush()
+        gp = _generated_post(s, drafted_for.id, "@test_channel", "Deal: 50% off widget")
+        # a post with the SAME text exists in both channels -- only the destination
+        # channel's row is the correct match
+        wrong_post = _owned_post(s, drafted_for.id, 1, "Deal: 50% off widget")
+        right_post = _owned_post(s, sent_to.id, 2, "Deal: 50% off widget")
+        pred = PostPrediction(generated_post_id=gp.id, model_version="baseline_v1", features={})
+        s.add(pred)
+        s.flush()
+        gp_id, pred_id, right_id, wrong_id = gp.id, pred.id, right_post.id, wrong_post.id
+
+    with session_scope() as s:
+        n = backfill_post_links(s)
+    assert n == 1
+
+    with session_scope() as s:
+        pred = s.get(PostPrediction, pred_id)
+        assert pred.post_id == right_id
+        assert pred.post_id != wrong_id
+
+
+def test_backfill_post_links_noop_when_destination_channel_untracked():
+    """No Channel row exists yet for the destination (e.g. telegram_sync doesn't
+    poll it) -> leaves post_id null rather than guessing, and never crashes."""
+    from src.db.models import Channel
+    from src.db.models_prediction import PostPrediction
+    from src.db.session import session_scope
+    from src.services.analytics.prediction import backfill_post_links
+
+    with session_scope() as s:
+        drafted_for = Channel(tg_channel_id=403, username="prod_channel2", title="Prod2")
+        s.add(drafted_for)
+        s.flush()
+        gp = _generated_post(s, drafted_for.id, "@untracked_test_group", "Deal: 30% off gadget")
+        pred = PostPrediction(generated_post_id=gp.id, model_version="baseline_v1", features={})
+        s.add(pred)
+        s.flush()
+        pred_id = pred.id
+
+    with session_scope() as s:
+        n = backfill_post_links(s)
+    assert n == 0
+
+    with session_scope() as s:
+        assert s.get(PostPrediction, pred_id).post_id is None
+
+
+def test_backfill_post_links_skips_already_linked_and_returns_zero():
+    from src.db.session import session_scope
+    from src.services.analytics.prediction import backfill_post_links
+
+    with session_scope() as s:
+        n = backfill_post_links(s)  # empty table -- nothing to do, no crash
+    assert n == 0
+
+
 def test_predict_no_history_returns_nones():
     from src.db.models import Channel
     from src.db.session import session_scope

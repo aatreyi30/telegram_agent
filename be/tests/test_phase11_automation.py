@@ -121,6 +121,33 @@ def test_process_due_marks_blocked_permanently():
     assert row.attempts == 1                   # blocked = no retry
 
 
+def test_reclaim_resets_stale_sending_but_leaves_fresh_alone():
+    """A post stranded in SENDING (worker died mid-send) must be reclaimed to QUEUED so
+    it isn't stuck past its fire time forever; a post that only just went SENDING must
+    NOT be touched (it may still be delivering)."""
+    from src.services.automation.queue import enqueue
+    from src.services.automation.scheduler import PostingScheduler, _STALE_SENDING_MIN
+    from src.db.models_automation import ScheduledPost, ScheduleStatus
+    from src.db.session import session_scope
+
+    now = datetime.now(timezone.utc)
+    pid_stale = _make_draft("stale-send")   # create drafts OUTSIDE the session (own txn)
+    pid_fresh = _make_draft("fresh-send")
+    with session_scope() as s:
+        stale, _ = enqueue(s, pid_stale, "@X", now - timedelta(minutes=_STALE_SENDING_MIN + 5))
+        stale.status = ScheduleStatus.SENDING
+        stale_id = stale.id
+        fresh, _ = enqueue(s, pid_fresh, "@X", now - timedelta(minutes=1))
+        fresh.status = ScheduleStatus.SENDING
+        fresh_id = fresh.id
+
+    n = PostingScheduler()._reclaim_stale_sending(now)
+    assert n >= 1
+    with session_scope() as s:
+        assert s.get(ScheduledPost, stale_id).status == ScheduleStatus.QUEUED  # recovered
+        assert s.get(ScheduledPost, fresh_id).status == ScheduleStatus.SENDING  # left alone
+
+
 def test_process_due_retries_then_fails_on_transient_error():
     from src.services.automation.queue import enqueue
     from src.services.automation.scheduler import PostingScheduler
