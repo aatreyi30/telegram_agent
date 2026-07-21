@@ -20,6 +20,25 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
+# `duckduckgo_search` (8.x) spams a RuntimeWarning ("renamed to `ddgs`") on EVERY DDGS().
+# It can't be filtered: DDGS.__init__ calls `warnings.simplefilter("always")` right before
+# the warn(), wiping any ignore filter first. Across concurrent collection jobs it floods
+# the console. `simplefilter` only touches warnings.filters, not warnings.showwarning — so
+# we wrap showwarning once here to drop just this one message and pass everything else
+# through. Set at import (single-threaded), so it's safe under the concurrent jobs.
+# ponytail: suppressing the noise, not migrating — swap the import to `ddgs` if/when
+# duckduckgo_search actually stops working.
+_orig_showwarning = warnings.showwarning
+
+
+def _showwarning(message, category, *args, **kwargs):
+    if category is RuntimeWarning and "renamed to `ddgs`" in str(message):
+        return
+    return _orig_showwarning(message, category, *args, **kwargs)
+
+
+warnings.showwarning = _showwarning
+
 # ── known coupon platforms with a Telegram presence ──────────────────
 # Keyed by lowercased title-fragment or username; value is the domain.
 KNOWN_PLATFORMS: dict[str, str] = {
@@ -192,10 +211,8 @@ def _web_search_platform_detected(name: str) -> str | None:
 
     query = f"{name} coupons deals cashback website"
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=5))
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
     except Exception as exc:
         logger.debug("duckduckgo search failed for %r: %s", name, exc)
         return None

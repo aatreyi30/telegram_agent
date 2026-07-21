@@ -35,7 +35,14 @@ def get_engine() -> Engine:
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
             cur.execute("PRAGMA journal_mode=WAL")
-            cur.execute("PRAGMA busy_timeout=5000")  # wait, don't instantly lock-fail
+            # SQLite allows only ONE writer at a time. The scheduler runs many jobs in
+            # parallel threads, so writers queue behind each other — busy_timeout is how
+            # long a blocked writer WAITS for the lock before giving up with "database is
+            # locked". 5s was too short under that concurrency; 30s lets them serialise
+            # cleanly. synchronous=NORMAL (safe in WAL) skips an fsync per commit, so each
+            # writer holds the lock for less time -> less contention.
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.execute("PRAGMA synchronous=NORMAL")
             cur.close()
 
     return engine
