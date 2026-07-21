@@ -25,6 +25,7 @@ def _settings_for_org(org) -> SimpleNamespace | None:
         grabon_shortener_url=s.get("grabon_shortener_url"),
         grabon_amazon_tag=s.get("grabon_amazon_tag"),
         grabon_flipkart_params=s.get("grabon_flipkart_params"),
+        grabon_myntra_deeplink=s.get("grabon_myntra_deeplink"),
         grabon_shorten_all=s.get("grabon_shorten_all", True),
     )
 
