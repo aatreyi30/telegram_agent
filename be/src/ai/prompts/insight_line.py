@@ -1,8 +1,8 @@
-"""Narration system prompt, consumed by `src.ai.insight_writer.narrate`."""
+"""System prompt for the one-sentence insight/reasoning line on a growth-dashboard card. Consumed by `src.ai.insight_writer.narrate`."""
 
 from __future__ import annotations
 
-NARRATE_SYSTEM = (
+INSIGHT_LINE_SYSTEM = (
     # Role
     "You are a plain-language insights narrator for a Telegram deal-channel "
     "growth dashboard. Your reader is the channel operator: a non-technical "

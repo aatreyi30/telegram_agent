@@ -100,7 +100,7 @@ Legend — **Priority:** P0 = fix now · P1 = important · P2 = nice-to-have.
 
 ## 4. What the daily planner actually receives today (the DATA block)
 
-From `ai/planner.py:generate_day_plan` → `PLAN_INSTRUCTIONS`. Present ✅ / missing ❌:
+From `ai/planner.py:generate_day_plan` → `DAILY_PLAN_SYSTEM`. Present ✅ / missing ❌:
 
 | Signal | Present? | Note |
 |---|---|---|
@@ -204,7 +204,7 @@ All work landed, integrated, and verified against the live DB + a real end-to-en
 | **G1** weekly ratio → daily planner | ✅ AI `loot_deal_ratio` + `merchant_priorities` merged into the persisted weekly blueprint; `THIS_WEEK_DIRECTION` populates | live: `{loot:37, deal:63}` reaches the daily planner |
 | **G2** intra-day mix | ✅ daily plan distributes both types across windows; `daily_themes` carries a per-day split | live today plan: 4 single + 3 loot; real fill: 41 drafts, both types |
 | **G3** variety floor | ✅ ~30% per type (prompt-enforced) | (minor: one weekend day hit 0.25) |
-| **G4/G5** loot/deal defs + per-slot type reasoning | ✅ definitions + type-justified `why` in `PLAN_INSTRUCTIONS` | — |
+| **G4/G5** loot/deal defs + per-slot type reasoning | ✅ definitions + type-justified `why` in `DAILY_PLAN_SYSTEM` | — |
 | **G6** deterministic fallback | ✅ `generate_day_plan` returns a real mixed plan (tagged `is_fallback`) on AI failure | live: forced failure → 6 real slots, both types |
 | **G7** growth refresh | ✅ 3 stale cold-start → 7 personalized optimization recs | live before/after |
 | **G8** prediction↔post link | ⚠️ **wired + self-heals** each `outcome_collector` tick (matches on destination channel). Fully closes only once the account has channel-admin rights on a tracked channel | 3 new tests |

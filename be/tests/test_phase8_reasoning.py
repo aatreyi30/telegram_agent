@@ -11,9 +11,9 @@ from src.services.metrics.trend_metrics import TrendFact
 NOW = datetime(2026, 7, 3, tzinfo=timezone.utc)
 
 
-def _f(days_ago, views=None, cluster=None, has_cta=False, has_media=False):
+def _f(days_ago, views=None, is_multi_deal=False, has_cta=False, has_media=False):
     return TrendFact(
-        posted_at=NOW - timedelta(days=days_ago), views=views, cluster=cluster,
+        posted_at=NOW - timedelta(days=days_ago), views=views, is_multi_deal=is_multi_deal,
         merchant_key=None, has_cta=has_cta, has_media=has_media,
     )
 
@@ -52,15 +52,16 @@ def test_volume_shift_detected_and_measured():
 
 def test_mix_shift_attributes_to_performance():
     e = ReasoningEngine(window_days=30)
-    # recent heavy on 'hot'; prior heavy on 'cold'
-    recent = [_f(5, cluster="hot") for _ in range(40)]
-    prior = [_f(40, cluster="cold") for _ in range(40)]
-    perf = {"hot": 200.0, "cold": 20.0}
+    # recent heavy on loot boards; prior heavy on single deals. The engine keys the
+    # mix by is_multi_deal -> "loot_deal"/"single_deal" (post_type), not free clusters.
+    recent = [_f(5, is_multi_deal=True) for _ in range(40)]
+    prior = [_f(40, is_multi_deal=False) for _ in range(40)]
+    perf = {"loot_deal": 200.0, "single_deal": 20.0}
     insights = []
     e._mix_shift(recent, prior, perf, perf_median=100.0, insights=insights)
-    kinds = {i["evidence"]["cluster"]: i for i in insights}
-    assert "hot" in kinds and kinds["hot"]["direction"] == "up"
+    kinds = {i["evidence"]["post_type"]: i for i in insights}
+    assert "loot_deal" in kinds and kinds["loot_deal"]["direction"] == "up"
     # plain-language reasoning that references the real numbers, no jargon
-    r = kinds["hot"]["reasoning"].lower()
+    r = kinds["loot_deal"]["reasoning"].lower()
     assert "views a day" in r and "200" in r
     assert "pp" not in r and "median" not in r

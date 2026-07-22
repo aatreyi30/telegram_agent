@@ -125,6 +125,18 @@ def _as_price(v) -> float | None:
         return None
 
 
+def _in_band(it: dict, floor: float | None, cap: float | None) -> bool:
+    """Price of `it` sits within [floor, cap] (either bound optional). A capped item
+    must have a real positive price. Client-side safety net for the source price filter
+    (the Camoufox fallback can't filter at source)."""
+    p = _item_price(it) or 0
+    if floor is not None and p < floor:
+        return False
+    if cap is not None and not (0 < p <= cap):
+        return False
+    return True
+
+
 def _pick_fresh(pool: list[dict], theme: str | None, merchant: str | None,
                 used: set[str]) -> tuple[dict | None, str | None]:
     """Freshest attractive item for the slot + which tier matched, broadening on miss:
@@ -293,15 +305,28 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
     # rotate the post STYLE per single deal and the banner FLAVOUR per loot board, so
     # consecutive posts don't come out looking like the same template.
     single_variant = loot_variant = 0
+    # per-run cache of source-filtered price-tier pools, keyed by (floor, cap), so two
+    # same-tier loots in one run don't re-hit the export API.
+    price_pools: dict[tuple, list[dict]] = {}
     for fire, slot, si, sub in due:
         if _is_loot_type(slot.get("type")):
             # LOOT: several distinct categories bundled under one AI-written banner, each
             # category on its own "<Label> - <link>" line. The AI writes the catch line and
             # labels with <LINK_n> tokens (deterministic template fallback on failure). An
-            # optional slot max_price makes it a price-tier loot ("Under ₹X").
+            # optional slot max_price/min_price makes it a price-tier loot ("Under ₹X"
+            # or a "₹X-₹Y" band) — fetched straight from the source so the tier is
+            # always full and fresh, instead of straining the generic recency pool.
             cap = _as_price(slot.get("max_price"))
-            loot_pool = ([it for it in pool if (_item_price(it) or 0) <= cap and _item_price(it)]
-                         if cap else pool)
+            floor = _as_price(slot.get("min_price"))
+            if cap or floor:
+                pk = (floor, cap)
+                if pk not in price_pools:
+                    price_pools[pk] = filter_relevant(client._collect_raw(
+                        want=200, page_size=80, min_price=floor, max_price=cap))
+                # client-side clamp too: the Camoufox fallback can't filter at source.
+                loot_pool = [it for it in price_pools[pk] if _in_band(it, floor, cap)]
+            else:
+                loot_pool = pool
             raws = _pick_fresh_multi(loot_pool, slot.get("merchant"), used, LOOT_ITEMS_PER_POST)
             if len(raws) < 2:
                 continue  # not enough qualifying category variety in the live pool right now
@@ -318,11 +343,11 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
                 text = writer.write_for_loot(loot_items, slot, templates, style,
                                              cta=formatter.cta_line,
                                              footer=formatter.footer_line, price_cap=cap,
-                                             variant=loot_variant)
+                                             price_floor=floor, variant=loot_variant)
                 source = "ai_copywriter"
             except (AIUnavailable, Exception):  # noqa: BLE001 — copy must never block a slot
                 text, _ = formatter.format_multi_category_loot(
-                    enriched, theme=slot.get("theme"), price_cap=cap)
+                    enriched, theme=slot.get("theme"), price_cap=cap, price_floor=floor)
                 source = "template_fallback"
             loot_variant += 1
             aff_meta = {"kind": "loot", "items": len(loot_items)}
@@ -422,6 +447,14 @@ def _selfcheck() -> None:
     assert tier == "any", tier                                        # theme broaden -> tier tagged
     it, tier = _pick_fresh(pool, "fashion", "ajio", {"a"})            # only fashion item is used
     assert it["original_url"] == "b" and tier == "any", (it, tier)   # -> broadens past used
+
+    # price-tier band clamp (safety net over the source filter).
+    assert _in_band({"discount_price": 400}, None, 500)        # under cap
+    assert not _in_band({"discount_price": 600}, None, 500)    # over cap
+    assert not _in_band({"discount_price": 0}, None, 500)      # cap needs a real price
+    assert _in_band({"discount_price": 700}, 500, 1000)        # inside band
+    assert not _in_band({"discount_price": 400}, 500, 1000)    # below floor
+    assert _in_band({"discount_price": 5}, None, None)         # no bounds -> always in
 
     # §8b: ~5 evenly-spaced image slots; short days give every slot an image.
     idx24 = _image_slot_indices(24)

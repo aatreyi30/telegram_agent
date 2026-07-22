@@ -18,7 +18,7 @@ def _pf(**kw) -> PostFeature:
     base = dict(
         posted_at=datetime(2026, 7, 1, 9, 0, tzinfo=UTC), text_len=100, has_media=False,
         views=None, num_links=1, has_coupon=False, is_multi_deal=False, emoji_count=0,
-        hashtag_count=0, has_cta=False, merchant_key=None, cluster=None,
+        hashtag_count=0, has_cta=False, merchant_key=None, link_merchants=[], cluster=None,
         known_link_count=0, total_link_count=1,
     )
     base.update(kw)

@@ -323,7 +323,8 @@ class PostFormatter:
         return self._finish(rendered, meta)
 
     def format_multi_category_loot(self, deals: list[EnrichedDeal], theme: str | None = None,
-                                   price_cap: float | None = None) -> tuple[str, dict]:
+                                   price_cap: float | None = None,
+                                   price_floor: float | None = None) -> tuple[str, dict]:
         """A loot post: several DIFFERENT categories bundled under one theme, one bare
         '<Category> - <link>' line each — no price, no per-item copy, no AI. Labels are
         kept tight so the link doesn't wrap on mobile. An optional ``price_cap`` adds an
@@ -348,7 +349,9 @@ class PostFormatter:
                                            category=category_order[0] if category_order else "",
                                            date=_today_str())
         header = [theme_text.strip()]
-        if price_cap:
+        if price_cap and price_floor:
+            header.append(f"₹{int(price_floor):,}–₹{int(price_cap):,}")
+        elif price_cap:
             header.append(self._render("loot_price_subtitle", cap=f"{int(price_cap):,}"))
         lines = [*header, "", *item_lines]
         closing = self._render("loot_closing", categories=", ".join(category_order))
@@ -363,6 +366,7 @@ class PostFormatter:
         rendered = "\n".join(lines).rstrip()
         meta = {"kind": "multi_category_loot", "categories": sorted(seen_categories),
                 "item_count": len(seen_categories), "price_cap": price_cap,
+                "price_floor": price_floor,
                 "affiliate_status": (f"{self.affiliate.name}_applied" if self.affiliate
                                      else "no_provider_clean_url"),
                 "affiliate_shortened_any": shortened_any, "links_real_fresh": True}

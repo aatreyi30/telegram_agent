@@ -102,9 +102,13 @@ class DealSourceClient:
             return False, "Deal source not configured. Set API_SECRET_KEY in .env."
         return True, None
 
-    def _fetch_retailer_httpx(self, retailer: str, want: int, page_size: int) -> list[dict]:
+    def _fetch_retailer_httpx(self, retailer: str, want: int, page_size: int,
+                              min_price: float | None = None,
+                              max_price: float | None = None) -> list[dict]:
         """One retailer's pool from the GrabCash export API (fast path). Auth is the
         `key` query param — NOT the header/bearer scheme the old /deals endpoint used.
+        Optional `min_price`/`max_price` push a price filter to the source (verified
+        params: server returns only deals within the band) — used for price-tier loots.
         Paginates using the response's `total` vs items collected so far. Raises on
         Cloudflare 403 / network error."""
         collected: list[dict] = []
@@ -113,6 +117,10 @@ class DealSourceClient:
             while len(collected) < want:
                 params = {"key": self.key, "retailer": retailer,
                           "page_size": page_size, "page": page}
+                if min_price is not None:
+                    params["min_price"] = int(min_price)
+                if max_price is not None:
+                    params["max_price"] = int(max_price)
                 resp = client.get(EXPORT_URL, params=params)
                 resp.raise_for_status()
                 payload = resp.json()
@@ -125,15 +133,18 @@ class DealSourceClient:
                 page += 1
         return collected[:want]
 
-    def _collect_raw(self, want: int, page_size: int) -> list[dict]:
+    def _collect_raw(self, want: int, page_size: int, min_price: float | None = None,
+                     max_price: float | None = None) -> list[dict]:
         """Raw deal dicts via the export API, queried once per allowed retailer and
         merged, falling back to the Camoufox stealth browser when Cloudflare blocks
-        the plain client (403) or the export calls fail outright."""
+        the plain client (403) or the export calls fail outright. `min_price`/`max_price`
+        (when given) filter at the source for price-tier loots."""
         per_retailer_want = max(-(-want // len(ALLOWED_MERCHANTS)), 1)  # ceil division
         try:
             collected: list[dict] = []
             for retailer in sorted(ALLOWED_MERCHANTS):
-                items = self._fetch_retailer_httpx(retailer, per_retailer_want, page_size)
+                items = self._fetch_retailer_httpx(retailer, per_retailer_want, page_size,
+                                                   min_price=min_price, max_price=max_price)
                 logger.info("[deal_source] fetched %d items for retailer=%s via export API",
                             len(items), retailer)
                 collected.extend(items)

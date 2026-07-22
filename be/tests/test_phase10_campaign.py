@@ -58,7 +58,7 @@ def test_cold_start_allocation_neutral_default_when_nothing_known():
 def test_risk_flags_merchant_overuse():
     e = CampaignPlanningEngine()
     recent = {"merchants": Counter({"amazon": 18, "flipkart": 2}),
-              "clusters": Counter({"low-price": 5, "high-price": 5}), "total": 20}
+              "post_types": Counter({"single_deal": 5, "loot_deal": 5}), "total": 20}
     risks = e._risks(recent, posts_per_day=17)
     kinds = {r["kind"] for r in risks}
     assert "merchant_overuse" in kinds     # amazon is 90% -> flagged

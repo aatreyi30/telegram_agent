@@ -40,11 +40,11 @@ def _isolated_db():
             merchant_mix={"amazon": 69, "myntra": 31}, merchant_coverage=0.9,
             confidence=0.6, computed_at=now))
 
-        # 10 owned normalized posts, 7 resolved to a merchant, 3 not
+        # 10 owned normalized posts, 7 resolved to a merchant (5 amazon + 2 flipkart), 3 not
         for i in range(10):
             s.add(NormalizedPost(
                 source_type=SourceType.OWNED, source_id=i + 1, normalized_at=now,
-                primary_merchant_key=("amazon" if i < 7 else None)))
+                primary_merchant_key=("amazon" if i < 5 else "flipkart" if i < 7 else None)))
     yield
 
 

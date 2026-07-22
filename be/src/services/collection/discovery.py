@@ -412,7 +412,7 @@ def verify_candidate(brand: str, candidates: list[dict]) -> tuple[str | None, fl
 
     # Ambiguous -> ask the LLM for a structured verdict (best-effort).
     from src.ai.client import AIClient, AIUnavailable
-    from src.ai.prompts import VERIFY_CANDIDATE_SYSTEM, verify_candidate_input
+    from src.ai.prompts import COMPETITOR_CHECK_SYSTEM, competitor_check_input
 
     ai = AIClient()
     ok, _ = ai.available()
@@ -423,8 +423,8 @@ def verify_candidate(brand: str, candidates: list[dict]) -> tuple[str | None, fl
                 for _, _, c in scored[:6]
             )
             raw = ai.complete(
-                verify_candidate_input(brand, lines),
-                system_extra=VERIFY_CANDIDATE_SYSTEM,
+                competitor_check_input(brand, lines),
+                system_extra=COMPETITOR_CHECK_SYSTEM,
                 max_tokens=120,
                 trace_call="verify_candidate",
             )

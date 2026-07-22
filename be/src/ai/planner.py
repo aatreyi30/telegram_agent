@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 
 from src.ai.client import AIClient, AIUnavailable
 from src.ai.context import planning_context, to_json
-from src.ai.prompts import PLAN_INSTRUCTIONS as _PLAN_INSTRUCTIONS
-from src.ai.prompts import WEEK_PLAN_INSTRUCTIONS as _WEEK_PLAN_INSTRUCTIONS
+from src.ai.prompts import DAILY_PLAN_SYSTEM as _DAILY_PLAN_SYSTEM
+from src.ai.prompts import WEEKLY_PLAN_SYSTEM as _WEEKLY_PLAN_SYSTEM
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -56,7 +56,7 @@ def _check_type_mix(slots: list[dict]) -> None:
     if len(types) < 2:
         logger.warning(
             "[ai.planner] day plan returned only type(s) %r across %d slots — no "
-            "loot/single mix despite the variety floor in PLAN_INSTRUCTIONS", types, total)
+            "loot/single mix despite the variety floor in DAILY_PLAN_SYSTEM", types, total)
 
 
 def _split_digest_and_plan(raw: str) -> tuple[str, str]:
@@ -333,7 +333,7 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         )
     try:
         user = f"DATA:\n{to_json(plan_ctx)}{recon_note}{directive_note}"
-        raw = ai.complete(user, system_extra=_PLAN_INSTRUCTIONS, max_tokens=3200,
+        raw = ai.complete(user, system_extra=_DAILY_PLAN_SYSTEM, max_tokens=3200,
                           trace_call="day_plan")
     except AIUnavailable as e:
         # G6 — never go silent: the channel still needs slots even when the AI is
@@ -427,7 +427,7 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
         )
     try:
         user = f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n{to_json(facts_ctx)}{directive_note}"
-        raw = ai.complete(user, system_extra=_WEEK_PLAN_INSTRUCTIONS, max_tokens=2000,
+        raw = ai.complete(user, system_extra=_WEEKLY_PLAN_SYSTEM, max_tokens=2000,
                           trace_call="week_plan")
     except AIUnavailable as e:
         return {"available": False, "reason": str(e), "plan": None, "digest": "",

@@ -62,6 +62,6 @@ def test_day_summary_present_and_absent():
         present = dd.summarize(s, date(2026, 6, 15))
         absent = dd.summarize(s, date(2020, 1, 1))
     assert present["available"] is True
-    assert present["posts"] >= 1 and present["top_posts"]
+    assert present["posts"] >= 1 and present["merchants"][0]["top_post"]
     assert "window" in present["baseline"]
     assert absent["available"] is False

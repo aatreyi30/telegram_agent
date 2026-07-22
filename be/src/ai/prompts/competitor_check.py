@@ -1,15 +1,15 @@
 """AI-arbitration prompt for ambiguous competitor-candidate verification,
 consumed by `src.services.collection.discovery.verify_candidate`.
 
-`VERIFY_CANDIDATE_SYSTEM` is the static system prompt (Role/Instruction/Output
+`COMPETITOR_CHECK_SYSTEM` is the static system prompt (Role/Instruction/Output
 Format/Context/Guardrails) and is passed as `system_extra` to `AIClient.complete`.
-`verify_candidate_input` only formats the per-call variable data (the brand name
+`competitor_check_input` only formats the per-call variable data (the brand name
 and rendered candidate list) into the user-message text — no instructions live
 there, per the split every prompt in this package follows."""
 
 from __future__ import annotations
 
-VERIFY_CANDIDATE_SYSTEM = (
+COMPETITOR_CHECK_SYSTEM = (
     # --- Role -------------------------------------------------------
     "ROLE: You are a channel-identity verifier for Telegram competitor discovery. "
     "Given a brand name and a short list of candidate Telegram channels, your only "
@@ -52,9 +52,9 @@ VERIFY_CANDIDATE_SYSTEM = (
 )
 
 
-def verify_candidate_input(brand: str, lines: str) -> str:
+def competitor_check_input(brand: str, lines: str) -> str:
     """Format the variable brand + candidate-list data as the user-message input.
 
     No instructions live here — this only renders the data described by
-    `VERIFY_CANDIDATE_SYSTEM`'s BRAND/CANDIDATES framing."""
+    `COMPETITOR_CHECK_SYSTEM`'s BRAND/CANDIDATES framing."""
     return f'BRAND: "{brand}"\n\nCANDIDATES:\n{lines}'

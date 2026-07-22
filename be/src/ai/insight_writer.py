@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from src.ai.client import AIClient, AIUnavailable
 from src.ai.context import to_json
-from src.ai.prompts import NARRATE_SYSTEM as _NARRATE_SYSTEM
+from src.ai.prompts import INSIGHT_LINE_SYSTEM as _INSIGHT_LINE_SYSTEM
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,7 +35,7 @@ def narrate(kind: str, observation: str, evidence: dict, fallback: str) -> str:
             return fallback
         user = (f"CONTEXT: {kind}\nOBSERVATION: {observation}\n\n"
                 f"EVIDENCE:\n{to_json(evidence)}")
-        text = ai.complete(user, system_extra=_NARRATE_SYSTEM, max_tokens=120, effort="low",
+        text = ai.complete(user, system_extra=_INSIGHT_LINE_SYSTEM, max_tokens=120, effort="low",
                            trace_call="narrate")
         text = text.strip().strip('"').strip()
         return text or fallback

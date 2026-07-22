@@ -15,8 +15,8 @@ from sqlalchemy import select
 
 from src.ai.client import AIClient
 from src.ai.context import channel_style, to_json
-from src.ai.prompts import COPYWRITER_INSTRUCTIONS as _INSTRUCTIONS
-from src.ai.prompts import LOOT_INSTRUCTIONS as _LOOT_INSTRUCTIONS
+from src.ai.prompts import SINGLE_DEAL_POST_SYSTEM as _SINGLE_DEAL_POST_SYSTEM
+from src.ai.prompts import LOOT_POST_SYSTEM as _LOOT_POST_SYSTEM
 from src.ai.post_styles import render_layout, pick_style, pick_loot_flavor
 from src.db.models_generation import EnrichedDeal
 from src.db.session import session_scope
@@ -168,7 +168,8 @@ class Copywriter:
 
     def write_for_loot(self, items: list[dict], slot: dict | None, templates: dict | None,
                        style: dict, cta: str | None = None, footer: str | None = None,
-                       price_cap: float | None = None, variant: int = 0) -> str:
+                       price_cap: float | None = None, price_floor: float | None = None,
+                       variant: int = 0) -> str:
         """Write a multi-category loot post. ``items`` is [{label, link}, ...] with links
         already finalized; the model writes <LINK_n> tokens we swap for them. `variant`
         rotates the banner FLAVOUR so loot boards vary in voice. Raises on unparseable
@@ -180,6 +181,8 @@ class Copywriter:
         parts = [f"ITEMS (use each <LINK_n> exactly once):\n{numbered}"]
         if price_cap:
             parts.append(f"PRICE_CAP: {int(price_cap)}")
+        if price_floor:
+            parts.append(f"PRICE_MIN: {int(price_floor)}")
         exemplar = _exemplar("collection", templates)
         if exemplar:
             parts.append(f"FORMAT_REFERENCE (imitate the shape/tone):\n{exemplar}")
@@ -188,7 +191,7 @@ class Copywriter:
             parts.append(f"PLAN_CONTEXT:\n{to_json(ctx)}")
         parts.append(f"CHANNEL_STYLE:\n{to_json(style)}")
         parts.append(pick_loot_flavor(variant))
-        raw = self.ai.complete("\n\n".join(parts), system_extra=_LOOT_INSTRUCTIONS,
+        raw = self.ai.complete("\n\n".join(parts), system_extra=_LOOT_POST_SYSTEM,
                                max_tokens=600, effort="low", trace_call="copywriter_loot")
         text = assemble_loot(raw, links, cta, footer)
         if text is None:
@@ -205,7 +208,7 @@ class Copywriter:
         user = _build_prompt(_product_from_deal(deal), slot,
                              _exemplar((slot or {}).get("type"), templates), style)
         user = f"{user}\n\n{st.tone}"
-        raw = self.ai.complete(user, system_extra=_INSTRUCTIONS, max_tokens=600, effort="low",
+        raw = self.ai.complete(user, system_extra=_SINGLE_DEAL_POST_SYSTEM, max_tokens=600, effort="low",
                                trace_call="copywriter_deal")
         text = assemble_post(raw, link, footer, layout=st.layout)
         if text is None:
@@ -219,7 +222,7 @@ class Copywriter:
                 return f"No enriched deal '{deal_id}'. Run `tgagent enrich-deals` first."
             link = deal.clean_url or deal.url
             user = _build_prompt(_product_from_deal(deal), None, "", channel_style(s))
-        raw = self.ai.complete(user, system_extra=_INSTRUCTIONS, max_tokens=600, effort="low")
+        raw = self.ai.complete(user, system_extra=_SINGLE_DEAL_POST_SYSTEM, max_tokens=600, effort="low")
         return assemble_post(raw, link) or raw
 
 
