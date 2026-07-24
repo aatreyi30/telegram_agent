@@ -41,9 +41,13 @@ logger = get_logger(__name__)
 MIN_SAMPLE_FOR_BENCHMARKS = 20
 FULL_CONFIDENCE_N = 30
 
+# NOTE: avg_views is deliberately NOT benchmarked. Competitors' public t.me/s preview
+# views scale with their subscriber base and aren't comparable to owned in-app views —
+# a delta of "+3000 views" just means they're a bigger channel, not that we're losing.
+# avg_views is still stored on the profile as a standalone stat.
 BENCHMARK_DIMS = [
     "posts_per_day", "avg_text_len", "emoji_rate", "hashtag_rate", "cta_rate",
-    "coupon_rate", "multi_deal_rate", "avg_links", "media_rate", "avg_views",
+    "coupon_rate", "multi_deal_rate", "avg_links", "media_rate",
 ]
 
 # content-style vector for cosine similarity (normalized to comparable scales)
@@ -195,7 +199,17 @@ class CompetitorIntelligenceEngine(BaseCollector):
                 ).delete(synchronize_session=False)
                 if n >= MIN_SAMPLE_FOR_BENCHMARKS:
                     for dim in BENCHMARK_DIMS:
-                        ov, cv = owned.get(dim), summ.get(dim)
+                        if dim == "posts_per_day":
+                            # Compare owned cadence over the SAME window the competitor's
+                            # scrape covers, not our full-span average — otherwise a
+                            # competitor's short t.me/s snapshot shows 150 posts/day
+                            # against our 37. (Wires in the previously-dead helper.)
+                            ov = self._owned_cadence_in_window(
+                                owned_dates, _aware(summ.get("first_posted_at")),
+                                _aware(summ.get("last_posted_at")))
+                        else:
+                            ov = owned.get(dim)
+                        cv = summ.get(dim)
                         delta = (cv - ov) if (ov is not None and cv is not None) else None
                         s.add(CompetitorBenchmark(
                             intel_version=COMPETITOR_INTEL_VERSION, competitor_id=cid,

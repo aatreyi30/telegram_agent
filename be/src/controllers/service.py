@@ -715,13 +715,33 @@ def _today_details(s, recommended_posts: int):
     # fallback is already sized to recommended_posts, so raw_sum ≈ recommended_posts
     # and the rescale below is effectively a no-op for it.
     raw = bp.get("posting_plan") or eng._recent_posting_windows(s, now, recommended_posts)
-    raw_sum = sum((p.get("recommended_posts_per_day") or 0) for p in raw) or 1
-    windows = [{"part": p.get("part"), "hours": p.get("hours"),
-                "posts": round((p.get("recommended_posts_per_day") or 0) * recommended_posts / raw_sum),
-                # historical day-part performance, when known — lets the AI cite a real
-                # number for WHY this window instead of generic "peak hours" filler.
-                "avg_views_per_day": p.get("avg_views_per_day")}
-               for p in raw]
+    shares = [(p.get("recommended_posts_per_day") or 0) for p in raw]
+    raw_sum = sum(shares)
+    n_win = len(raw)
+    if n_win == 0:
+        windows = []
+    else:
+        # Floor each window then hand the remainder to the largest-share windows so the
+        # per-window posts sum to recommended_posts EXACTLY. Old code round()'d each
+        # window independently (they didn't sum to the headline) and used `raw_sum ... or 1`
+        # so an all-zero posting_plan made EVERY window show 0 while the headline said N.
+        if raw_sum > 0:
+            counts = [int(sh * recommended_posts / raw_sum) for sh in shares]
+        else:
+            counts = [recommended_posts // n_win] * n_win   # no signal -> spread evenly
+        remainder = recommended_posts - sum(counts)
+        order = sorted(range(n_win), key=lambda i: (-shares[i], i))
+        j = 0
+        while remainder > 0:
+            counts[order[j % n_win]] += 1
+            remainder -= 1
+            j += 1
+        windows = [{"part": p.get("part"), "hours": p.get("hours"),
+                    "posts": counts[i],
+                    # historical day-part performance, when known — lets the AI cite a real
+                    # number for WHY this window instead of generic "peak hours" filler.
+                    "avg_views_per_day": p.get("avg_views_per_day")}
+                   for i, p in enumerate(raw)]
     perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
             for p in ctx.post_type_performance(s)}
     allocation = eng._allocate_posts(bp, recommended_posts, recent, perf)
@@ -1047,6 +1067,25 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
     return ai_summary, ai_ok, themes, wk
 
 
+def ensure_weekly_ai_plan(s, week_start, week_end, directive: str | None = None):
+    """Generate + persist this week's weekly plan through the SAME merge path the
+    dashboard uses (`_weekly_ai_generate`), so the scheduled weekly job and the brief
+    can never persist differently-shaped blueprints. Ensures the AI's loot_deal_ratio/
+    merchant_priorities/daily_themes survive into the stored row (data_flow.md G1) —
+    the scheduled job used to persist the raw AI plan directly, bypassing the merge."""
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+
+    wk = s.scalars(
+        select(CampaignPlan)
+        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+               CampaignPlan.plan_type == PlanType.WEEKLY,
+               CampaignPlan.target_date == week_start)
+        .order_by(CampaignPlan.generated_at.desc())
+    ).first()
+    _summary, _ok, _themes, wk = _weekly_ai_generate(s, week_start, week_end, wk, directive=directive)
+    return wk
+
+
 def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
     """The weekly view: last 7 days of actual posting + this week's themes + an AI
     weekly narrative (best-effort).
@@ -1095,9 +1134,15 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
                  **(deltas.get(d["date"]) or {"joined": 0, "left": 0, "net": 0})}
                 for d in traj["days"]]
         posts_total = sum(d["posts"] for d in traj["days"])
-        views_total = round(sum(d["posts"] * d["views_avg"] for d in traj["days"]))
+        # true sum of daily view totals (not posts x rounded-avg, which drifts)
+        views_total = round(sum(d.get("views", d["posts"] * d["views_avg"]) for d in traj["days"]))
+        # Average over days you ACTUALLY posted, not a hardcoded 7 — a mid-week or
+        # partial week (zero-post days included) otherwise deflates the figure and
+        # renders a fractional "posts/day" that contradicts the active-day cadence
+        # shown right beside it. Matches recent_cadence's active-day definition.
+        active_days = sum(1 for d in traj["days"] if d["posts"] > 0)
         totals = {"posts": posts_total, "views_total": views_total,
-                  "avg_posts_per_day": round(posts_total / 7, 1)}
+                  "avg_posts_per_day": round(posts_total / active_days, 1) if active_days else 0.0}
 
         wk = s.scalar(select(CampaignPlan)
                       .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,

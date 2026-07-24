@@ -25,38 +25,6 @@ def _owned_channel(s: Session) -> Channel | None:
     ).first() or s.scalars(select(Channel)).first()
 
 
-def _category_by_post(s: Session, post_ids: list[int]) -> dict[int, str]:
-    """Real product category per post, via Post -> PostPrediction -> GeneratedPost ->
-    deal_ids -> EnrichedDeal.category — the only place category actually exists.
-    NormalizedPost (built from post text) never captured it, so a post with no
-    resolvable deal link has no known category, full stop — this must never fall
-    back to merchant_key (that was the bug: category_mix was silently merchant_mix
-    under a different name)."""
-    if not post_ids:
-        return {}
-    from src.db.models_prediction import PostPrediction
-    from src.db.models_generation import EnrichedDeal, GeneratedPost
-
-    rows = s.execute(
-        select(PostPrediction.post_id, GeneratedPost.deal_ids)
-        .join(GeneratedPost, GeneratedPost.id == PostPrediction.generated_post_id)
-        .where(PostPrediction.post_id.in_(post_ids), PostPrediction.generated_post_id.isnot(None))
-    ).all()
-    all_deal_ids = sorted({d for _, deal_ids in rows for d in (deal_ids or [])})
-    if not all_deal_ids:
-        return {}
-    cat_by_deal = dict(s.execute(
-        select(EnrichedDeal.deal_id, EnrichedDeal.category)
-        .where(EnrichedDeal.deal_id.in_(all_deal_ids))
-    ).all())
-    result: dict[int, str] = {}
-    for post_id, deal_ids in rows:
-        cats = [cat_by_deal[d] for d in (deal_ids or []) if d in cat_by_deal]
-        if cats:
-            result[post_id] = Counter(cats).most_common(1)[0][0]
-    return result
-
-
 def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> DailyChannelReport:
     from src.services.analytics.day import _rows_between, _post_type
 
@@ -79,8 +47,6 @@ def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> 
     type_mix = Counter(_post_type(r[8]) for r in rows)
     merchant_mix = Counter(r[6] for r in rows if r[6])
     deal_count = sum(1 for r in rows if r[7] or r[8])  # has_coupon or is_multi_deal
-    category_by_post = _category_by_post(s, [r[0] for r in rows])
-    category_mix = Counter(category_by_post.values())
 
     rep = DailyChannelReport(
         channel_id=channel_id, source_type=ReportSourceType.OWNED,
@@ -88,7 +54,7 @@ def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> 
         posts_count=len(rows),
         deals_posted=deal_count,
         type_mix=dict(type_mix.most_common()),
-        category_mix=dict(category_mix.most_common()),
+        category_mix={m: c for m, c in merchant_mix.most_common()},
         merchants_featured=len(merchant_mix),
         views_total=views_total,
         views_avg=round(fmean(views), 2) if views else 0.0,
@@ -98,23 +64,25 @@ def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> 
         top_post_id=top[0] if top else None,
         bottom_post_id=bottom[0] if bottom else None,
         reactions_total=reactions, forwards_total=forwards,
-        engagement_rate=round((reactions + forwards) / views_total, 4) if views_total else 0.0,
+        # PERCENT, to match views.py / day.py and every UI render (which appends "%").
+        # Previously stored as a raw fraction (0.0057), so yesterday's card rendered
+        # "0.0057%" whenever it read a stored report instead of the live day view.
+        engagement_rate=round((reactions + forwards) / views_total * 100, 2) if views_total else 0.0,
         posting_hours=dict(hours),
         computed_at=datetime.now(timezone.utc),
         data_completeness=1.0,
     )
-    # best/worst category (by views) — only among posts with a resolved category;
-    # None/None (not a guess) when no post that day links back to a real deal category
+    # best/worst MERCHANT by AGGREGATE views (summed across all that merchant's posts),
+    # not the single top/bottom post — the old per-post version made best==worst on any
+    # single-merchant day. (Field is named *_category for schema stability; the value is
+    # a merchant key and the UI labels it "merchant".)
     if rows:
-        cat_posts = [
-            {"key": category_by_post[r[0]], "total_views": r[2] or 0}
-            for r in rows if r[0] in category_by_post
-        ]
-        if cat_posts:
-            best = max(cat_posts, key=lambda m: m["total_views"])
-            worst = min(cat_posts, key=lambda m: m["total_views"])
-            rep.best_category = best["key"]
-            rep.worst_category = worst["key"]
+        views_by_merchant: dict[str, int] = Counter()
+        for r in rows:
+            views_by_merchant[r[6] or "__unknown__"] += (r[2] or 0)
+        if views_by_merchant:
+            rep.best_category = max(views_by_merchant, key=views_by_merchant.get)
+            rep.worst_category = min(views_by_merchant, key=views_by_merchant.get)
     _fill_subs(s, rep, channel_id, day)
     return rep
 

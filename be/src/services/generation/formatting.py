@@ -337,11 +337,16 @@ class PostFormatter:
             label = _loot_label(d.category, self._render("fallback_category_label"))
             if label in seen_categories:
                 continue  # one line per distinct category
+            link, aff_meta = self._finalize_link(d)
+            if not link:
+                # A loot line with no working link is a dead "Category -" line nobody can
+                # click — drop it (don't mark the category seen, so a later deal in the
+                # same category with a good link can still fill it).
+                continue
             seen_categories.add(label)
             category_order.append(label)
-            link, aff_meta = self._finalize_link(d)
             shortened_any = shortened_any or aff_meta.get("affiliate_shortened", False)
-            item_lines.append(self._render("loot_item", title=label, link=link or "").rstrip())
+            item_lines.append(self._render("loot_item", title=label, link=link).rstrip())
 
         # Theme: explicit slot theme wins, else the first-category template (emoji baked in).
         # A price cap adds an "Under ₹X" subtitle directly under the theme line.

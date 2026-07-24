@@ -22,6 +22,11 @@ def _parse_date(s: str | None) -> date | None:
         return None
 
 
+# Absolute daily post ceiling used ONLY on cold start (no posting history to derive a
+# data-driven clamp). ~1 post/hour is a safe upper bound for a brand-new channel.
+_COLD_START_MAX_POSTS = 24
+
+
 def _rescale_slot_counts(plan: dict, target_total: int) -> None:
     """G10 — proportionally rescale ``post_slots``' ``count`` fields (in place) so
     they sum to ``target_total`` instead of whatever the model proposed. jit_fill
@@ -54,21 +59,30 @@ def persist_ai_plan(
     if not result.get("available") or not result.get("plan"):
         return None
     plan = result["plan"]
-    if recent_median is not None and plan.get("recommended_posts") is not None:
-        from src.ai.context import clamp_recommended_posts
-        clamped, was_clamped = clamp_recommended_posts(
-            plan["recommended_posts"], recent_median, recent_max_30d)
-        # Record the outcome IN the blueprint so daily_brief (and cache-hit reads)
-        # can surface "we clipped the AI's number" without re-deriving it from the
-        # already-clamped value — re-clamping a clamped number always looks in-range.
-        plan["plan_clamped"] = was_clamped
-        if was_clamped:
-            plan["recommended_posts"] = clamped
-        # Reconcile slot counts to the final recommended_posts ALWAYS (not only on a
-        # clamp): the model routinely lets post_slots' counts drift from its own stated
-        # recommended_posts, and jit_fill executes the slot counts — so without this the
-        # day would post the drifted total (e.g. 71) instead of the planned cadence (34).
-        _rescale_slot_counts(plan, plan["recommended_posts"])
+    rec = plan.get("recommended_posts")
+    if rec is not None:
+        if recent_median is not None:
+            from src.ai.context import clamp_recommended_posts
+            clamped, was_clamped = clamp_recommended_posts(rec, recent_median, recent_max_30d)
+            # Record the outcome IN the blueprint so daily_brief (and cache-hit reads)
+            # can surface "we clipped the AI's number" without re-deriving it from the
+            # already-clamped value — re-clamping a clamped number always looks in-range.
+            plan["plan_clamped"] = was_clamped
+            if was_clamped:
+                plan["recommended_posts"] = rec = clamped
+        elif rec > _COLD_START_MAX_POSTS:
+            # Cold start (no history -> no data-driven clamp bounds). The clamp used to be
+            # skipped entirely here, so the model's raw count (e.g. 71) persisted AND
+            # executed. Apply an absolute safety ceiling instead of trusting it blindly.
+            # ponytail: fixed cold-start cap; superseded by the data-driven clamp the
+            # moment any posting history exists.
+            plan["recommended_posts"] = rec = _COLD_START_MAX_POSTS
+            plan["plan_clamped"] = True
+        # Reconcile slot counts to the final recommended_posts ALWAYS (every path, incl.
+        # cold start): the model routinely lets post_slots' counts drift from its own
+        # stated recommended_posts, and jit_fill executes the slot counts — so without
+        # this the day would post the drifted total (e.g. 71) instead of the cadence.
+        _rescale_slot_counts(plan, rec)
     fc = result.get("factcheck", {"status": "skipped"})
     target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
@@ -144,9 +158,13 @@ def persist_weekly_plan(
             s.flush()
         return row
     except IntegrityError:
+        # A row for this (week, is_ai_generated) already exists. UPDATE it in place with
+        # the fresh blueprint/digest instead of returning the STALE one — otherwise a
+        # re-run (or a concurrent request) silently dropped the AI's loot_ratio/
+        # merchant_priorities/daily_themes and the daily planner read Nones (data_flow G1).
         logger.info(
-            "[ai_execution] concurrent weekly plan insert lost the race for "
-            "week_start=%s — reusing the row the other request just persisted", week_start,
+            "[ai_execution] weekly plan row exists for week_start=%s — updating in place "
+            "with the fresh blueprint", week_start,
         )
         existing = s.scalars(
             select(CampaignPlan)
@@ -156,4 +174,12 @@ def persist_weekly_plan(
                    CampaignPlan.is_ai_generated == is_ai_generated)
             .order_by(CampaignPlan.generated_at.desc())
         ).first()
+        if existing is not None:
+            existing.blueprint = blueprint
+            existing.end_date = week_end
+            existing.confidence = 0.6
+            existing.generated_at = datetime.now(timezone.utc)
+            if digest:
+                existing.ai_digest = digest
+            s.flush()
         return existing

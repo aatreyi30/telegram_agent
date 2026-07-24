@@ -56,6 +56,7 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 MIN_ADJUSTMENT_SAMPLES = 5     # a bucket/merchant/type needs >=5 posts to be trusted
+MIN_BEST_GROUP_SAMPLES = 2     # "best hour/type" needs >=2 posts, so a single lucky post can't win
 ADJUST_HIGH_PCT = 0.75
 ADJUST_LOW_PCT = 0.25
 TOP_N_MISSES = 3
@@ -139,6 +140,9 @@ def _week_posts(s: Session, channel_id: int | None, week_start: date, week_end: 
 
 
 def _prediction_summary(rows: list[dict]) -> dict:
+    # NOTE: err_views_24h is relative to the PREDICTION ((actual-pred)/pred), so this
+    # "mape" is mean absolute forecast error as a fraction of the forecast — an
+    # intentional, tested metric (not textbook actual-denominator MAPE). Kept as-is.
     errs = [r["err_views_24h"] for r in rows if r["err_views_24h"] is not None]
     if not errs:
         return {"mape_views_24h": None, "n_posts": 0, "bias": None}
@@ -193,8 +197,14 @@ def _engagement_summary(rows: list[dict]) -> dict:
         if r["type_label"]:
             by_type[r["type_label"]].append(r["engagement_score"])
 
-    best_hour_bucket = max(by_bucket, key=lambda k: mean(by_bucket[k])) if by_bucket else None
-    best_type_by_engagement = max(by_type, key=lambda k: mean(by_type[k])) if by_type else None
+    # Only crown a "best" group with enough posts to trust — otherwise a single
+    # lucky post becomes the recommended hour/type. Mirrors _adjustments' gate.
+    def _best(groups: dict[str, list[float]]) -> str | None:
+        eligible = {k: v for k, v in groups.items() if len(v) >= MIN_BEST_GROUP_SAMPLES}
+        return max(eligible, key=lambda k: mean(eligible[k])) if eligible else None
+
+    best_hour_bucket = _best(by_bucket)
+    best_type_by_engagement = _best(by_type)
 
     return {
         "median_forward_rate": median_forward_rate,
@@ -234,8 +244,14 @@ def _churn_vs_frequency(s: Session, channel_id: int | None, week_end: date) -> d
             counts[to_ist(posted_at).date()] += 1
 
     ranked = sorted(stats, key=lambda r: (r.subs_left or 0), reverse=True)
-    worst = ranked[:CHURN_SAMPLE_DAYS]
-    best = ranked[-CHURN_SAMPLE_DAYS:]
+    # Cap each slice to at most half the days so the worst-churn and best-churn sets
+    # never overlap — on short history (e.g. 10 days) ranked[:7] and ranked[-7:] shared
+    # 4 days, making "high-leave vs low-leave posting rate" a comparison against itself.
+    k = min(CHURN_SAMPLE_DAYS, len(ranked) // 2)
+    if k == 0:
+        return empty
+    worst = ranked[:k]
+    best = ranked[-k:]
 
     def _avg_posts(days) -> float | None:
         if not days:

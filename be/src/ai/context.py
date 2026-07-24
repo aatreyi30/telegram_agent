@@ -264,18 +264,40 @@ def competitor_profiles(s: Session) -> list[dict]:
 
 def available_deals(s: Session, limit: int = 15) -> list[dict]:
     """Active/valid deals from the live feed (EnrichedDeal) — the pool the planner
-    themes slots around. Ordered by discount desc. No scoring."""
+    themes slots around.
+
+    Diversified by merchant instead of a raw discount-desc top-N: we pull a wide
+    candidate set (still discount-ordered) then round-robin across merchants, so one
+    merchant's deep discounts can't crowd every other merchant/category out of the
+    menu the planner sees. That top-15-by-discount pool was a root cause of the
+    'always one merchant/category' symptom. Degrades correctly to a single merchant
+    when the feed genuinely only carries one that day."""
+    from collections import OrderedDict
+
     from src.db.models_generation import DealValidity, EnrichedDeal
-    rows = s.scalars(
+    candidates = s.scalars(
         select(EnrichedDeal)
         .where(EnrichedDeal.deal_validity != DealValidity.INVALID)
         .order_by(EnrichedDeal.discount_percent.is_(None),
                   EnrichedDeal.discount_percent.desc())
-        .limit(limit)
+        .limit(300)
     ).all()
+
+    by_merchant: "OrderedDict[str, list]" = OrderedDict()   # discount-ordered per merchant
+    for d in candidates:
+        by_merchant.setdefault(d.merchant_key or "?", []).append(d)
+
+    picked = []
+    while len(picked) < limit and any(by_merchant.values()):
+        for lst in by_merchant.values():
+            if lst:
+                picked.append(lst.pop(0))
+                if len(picked) >= limit:
+                    break
+
     return [{"deal_id": d.deal_id, "title": d.title, "merchant_key": d.merchant_key,
              "category": d.category, "current_price": d.current_price,
-             "discount_percent": d.discount_percent, "url": d.clean_url or d.url} for d in rows]
+             "discount_percent": d.discount_percent, "url": d.clean_url or d.url} for d in picked]
 
 
 def full_briefing_context(s: Session, weekly: bool = False) -> dict:
@@ -450,6 +472,9 @@ def posting_trajectory(s: Session, days: int = 14, end_day=None) -> dict:
         d = first_day + timedelta(days=i)
         n = counts.get(d, 0)
         series.append({"date": d.isoformat(), "posts": n,
+                       # raw per-day total so callers can sum TRUE views instead of
+                       # reconstructing from posts x rounded-avg (which drifts).
+                       "views": round(view_sums[d]),
                        "views_avg": round(view_sums[d] / n, 1) if n else 0.0})
 
     active = [r["posts"] for r in series if r["posts"] > 0]

@@ -46,17 +46,22 @@ def parse_plan(raw: str) -> dict:
 
 
 def _check_type_mix(slots: list[dict]) -> None:
-    """G3 post-parse nudge — the prompt's variety floor is the primary enforcement;
-    this just logs when the model still collapsed a day with enough slots to show a
-    mix into one single type, so a regression is visible without failing the plan."""
+    """G3 HARD variety floor. The prompt asks for a loot/single mix; if the model still
+    collapses a day with enough slots (>=4) into a single type, we reject the plan
+    (raise) so parse_plan's caller falls back to the deterministic plan — which enforces
+    the 30% mix floor. Previously this only logged, so 100%-single days shipped anyway
+    (the 'only one type/category' the operator flagged)."""
     total = sum(max(int(sl.get("count") or 1), 1) for sl in slots)
     if total < 4:
         return
     types = {(sl.get("type") or "single") for sl in slots}
     if len(types) < 2:
         logger.warning(
-            "[ai.planner] day plan returned only type(s) %r across %d slots — no "
-            "loot/single mix despite the variety floor in DAILY_PLAN_SYSTEM", types, total)
+            "[ai.planner] day plan collapsed to type(s) %r across %d slots — rejecting so "
+            "the floor-enforcing deterministic fallback runs instead", types, total)
+        raise ValueError(
+            f"day plan collapsed to a single type {types} across {total} slots — "
+            "violates the loot/single variety floor")
 
 
 def _split_digest_and_plan(raw: str) -> tuple[str, str]:

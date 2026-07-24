@@ -17,9 +17,12 @@ function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString();
 }
+// Single source of truth for rate rendering. The backend already rounds rates to
+// 1 dp; DON'T round again here (that produced "12.5%" in one card and "13%" in
+// another for the same field). Use this everywhere a rate is shown.
 function fmtPct(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
-  return `${Math.round(n)}%`;
+  return `${n}%`;
 }
 // "18:00" -> "6 PM", "09:00" -> "9 AM", "00:00" -> "12 AM"
 function to12h(hhmm: string): string {
@@ -125,9 +128,9 @@ export default function AnalyticsPage() {
                 <StatCard label="Views" value={fmtNum(a.total_views)} />
                 <StatCard label="Total reactions" value={fmtNum(a.total_reactions)} />
                 <StatCard label="Total forwards" value={fmtNum(a.total_forwards)} />
-                <StatCard label="Eng. rate" value={a.engagement_rate != null ? `${a.engagement_rate}%` : "—"} />
-                <StatCard label="CTA rate" value={a.cta_rate != null ? `${a.cta_rate}%` : "—"} />
-                <StatCard label="Deal rate" value={a.deal_rate != null ? `${a.deal_rate}%` : "—"} />
+                <StatCard label="Eng. rate" value={fmtPct(a.engagement_rate)} />
+                <StatCard label="CTA usage" value={fmtPct(a.cta_rate)} />
+                <StatCard label="Deal rate" value={fmtPct(a.deal_rate)} />
               </div>
 
               <ChartCard title="Views & engagement over time"
@@ -240,16 +243,16 @@ export default function AnalyticsPage() {
                   </CardHeader>
                   <CardContent className="flex-1 flex flex-col gap-3">
                     <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
-                      <span className="text-sm text-muted-foreground">CTA rate</span>
-                      <span className="text-sm font-semibold">{fmtPct(a.cta_rate ?? 0)}</span>
+                      <span className="text-sm text-muted-foreground">CTA usage <span className="text-[10px] uppercase tracking-wide opacity-60">(% of posts)</span></span>
+                      <span className="text-sm font-semibold">{fmtPct(a.cta_rate)}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
                       <span className="text-sm text-muted-foreground">Deal rate</span>
-                      <span className="text-sm font-semibold">{fmtPct(a.deal_rate ?? 0)}</span>
+                      <span className="text-sm font-semibold">{fmtPct(a.deal_rate)}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
                       <span className="text-sm text-muted-foreground">Engagement rate</span>
-                      <span className="text-sm font-semibold">{a.engagement_rate != null ? `${a.engagement_rate}%` : "—"}</span>
+                      <span className="text-sm font-semibold">{fmtPct(a.engagement_rate)}</span>
                     </div>
                     <div className="border-t pt-3 mt-auto">
                       <p className="mb-1.5 text-xs text-muted-foreground">Avg per post</p>

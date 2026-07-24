@@ -76,6 +76,27 @@ def _monthly(day: int, hm: tuple[int, int]):
     return f"{day}{suffix} {h:02d}:{m:02d} IST", CronTrigger(day=day, hour=h, minute=m)
 
 
+def _cron_overdue_threshold(trigger) -> "timedelta | None":
+    """How stale a cron job's last run may be before we treat it as missed and catch it
+    up on boot. None for interval jobs (they fire on their own). The memory jobstore
+    recomputes next_run_time as a FUTURE time on every restart, so a daily/weekly job
+    whose window passed while the process was down is otherwise skipped forever — the
+    'frozen since July 15' bug. Thresholds allow one full period + slack."""
+    if not isinstance(trigger, CronTrigger):
+        return None
+    fields = {f.name: f for f in trigger.fields}
+
+    def _set(name: str) -> bool:
+        f = fields.get(name)
+        return f is not None and not f.is_default
+
+    if _set("day_of_week"):
+        return timedelta(days=8)     # weekly
+    if _set("day"):
+        return timedelta(days=32)    # monthly
+    return timedelta(hours=26)       # daily
+
+
 # --------------------------------------------------------------------------- #
 # Job implementations — each returns {processed, success, failure, detail, status?}
 # or raises (→ retry). "limited" jobs set status="limited".
@@ -182,16 +203,17 @@ def j_weekly_report() -> dict:
     # the most-recent WEEKLY row so the daily planner's this_week_theme lookup picks it.
     ai_note = "AI weekly plan skipped"
     try:
-        from src.ai.planner import generate_week_plan
-        from src.services.generation.ai_execution import persist_weekly_plan
+        from src.controllers.service import ensure_weekly_ai_plan
         from src.services.analytics.periods import ist_today
         with session_scope() as s:
             ws = ist_today() - timedelta(days=ist_today().weekday())
-            res = generate_week_plan(s, ws)
-            if res.get("available"):
-                persist_weekly_plan(s, ws, ws + timedelta(days=6), res["plan"],
-                                    digest=res.get("digest", ""), is_ai_generated=True)
-                ai_note = f"AI weekly plan: {len(res['plan'].get('daily_themes') or [])} day themes"
+            # Route through the shared merge path so the AI's loot_deal_ratio /
+            # merchant_priorities / daily_themes actually land in the persisted blueprint
+            # (they were dropped when this job persisted the raw AI plan directly).
+            wk = ensure_weekly_ai_plan(s, ws, ws + timedelta(days=6))
+            themes = (wk.blueprint or {}).get("daily_themes") if wk else None
+            ai_note = (f"AI weekly plan: {len(themes or [])} day themes"
+                       if wk else "AI weekly plan skipped")
     except Exception as e:
         ai_note = f"AI weekly plan skipped ({e})"
 
@@ -231,6 +253,15 @@ def j_learning() -> dict:
     from src.services.learning.channel_learning import ChannelLearningEngine
     n = _run_engine(ChannelLearningEngine(), "learn")
     return {"processed": n, "detail": "learning dataset (emoji/CTA/merchant/category) rebuilt"}
+
+
+def j_reasoning() -> dict:
+    """Persist ReasonedInsight rows (the 'what changed and why' the plan prompts consume).
+    Was only reachable via the manual pipeline button, so reasoned_insights never
+    populated on a cadence — the daily/weekly prompts' reasoning section stayed empty."""
+    from src.services.intelligence.reasoning import ReasoningEngine
+    n = _run_engine(ReasoningEngine(), "reason")
+    return {"processed": n, "detail": "reasoned insights rebuilt", "status": "limited" if not n else "success"}
 
 
 def j_queue_processor() -> dict:
@@ -300,13 +331,20 @@ def j_notification_engine() -> dict:
     from src.db.models_scheduler import RunStatus, SchedulerRun
     from src.db.session import session_scope
     with session_scope() as s:
-        blocked = s.scalar(select(func.count()).select_from(ScheduledPost)
-                           .where(ScheduledPost.status == ScheduleStatus.BLOCKED)) or 0
+        blocked_errors = s.scalars(select(ScheduledPost.last_error)
+                                   .where(ScheduledPost.status == ScheduleStatus.BLOCKED)).all()
         failed = s.scalar(select(func.count()).select_from(SchedulerRun)
                           .where(SchedulerRun.status == RunStatus.FAILED)) or 0
+    blocked = len(blocked_errors)
     alerts = []
     if blocked:
-        alerts.append(f"{blocked} posts blocked (need admin rights)")
+        # Report the ACTUAL block reason (last_error prefix), not a blanket
+        # "need admin rights" — most live blocks were revalidation timeouts, and the
+        # old wording sent operators to check permissions that were never the problem.
+        from collections import Counter
+        reasons = Counter((e or "unknown").split(":")[0].strip() for e in blocked_errors)
+        reason_str = ", ".join(f"{n}×{r}" for r, n in reasons.most_common(3))
+        alerts.append(f"{blocked} posts blocked ({reason_str})")
     if failed:
         alerts.append(f"{failed} scheduler failures")
     return {"processed": len(alerts), "status": "limited" if not alerts else "success",
@@ -418,6 +456,7 @@ JOBS: list[Job] = [
     Job("weekly_retro", "Weekly Retro", *_weekly("mon", C.WEEKLY_RETRO_TIME), "medium", j_weekly_retro),
     Job("weekly_report", "Weekly Report", *_weekly(C.WEEKLY_REPORT_DOW, C.WEEKLY_REPORT_TIME), "medium", j_weekly_report),
     Job("monthly_report", "Monthly Report", *_monthly(C.MONTHLY_REPORT_DAY, C.MONTHLY_REPORT_TIME), "medium", j_monthly_report),
+    Job("reasoning", "AI Reasoning (Insights)", *_daily(C.REASONING_TIME), "medium", j_reasoning),
     Job("learning", "AI Learning Dataset Builder", *_daily(C.LEARNING_TIME), "medium", j_learning),
     Job("queue_processor", "Scheduler Queue Processor", *_every_min(C.QUEUE_PROCESSOR_MIN), "critical", j_queue_processor),
     Job("url_health", "URL Health Check", *_every_hr(C.URL_HEALTH_HOURS), "low", j_url_health),
@@ -461,8 +500,12 @@ def _acquire_singleton_lock():
 
 class SchedulerRegistry:
     def __init__(self) -> None:
-        self._sched = BackgroundScheduler(timezone=IST_TZ,
-                                          job_defaults={"coalesce": True, "max_instances": 1})
+        self._sched = BackgroundScheduler(
+            timezone=IST_TZ,
+            # misfire_grace_time: tolerate a late run (e.g. after a brief restart) instead
+            # of silently dropping the tick. Cross-restart daily/weekly misses are handled
+            # by _catch_up_missed() since the memory jobstore can't track them.
+            job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 3600})
         self._by_key = {j.key: j for j in JOBS}
         self._attempts: dict[str, int] = {}
         self.enabled = False
@@ -503,8 +546,44 @@ class SchedulerRegistry:
             self._sched.add_job(self._make(j.key), trigger=j.trigger, id=j.key,
                                 replace_existing=True)
         self.enabled = True
+        self._catch_up_missed()
         logger.info("[schedulers] started %d jobs", len(JOBS))
         return self.status()
+
+    def _catch_up_missed(self) -> None:
+        """Run any daily/weekly/monthly cron job that's overdue per SchedulerRun history.
+
+        Fixes the 'frozen since July 15' bug: interval jobs fire whenever the box is up,
+        but cron jobs only fire if the process is alive at their exact IST minute, and the
+        memory jobstore recomputes next_run_time as a future time on every boot — so a
+        missed daily/weekly window is never caught up. Here we compare each cron job's last
+        run against a per-cadence staleness threshold and schedule one staggered catch-up."""
+        from sqlalchemy import func, select
+        from src.db.models_scheduler import SchedulerRun
+        from src.db.session import session_scope
+
+        now = _now()
+        stagger = 0
+        try:
+            with session_scope() as s:
+                for j in JOBS:
+                    thresh = _cron_overdue_threshold(j.trigger)
+                    if thresh is None:
+                        continue  # interval job — fires on its own
+                    last = s.scalar(select(func.max(SchedulerRun.started_at))
+                                    .where(SchedulerRun.scheduler_key == j.key))
+                    if last is not None and last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    if last is None or (now - last) > thresh:
+                        stagger += 15
+                        self._sched.add_job(
+                            self._make(j.key), "date",
+                            run_date=now + timedelta(seconds=stagger),
+                            id=f"{j.key}__catchup", replace_existing=True)
+                        logger.info("[schedulers] catch-up scheduled for %s (last run: %s)",
+                                    j.key, last)
+        except Exception:
+            logger.exception("[schedulers] catch-up sweep failed")
 
     def stop(self) -> dict:
         for j in JOBS:

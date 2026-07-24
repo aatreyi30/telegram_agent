@@ -53,34 +53,6 @@ def test_build_owned_report_totals():
         assert rep.views_min == 800
 
 
-def test_category_mix_uses_real_category_not_merchant():
-    """category_mix must come from EnrichedDeal.category via the deal link, never
-    from merchant_key — regression test for the bug where category_mix was
-    silently an alias of merchant_mix (see daily_report.py:_category_by_post)."""
-    from src.db.models import Post
-    from src.db.models_generation import EnrichedDeal, GeneratedPost
-    from src.db.models_prediction import PostPrediction
-    from src.services.analytics.daily_report import build_owned_report
-    from src.db.session import session_scope
-
-    with session_scope() as s:
-        post = s.query(Post).filter(Post.tg_message_id == 1000).one()
-        deal = EnrichedDeal(deal_id="deal-abc", merchant_key="amazon",
-                             category="electronics-and-gadgets")
-        s.add(deal); s.flush()
-        gp = GeneratedPost(generated_at=post.posted_at, post_type="single",
-                            deal_ids=["deal-abc"], rendered_text="x")
-        s.add(gp); s.flush()
-        s.add(PostPrediction(generated_post_id=gp.id, post_id=post.id,
-                              model_version="t", features={}))
-
-    with session_scope() as s:
-        rep = build_owned_report(s, date(2026, 7, 6))
-        assert rep.category_mix == {"electronics-and-gadgets": 1}
-        assert "amazon" not in rep.category_mix  # merchant must never leak in as category
-        assert rep.best_category == "electronics-and-gadgets"
-
-
 def test_run_daily_reports_persists_and_upserts():
     from src.services.analytics.daily_report import run_daily_reports
     from src.db.models_report import DailyChannelReport
