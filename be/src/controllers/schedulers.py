@@ -300,13 +300,20 @@ def j_notification_engine() -> dict:
     from src.db.models_scheduler import RunStatus, SchedulerRun
     from src.db.session import session_scope
     with session_scope() as s:
-        blocked = s.scalar(select(func.count()).select_from(ScheduledPost)
-                           .where(ScheduledPost.status == ScheduleStatus.BLOCKED)) or 0
+        blocked_errors = s.scalars(select(ScheduledPost.last_error)
+                                   .where(ScheduledPost.status == ScheduleStatus.BLOCKED)).all()
         failed = s.scalar(select(func.count()).select_from(SchedulerRun)
                           .where(SchedulerRun.status == RunStatus.FAILED)) or 0
+    blocked = len(blocked_errors)
     alerts = []
     if blocked:
-        alerts.append(f"{blocked} posts blocked (need admin rights)")
+        # Report the ACTUAL block reason (last_error prefix), not a blanket
+        # "need admin rights" — most live blocks were revalidation timeouts, and the
+        # old wording sent operators to check permissions that were never the problem.
+        from collections import Counter
+        reasons = Counter((e or "unknown").split(":")[0].strip() for e in blocked_errors)
+        reason_str = ", ".join(f"{n}×{r}" for r, n in reasons.most_common(3))
+        alerts.append(f"{blocked} posts blocked ({reason_str})")
     if failed:
         alerts.append(f"{failed} scheduler failures")
     return {"processed": len(alerts), "status": "limited" if not alerts else "success",
