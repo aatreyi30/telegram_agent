@@ -125,6 +125,40 @@ def _as_price(v) -> float | None:
         return None
 
 
+_RUPEE_RE = re.compile(r"₹\s?([\d,]+(?:\.\d+)?)")
+_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s?%")
+
+
+def _close(a: float, b: float, tolerance: float = 0.02) -> bool:
+    if a == b:
+        return True
+    denom = abs(b) if b else 1.0
+    return abs(a - b) / denom <= tolerance
+
+
+def _copy_matches_deal(text: str, deal) -> bool:
+    """Precision guard: every rupee figure and every percent figure the AI wrote in a
+    single-deal post must match the real deal's own price/discount within 2% —
+    never trust that the model copied a given number correctly without checking.
+    The copywriter prompt only ever asks for THIS deal's price/discount, so a real
+    mismatch means the model altered a number, not that it mentioned something else;
+    numbers unmatched against the deal's own known figures fail closed (fall back to
+    the template render) rather than being assumed fine. Deals missing a given figure
+    (price or discount is None) skip that half of the check — nothing to compare."""
+    known_prices = {p for p in (deal.current_price, deal.original_price) if p}
+    if known_prices:
+        for m in _RUPEE_RE.finditer(text):
+            val = float(m.group(1).replace(",", ""))
+            if not any(_close(val, k) for k in known_prices):
+                return False
+    if deal.discount_percent:
+        for m in _PCT_RE.finditer(text):
+            val = float(m.group(1))
+            if not _close(val, deal.discount_percent):
+                return False
+    return True
+
+
 def _in_band(it: dict, floor: float | None, cap: float | None) -> bool:
     """Price of `it` sits within [floor, cap] (either bound optional). A capped item
     must have a real positive price. Client-side safety net for the source price filter
@@ -376,6 +410,13 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
             try:
                 text = writer.write_for_item(deal, slot, templates, style, link=link,
                                              footer=formatter.footer_line, variant=single_variant)
+                if not _copy_matches_deal(text, deal):
+                    logger.warning(
+                        "[jit_fill] slot %d:%d AI copy price/discount mismatch vs deal %s "
+                        "(price=%s mrp=%s discount=%s%%) — falling back to template",
+                        si, sub, deal.deal_id, deal.current_price, deal.original_price,
+                        deal.discount_percent)
+                    raise ValueError("AI copy price/discount does not match the real deal")
                 source = "ai_copywriter"
             except (AIUnavailable, Exception):  # noqa: BLE001 — copy must never block a slot
                 text, aff_meta = formatter.format_single(deal)
@@ -455,6 +496,16 @@ def _selfcheck() -> None:
     assert _in_band({"discount_price": 700}, 500, 1000)        # inside band
     assert not _in_band({"discount_price": 400}, 500, 1000)    # below floor
     assert _in_band({"discount_price": 5}, None, None)         # no bounds -> always in
+
+    # precision guard: AI copy's ₹/% figures must match the real deal, or fail closed.
+    from types import SimpleNamespace
+    deal_stub = SimpleNamespace(current_price=873, original_price=9700, discount_percent=91)
+    assert _copy_matches_deal("Now only ₹873 (91% off from ₹9,700)", deal_stub)
+    assert not _copy_matches_deal("Now only ₹999 (91% off from ₹9,700)", deal_stub)   # wrong price
+    assert not _copy_matches_deal("Now only ₹873 (50% off from ₹9,700)", deal_stub)   # wrong discount
+    assert _copy_matches_deal("Grab this now, no numbers here", deal_stub)            # nothing to check
+    no_price_stub = SimpleNamespace(current_price=None, original_price=None, discount_percent=None)
+    assert _copy_matches_deal("₹873 off today!", no_price_stub)  # deal has no known figures -> can't fail
 
     # §8b: ~5 evenly-spaced image slots; short days give every slot an image.
     idx24 = _image_slot_indices(24)
