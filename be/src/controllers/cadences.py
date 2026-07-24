@@ -27,6 +27,9 @@ ORG_HEALTH_HOURS = 1
 
 # --- daily cron jobs — (hour, minute) in IST ---
 LEARNING_TIME = (2, 0)
+# Reasoning runs just after learning (whose dataset it consumes) so reasoned_insights
+# is refreshed daily instead of only when someone clicks the manual pipeline.
+REASONING_TIME = (2, 30)
 DB_CLEANUP_TIME = (3, 0)
 DAILY_REPORT_TIME = (5, 15)
 # Growth detection must run BEFORE the daily plan so the plan grounds on a fresh
