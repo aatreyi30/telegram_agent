@@ -11,7 +11,9 @@ picked deterministically to carry an image (§8b); the rest stay text-only.
 
 from __future__ import annotations
 
+import math
 import re
+from collections import OrderedDict
 from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import select
@@ -42,6 +44,9 @@ SPACING_MIN = 2        # gap between consecutive posts sharing one window
 _SLOT_TAG = "aislot"   # GeneratedPost.selection_bucket prefix marking a filled slot
 LOOT_ITEMS_PER_POST = 10  # distinct categories bundled into one loot post
 IMAGE_POSTS_PER_DAY = 5   # §8b: image budget — this many posts/day carry a photo
+# ponytail: cap (ceil) on any one merchant's share of a loot board — a loot spans
+# several STORES, not one store's catalogue. Tune here.
+LOOT_MERCHANT_CAP_FRACTION = 0.5
 
 _HHMM = re.compile(r"(\d{1,2}):(\d{2})")
 
@@ -127,6 +132,9 @@ def _as_price(v) -> float | None:
 
 _RUPEE_RE = re.compile(r"₹\s?([\d,]+(?:\.\d+)?)")
 _PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s?%")
+# A coupon token the AI wrote as prose ("use code SAVE20", "Code: FLAT10") — same
+# alphanumeric shape the deal's own "coupon:<code>" tag stores.
+_COUPON_RE = re.compile(r"\bcode[:\s]+([A-Za-z0-9]{3,15})\b", re.IGNORECASE)
 
 
 def _close(a: float, b: float, tolerance: float = 0.02) -> bool:
@@ -134,6 +142,13 @@ def _close(a: float, b: float, tolerance: float = 0.02) -> bool:
         return True
     denom = abs(b) if b else 1.0
     return abs(a - b) / denom <= tolerance
+
+
+def _deal_coupon(deal) -> str | None:
+    for t in (getattr(deal, "tags", None) or []):
+        if isinstance(t, str) and t.startswith("coupon:"):
+            return t.split(":", 1)[1]
+    return None
 
 
 def _copy_matches_deal(text: str, deal) -> bool:
@@ -144,7 +159,10 @@ def _copy_matches_deal(text: str, deal) -> bool:
     mismatch means the model altered a number, not that it mentioned something else;
     numbers unmatched against the deal's own known figures fail closed (fall back to
     the template render) rather than being assumed fine. Deals missing a given figure
-    (price or discount is None) skip that half of the check — nothing to compare."""
+    (price or discount is None) skip that half of the check — nothing to compare.
+    Same for a coupon: if the deal actually carries one (its `coupon:<code>` tag), the
+    AI text must not invent a DIFFERENT code — a deal with no coupon at all skips
+    that check too, same as a figure-less price/discount."""
     known_prices = {p for p in (deal.current_price, deal.original_price) if p}
     if known_prices:
         for m in _RUPEE_RE.finditer(text):
@@ -156,6 +174,30 @@ def _copy_matches_deal(text: str, deal) -> bool:
             val = float(m.group(1))
             if not _close(val, deal.discount_percent):
                 return False
+    coupon = _deal_coupon(deal)
+    if coupon:
+        for m in _COUPON_RE.finditer(text):
+            if m.group(1).upper() != coupon.upper():
+                return False
+    return True
+
+
+def _loot_copy_matches(text: str, deals: list, price_cap: float | None = None,
+                      price_floor: float | None = None) -> bool:
+    """Loot sibling of `_copy_matches_deal`: each ₹/% figure must match SOME item on
+    the board (or the slot's price cap/floor). A figure-less board fails closed on any
+    ₹/% — with real deals to cite, an unverifiable number is likely fabricated."""
+    known_prices = {p for d in deals for p in (d.current_price, d.original_price) if p}
+    known_prices |= {p for p in (price_cap, price_floor) if p}
+    for m in _RUPEE_RE.finditer(text):
+        val = float(m.group(1).replace(",", ""))
+        if not (known_prices and any(_close(val, k) for k in known_prices)):
+            return False
+    known_discounts = {d.discount_percent for d in deals if d.discount_percent}
+    for m in _PCT_RE.finditer(text):
+        val = float(m.group(1))
+        if not (known_discounts and any(_close(val, k) for k in known_discounts)):
+            return False
     return True
 
 
@@ -199,33 +241,65 @@ def _pick_fresh_multi(pool: list[dict], merchant: str | None, used: set[str],
                       n: int) -> list[dict]:
     """Up to `n` freshest unused items spanning DISTINCT categories (one item per
     category, best-first within each) — the actual shape of a real loot post: several
-    different product categories bundled together, never several products of the
-    SAME category. Prefers `merchant` when given but broadens to any merchant once
-    that one's categories are exhausted, since a loot post's defining trait is
-    category variety, not a single merchant."""
+    different product categories bundled together, AND spanning several merchants,
+    never one store's whole catalogue. The slot's own `merchant` is still preferred
+    first, but capped at `ceil(n * LOOT_MERCHANT_CAP_FRACTION)` items; the rest of the
+    board is filled round-robin across the OTHER available merchants (still distinct
+    categories), broadening to any merchant/category only if the board is still short."""
     def unused(it):
         return it.get("original_url") not in used
 
     seen_cats: set[str] = set()
     picked: list[dict] = []
 
-    def _scan(require_merchant: bool):
+    def take(it):
+        seen_cats.add(it.get("category_key") or "")
+        picked.append(it)
+
+    # 1) the slot's own merchant, capped so it can't supply more than ~half the board.
+    if merchant:
+        cap = min(n, math.ceil(n * LOOT_MERCHANT_CAP_FRACTION))
+        for it in pool:
+            if len(picked) >= cap:
+                break
+            cat = it.get("category_key") or ""
+            if unused(it) and cat not in seen_cats and _match(_item_merchant(it), merchant):
+                take(it)
+
+    # 2) round-robin the OTHER merchants (distinct categories) to fill the rest, so the
+    # board spans several stores instead of broadening straight back into the same one.
+    if len(picked) < n:
+        others: "OrderedDict[str, list[dict]]" = OrderedDict()
+        for it in pool:
+            cat = it.get("category_key") or ""
+            if not unused(it) or cat in seen_cats:
+                continue
+            if merchant and _match(_item_merchant(it), merchant):
+                continue
+            others.setdefault(_item_merchant(it) or "?", []).append(it)
+        while len(picked) < n and others:
+            for mk in list(others):
+                if len(picked) >= n:
+                    break
+                queue = others[mk]
+                while queue:
+                    it = queue.pop(0)
+                    if (it.get("category_key") or "") in seen_cats:
+                        continue
+                    take(it)
+                    break
+                if not queue:
+                    del others[mk]
+
+    # 3) still short (not enough merchant variety in the pool) -> broaden to ANY
+    # merchant/category, including past the slot merchant's cap.
+    if len(picked) < n:
         for it in pool:
             if len(picked) >= n:
-                return
-            if not unused(it):
-                continue
-            cat = it.get("category_key") or ""
-            if cat in seen_cats:
-                continue
-            if require_merchant and not _match(_item_merchant(it), merchant):
-                continue
-            seen_cats.add(cat)
-            picked.append(it)
+                break
+            if unused(it) and (it.get("category_key") or "") not in seen_cats:
+                take(it)
 
-    if merchant:
-        _scan(require_merchant=True)
-    _scan(require_merchant=False)
     return picked
 
 
@@ -378,6 +452,12 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
                                              cta=formatter.cta_line,
                                              footer=formatter.footer_line, price_cap=cap,
                                              price_floor=floor, variant=loot_variant)
+                if not _loot_copy_matches(text, enriched, price_cap=cap, price_floor=floor):
+                    logger.warning(
+                        "[jit_fill] slot %d:%d loot AI copy price/discount mismatch vs "
+                        "the board's %d real deals — falling back to template",
+                        si, sub, len(enriched))
+                    raise ValueError("AI loot copy price/discount does not match the real board")
                 source = "ai_copywriter"
             except (AIUnavailable, Exception):  # noqa: BLE001 — copy must never block a slot
                 text, _ = formatter.format_multi_category_loot(
@@ -506,6 +586,45 @@ def _selfcheck() -> None:
     assert _copy_matches_deal("Grab this now, no numbers here", deal_stub)            # nothing to check
     no_price_stub = SimpleNamespace(current_price=None, original_price=None, discount_percent=None)
     assert _copy_matches_deal("₹873 off today!", no_price_stub)  # deal has no known figures -> can't fail
+
+    # coupon guard: a deal's real code must not be overwritten by an invented one.
+    coupon_stub = SimpleNamespace(current_price=None, original_price=None, discount_percent=None,
+                                  tags=["coupon:SAVE20"])
+    assert _copy_matches_deal("Use code SAVE20 at checkout", coupon_stub)
+    assert not _copy_matches_deal("Use code FAKE10 at checkout", coupon_stub)  # wrong code
+    assert _copy_matches_deal("Grab this deal now", coupon_stub)              # no code mentioned -> fine
+    assert _copy_matches_deal("Use code SAVE20", no_price_stub)  # deal has no coupon tag -> can't fail
+
+    # loot sibling: a ₹/% figure only needs to match SOME deal on the board (or the
+    # slot's price cap/floor), but a figure-less board fails closed on any ₹/% at all.
+    loot_deals = [SimpleNamespace(current_price=299, original_price=999, discount_percent=70),
+                 SimpleNamespace(current_price=1499, original_price=None, discount_percent=None)]
+    assert _loot_copy_matches("Grab this for just ₹299, or that one at ₹1,499! Up to 70% off", loot_deals)
+    assert not _loot_copy_matches("Now at ₹499!", loot_deals)               # no deal has this price
+    assert not _loot_copy_matches("Up to 90% off today", loot_deals)        # no deal has this discount
+    assert _loot_copy_matches("Under ₹500 today!", loot_deals, price_cap=500)  # cap restated legitimately
+    assert not _loot_copy_matches("Under ₹700 today!", loot_deals, price_cap=500)  # invented cap figure
+    figureless = [SimpleNamespace(current_price=None, original_price=None, discount_percent=None)]
+    assert not _loot_copy_matches("Grab it for ₹299!", figureless)  # nothing on the board to verify against
+    assert _loot_copy_matches("Grab this deal, no numbers here", figureless)  # nothing to check at all
+
+    # FIX 6: a loot board must span merchants — the slot's own merchant is capped at
+    # ceil(n/2), the rest filled round-robin across other available merchants.
+    loot_pool = (
+        [{"category_key": f"amazon_cat{i}", "merchant_key": "amazon", "original_url": f"a{i}"}
+         for i in range(8)]
+        + [{"category_key": f"flipkart_cat{i}", "merchant_key": "flipkart", "original_url": f"f{i}"}
+           for i in range(3)]
+        + [{"category_key": f"myntra_cat{i}", "merchant_key": "myntra", "original_url": f"m{i}"}
+           for i in range(2)]
+    )
+    board = _pick_fresh_multi(loot_pool, "amazon", set(), 10)
+    assert len(board) == 10, board
+    counts = {}
+    for it in board:
+        counts[it["merchant_key"]] = counts.get(it["merchant_key"], 0) + 1
+    assert counts.get("amazon", 0) <= 5, counts        # <= ceil(10/2), other merchants available
+    assert counts.get("flipkart", 0) >= 1 and counts.get("myntra", 0) >= 1, counts  # board spans stores
 
     # §8b: ~5 evenly-spaced image slots; short days give every slot an image.
     idx24 = _image_slot_indices(24)
