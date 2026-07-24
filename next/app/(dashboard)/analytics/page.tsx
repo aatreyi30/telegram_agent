@@ -132,7 +132,8 @@ export default function AnalyticsPage() {
                 <StatCard label="Posts" value={fmtNum(a.total_posts)} sub={`${win.days} days`} />
                 <StatCard variant="hero" label="Views" value={fmtNum(a.total_views)} />
                 <StatCard label="Total reactions" value={fmtNum(a.total_reactions)} />
-                <StatCard label="Total forwards" value={fmtNum(a.total_forwards)} />
+                <StatCard label="Total forwards" value={fmtNum(a.total_forwards)}
+                  sub="sparsely captured — not a reliable signal" />
                 <StatCard label="Eng. rate" value={fmtPct(a.engagement_rate)} sub={`n=${win.n}`} />
                 <StatCard label="CTA usage" value={fmtPct(a.cta_rate)} sub={`n=${win.n}`} />
                 <StatCard label="Deal rate" value={fmtPct(a.deal_rate)} sub={`n=${win.n}`} />
@@ -349,7 +350,7 @@ export default function AnalyticsPage() {
                 <ChartCard title="Total reactions by hour (IST)" sub="How reactions distribute across the day · hover for post count">
                   <BarsChart data={a.by_hour || []} unit=" reactions" dataKey="total_reactions" countKey="n" countLabel="Posts" />
                 </ChartCard>
-                <ChartCard title="Total forwards by hour (IST)" sub="How forwards distribute across the day · hover for post count">
+                <ChartCard title="Total forwards by hour (IST)" sub="How forwards distribute across the day · hover for post count · forwards are sparsely captured on this channel — not a reliable signal">
                   <BarsChart data={a.by_hour || []} unit=" forwards" dataKey="total_forwards" countKey="n" countLabel="Posts" />
                 </ChartCard>
               </div>
