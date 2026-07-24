@@ -141,7 +141,9 @@ def summarize(s: Session, day: date | None = None, end: date | None = None) -> d
         key=lambda m: m["total_views"], reverse=True)
 
     type_mix = Counter(_post_type(r[8]) for r in rows)
-    merchant_mix = Counter(r[6] for r in rows if r[6])
+    # Bucket null merchant as "unknown" (not dropped) so this shares type_mix's
+    # denominator — both mixes then sum to len(rows) and read consistently.
+    merchant_mix = Counter(r[6] if r[6] else "unknown" for r in rows)
 
     # --- trailing 30-day baseline ---
     # Defined as "trailing 30 days before the window START" (`start`) — this is the
