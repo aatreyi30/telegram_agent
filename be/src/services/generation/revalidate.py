@@ -59,6 +59,14 @@ def _http_ok(url: str) -> tuple[bool, str | None]:
             if r.status_code >= 400 and r.status_code not in _BLOCKED_NOT_BROKEN:
                 return False, f"dead link ({r.status_code})"
             return True, None
+    except httpx.TimeoutException as e:
+        # A timeout on a liveness-only check is NOT proof the deal is dead — exactly
+        # like a 403/429 (_BLOCKED_NOT_BROKEN). These BLOCKED/unknown merchants
+        # stonewall datacentre IPs; the page serves fine to a real shopper. Treating
+        # the timeout as "dead" permanently blocked ~a third of all posts. Let it pass.
+        logger.info("[prepublish_revalidate] liveness timeout for %s (%s) — treated as live, not dead",
+                    url, type(e).__name__)
+        return True, None
     except Exception as e:  # noqa: BLE001 - network is inherently unreliable
         return False, f"unreachable ({type(e).__name__})"
 

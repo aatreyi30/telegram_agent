@@ -78,3 +78,20 @@ def test_unreachable_host_blocks(monkeypatch):
     monkeypatch.setattr(revalidate.httpx, "Client", _boom)
     ok, reason = revalidate._http_ok("https://x.test/p")
     assert ok is False and "unreachable" in reason
+
+
+@pytest.mark.parametrize("exc", [httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout])
+def test_liveness_timeout_is_not_dead(monkeypatch, exc):
+    """A datacentre timeout to a bot-walling merchant is NOT proof the deal is dead.
+
+    The old code treated any timeout as `unreachable` -> blocked_stale -> permanent,
+    which silently killed ~a third of all posts. A timeout on a liveness-only check
+    must pass, exactly like a 403/429."""
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def head(self, url): raise exc("timed out")
+        def get(self, url): raise exc("timed out")
+    monkeypatch.setattr(revalidate.httpx, "Client", lambda **kw: _C())
+    ok, reason = revalidate._http_ok("https://www.ajio.com/p/1")
+    assert ok is True and reason is None
