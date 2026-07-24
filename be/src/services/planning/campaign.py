@@ -175,9 +175,19 @@ class CampaignPlanningEngine(BaseCollector):
             mult = {"increase": 1.4, "decrease": 0.6}.get(m.get("action"), 1.0)
             weights.append((m, max(base * mult, 0.01)))
         wsum = sum(w for _, w in weights) or 1.0
+        # floor then distribute the remainder (largest-weight first) so target_posts
+        # sum to `posts` EXACTLY. round()-per-bucket drifted — e.g. two 0.5 shares of 37
+        # gave 18+18=36, not 37. Mirrors _allocate_from_recent's reconciliation.
+        ordered = sorted(weights, key=lambda mw: (-mw[1], mw[0].get("post_type") or ""))
+        targets = [[m, int(posts * w / wsum)] for m, w in ordered]
+        remainder = posts - sum(n for _, n in targets)
+        for t in targets:
+            if remainder <= 0:
+                break
+            t[1] += 1
+            remainder -= 1
         out = []
-        for m, w in weights:
-            n = round(posts * w / wsum)
+        for m, n in targets:
             if n <= 0:
                 continue
             out.append({"deal_type": plain_label(m["post_type"]),
