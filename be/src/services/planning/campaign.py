@@ -361,7 +361,17 @@ class CampaignPlanningEngine(BaseCollector):
 
     def _weekly_plan(self, blueprint, perf, today, events, recent: dict | None = None,
                      s: Session | None = None, now: datetime | None = None) -> dict:
-        posts = int(round(blueprint.get("posting_frequency_baseline") or 8))
+        # One definition of posts/day: the active-day median (recent_cadence), the
+        # same number weekly_brief surfaces. This `posts` feeds posts_per_day/week AND
+        # every theme's posts_planned, so fixing it here keeps them consistent (no
+        # stale baseline third number). Falls back to the baseline only without a session.
+        if s is not None:
+            from src.ai.context import posting_trajectory
+            end_day = today + timedelta(days=6)
+            posts = (posting_trajectory(s, days=7, end_day=end_day)["recent_cadence"]
+                    or int(round(blueprint.get("posting_frequency_baseline") or 8)))
+        else:
+            posts = int(round(blueprint.get("posting_frequency_baseline") or 8))
         mix = [m for m in (blueprint.get("content_mix") or [])]
         # Same posting-window fallback as the daily plan: use the channel's own
         # historical posting-hours when the Growth blueprint has no posting_plan
