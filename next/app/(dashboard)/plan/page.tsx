@@ -152,7 +152,7 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
             <TypeMixBadges mix={y!.type_mix} />
             {(y!.best_category || y!.worst_category) && (
               <p className="text-xs text-muted-foreground">
-                {y!.best_category && <>Best category: <span className="font-medium text-foreground">{categoryLabel(y!.best_category)}</span></>}
+                {y!.best_category && <>Best merchant: <span className="font-medium text-foreground">{categoryLabel(y!.best_category)}</span></>}
                 {y!.best_category && y!.worst_category && " · "}
                 {y!.worst_category && <>Worst: <span className="font-medium text-foreground">{categoryLabel(y!.worst_category)}</span></>}
               </p>

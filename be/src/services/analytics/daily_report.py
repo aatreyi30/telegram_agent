@@ -64,22 +64,25 @@ def build_owned_report(s: Session, day: date, channel_id: int | None = None) -> 
         top_post_id=top[0] if top else None,
         bottom_post_id=bottom[0] if bottom else None,
         reactions_total=reactions, forwards_total=forwards,
-        engagement_rate=round((reactions + forwards) / views_total, 4) if views_total else 0.0,
+        # PERCENT, to match views.py / day.py and every UI render (which appends "%").
+        # Previously stored as a raw fraction (0.0057), so yesterday's card rendered
+        # "0.0057%" whenever it read a stored report instead of the live day view.
+        engagement_rate=round((reactions + forwards) / views_total * 100, 2) if views_total else 0.0,
         posting_hours=dict(hours),
         computed_at=datetime.now(timezone.utc),
         data_completeness=1.0,
     )
-    # best/worst category (by views)
+    # best/worst MERCHANT by AGGREGATE views (summed across all that merchant's posts),
+    # not the single top/bottom post — the old per-post version made best==worst on any
+    # single-merchant day. (Field is named *_category for schema stability; the value is
+    # a merchant key and the UI labels it "merchant".)
     if rows:
-        merchants = [
-            {"key": r[6] or "__unknown__", "total_views": r[2] or 0}
-            for r in rows
-        ]
-        if merchants:
-            best = max(merchants, key=lambda m: m["total_views"])
-            worst = min(merchants, key=lambda m: m["total_views"])
-            rep.best_category = best["key"]
-            rep.worst_category = worst["key"]
+        views_by_merchant: dict[str, int] = Counter()
+        for r in rows:
+            views_by_merchant[r[6] or "__unknown__"] += (r[2] or 0)
+        if views_by_merchant:
+            rep.best_category = max(views_by_merchant, key=views_by_merchant.get)
+            rep.worst_category = min(views_by_merchant, key=views_by_merchant.get)
     _fill_subs(s, rep, channel_id, day)
     return rep
 
