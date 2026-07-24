@@ -30,6 +30,7 @@ const MERCHANT: Record<string, string> = {
   ajio: "AJIO", tatacliq: "Tata CLiQ", nykaa: "Nykaa", nykaa_fashion: "Nykaa Fashion",
   jiomart: "JioMart", bigbasket: "BigBasket", firstcry: "FirstCry", boat: "boAt",
   hm: "H&M", thebodyshop: "The Body Shop", bookmyshow: "BookMyShow",
+  au: "AU Small Finance Bank",
 };
 
 export function merchantLabel(key?: string | null): string {
@@ -142,6 +143,14 @@ function _parse(iso?: string | null): Date | null {
 
 export function istDate(iso?: string | null): string { const d = _parse(iso); return d ? _date.format(d) : "—"; }
 export function istDateTime(iso?: string | null): string { const d = _parse(iso); return d ? _dateTime.format(d) : "—"; }
+
+/** "2026-07-10" -> "2026/07/10". Plain date-only strings (chart labels, window
+ * start/end, day-view headers) — not a full timestamp, so a string swap is exact
+ * and doesn't need timezone handling the way istDate/istDateTime do. */
+export function isoSlash(iso?: string | null): string {
+  if (!iso) return "";
+  return iso.slice(0, 10).replace(/-/g, "/");
+}
 
 /** "fires in 12 min" / "5 min ago". Null-safe. */
 export function relative(iso?: string | null): string {

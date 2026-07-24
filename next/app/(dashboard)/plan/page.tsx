@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert01Icon,
@@ -17,7 +17,7 @@ import { DateFilter } from "@/components/ui/date-range-picker";
 import { PageHeader } from "@/components/PageHeader";
 import { useQueryParams } from "@/lib/use-search-params";
 import { cn } from "@/lib/utils";
-import { postTypeLabel, merchantLabel, categoryLabel, titleCase, statusLabel } from "@/lib/format";
+import { postTypeLabel, merchantLabel, categoryLabel, titleCase, statusLabel, isoSlash } from "@/lib/format";
 import { useRegenerateDailyPlan, useRegenerateWeeklyPlan } from "@/queries/mutations";
 import { useDailyBrief, useLatestRetro, useWeeklyBrief } from "@/queries/queries";
 import type {
@@ -99,22 +99,56 @@ function RiskList({ risks }: { risks: PlanRisk[] | null }) {
   );
 }
 
-/** Renders an AI narrative, promoting a leading "Label: " to a bold inline
- * heading when present — general-purpose, not tied to fixed section names. */
+/** Strips the handful of markdown tokens the AI sometimes emits (headers,
+ * bold) that the deterministic fallback / prompt never asks for but the
+ * model occasionally reaches for anyway — this is a plain-text panel, not a
+ * markdown renderer, so tokens are removed rather than styled. */
+function stripInlineMarkdown(s: string): string {
+  return s.replace(/\*\*(.+?)\*\*/g, "$1").replace(/`(.+?)`/g, "$1");
+}
+
+/** Renders an AI narrative: a leading "Label: " promotes to a bold inline
+ * heading, a "### " line becomes a section heading, and consecutive "1. "-style
+ * lines group into an ordered list — general-purpose, not tied to fixed
+ * section names (the model's exact wording/structure varies run to run). */
 function DigestBlock({ text }: { text: string }) {
-  const lines = text.split(/\n+/).filter(Boolean);
-  return (
-    <div className="space-y-2 text-sm leading-relaxed">
-      {lines.map((line, i) => {
-        const m = /^([A-Za-z][A-Za-z' ]{2,39}):\s*(.+)$/.exec(line.trim());
-        return m ? (
-          <p key={i}><span className="font-semibold text-foreground">{m[1]}:</span> {m[2]}</p>
-        ) : (
-          <p key={i}>{line}</p>
-        );
-      })}
-    </div>
-  );
+  const lines = text.split(/\n+/).filter(Boolean).map((l) => l.trim());
+  const blocks: ReactNode[] = [];
+  let listBuf: string[] = [];
+  const flushList = (key: string) => {
+    if (!listBuf.length) return;
+    blocks.push(
+      <ol key={key} className="ml-4 list-decimal space-y-1">
+        {listBuf.map((item, j) => <li key={j}>{stripInlineMarkdown(item)}</li>)}
+      </ol>,
+    );
+    listBuf = [];
+  };
+
+  lines.forEach((line, i) => {
+    const heading = /^#{1,6}\s+(.+)$/.exec(line);
+    const numbered = /^\d+[.)]\s+(.+)$/.exec(line);
+    const labeled = /^([A-Za-z][A-Za-z' ]{2,39}):\s*(.+)$/.exec(line);
+
+    if (numbered) {
+      listBuf.push(numbered[1]);
+      return;
+    }
+    flushList(`list-${i}`);
+
+    if (heading) {
+      blocks.push(<p key={i} className="font-semibold text-foreground">{stripInlineMarkdown(heading[1])}</p>);
+    } else if (labeled) {
+      blocks.push(
+        <p key={i}><span className="font-semibold text-foreground">{labeled[1]}:</span> {stripInlineMarkdown(labeled[2])}</p>,
+      );
+    } else {
+      blocks.push(<p key={i}>{stripInlineMarkdown(line)}</p>);
+    }
+  });
+  flushList("list-end");
+
+  return <div className="space-y-2 text-sm leading-relaxed">{blocks}</div>;
 }
 
 function TypeMixBadges({ mix }: { mix: Record<string, number> | null }) {
@@ -152,9 +186,9 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
             <TypeMixBadges mix={y!.type_mix} />
             {(y!.best_category || y!.worst_category) && (
               <p className="text-xs text-muted-foreground">
-                {y!.best_category && <>Best merchant: <span className="font-medium text-foreground">{categoryLabel(y!.best_category)}</span></>}
+                {y!.best_category && <>Best merchant: <span className="font-medium text-foreground">{merchantLabel(y!.best_category)}</span></>}
                 {y!.best_category && y!.worst_category && " · "}
-                {y!.worst_category && <>Worst: <span className="font-medium text-foreground">{categoryLabel(y!.worst_category)}</span></>}
+                {y!.worst_category && <>Worst: <span className="font-medium text-foreground">{merchantLabel(y!.worst_category)}</span></>}
               </p>
             )}
             {y!.source === "live" && (
@@ -172,7 +206,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
   const regenerate = useRegenerateDailyPlan();
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">Today — {brief.date}</CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base">Today — {isoSlash(brief.date)}</CardTitle></CardHeader>
       <CardContent className="space-y-5 text-sm">
         <div>
           <div className="flex items-baseline gap-2">
@@ -351,7 +385,7 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
         {days.map((d) => (
           <TableRow key={d.date}>
             <TableCell className="font-medium">{d.weekday}</TableCell>
-            <TableCell className="text-muted-foreground tabular-nums">{d.date}</TableCell>
+            <TableCell className="text-muted-foreground tabular-nums">{isoSlash(d.date)}</TableCell>
             <TableCell className="tabular-nums">{d.posts}</TableCell>
             <TableCell className="tabular-nums">{Math.round(d.views_avg).toLocaleString()}</TableCell>
             <TableCell className="text-emerald-600 tabular-nums dark:text-emerald-400">+{d.joined}</TableCell>
@@ -491,7 +525,7 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
                 {w.themes.map((t, i) => (
                   <TableRow key={i}>
                     <TableCell className="font-medium">{t.day}</TableCell>
-                    <TableCell className="text-muted-foreground">{t.date}</TableCell>
+                    <TableCell className="text-muted-foreground">{isoSlash(t.date)}</TableCell>
                     <TableCell>{t.theme_focus}</TableCell>
                     <TableCell>{t.posts_planned}</TableCell>
                   </TableRow>

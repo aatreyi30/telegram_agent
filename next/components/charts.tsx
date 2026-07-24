@@ -16,7 +16,7 @@ function humanize(key?: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function Tip({ active, payload, label, unit, countKey, countLabel = "Posts" }: any) {
+function Tip({ active, payload, label, unit, countKey, countLabel = "Posts", labelFormatter }: any) {
   if (!active || !payload?.length) return null;
   // The full data row is on payload[0].payload — use it to surface an extra
   // context value (e.g. post count) without plotting a mismatched-scale series.
@@ -24,7 +24,7 @@ function Tip({ active, payload, label, unit, countKey, countLabel = "Posts" }: a
   const count = countKey && row ? row[countKey] : undefined;
   return (
     <div className="rounded-lg border bg-popover px-3 py-2 text-xs shadow-md">
-      <div className="font-medium text-foreground">{label}</div>
+      <div className="font-medium text-foreground">{labelFormatter ? labelFormatter(label) : label}</div>
       {payload.map((p: any, i: number) => (
         <div key={i} className="text-muted-foreground">
           {/* per-series unit (p.unit) wins over the chart-wide fallback, so a % series
@@ -41,12 +41,26 @@ function Tip({ active, payload, label, unit, countKey, countLabel = "Posts" }: a
   );
 }
 
-export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit, countKey, countLabel }: {
+export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit, countKey, countLabel, xTickFormatter, onPointClick }: {
   data: any[]; dataKey?: string; unit?: string; secondaryKey?: string; secondaryUnit?: string; countKey?: string; countLabel?: string;
+  /** Display-only formatter for axis ticks + tooltip title — `data`'s own `label` field
+   * stays the raw value (so callers needing the real value, e.g. a click handler, still get it). */
+  xTickFormatter?: (label: string) => string;
+  /** Fires with the RAW `label` of the clicked point (pre-`xTickFormatter`) — e.g. click a
+   * day on the daily views chart to drill into that day's detail. */
+  onPointClick?: (rawLabel: string) => void;
 }) {
   return (
     <ResponsiveContainer width="100%" height={240}>
-      <AreaChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+      <AreaChart
+        data={data}
+        margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
+        onClick={onPointClick ? (e: any) => {
+          const raw = e?.activePayload?.[0]?.payload?.label;
+          if (raw) onPointClick(raw);
+        } : undefined}
+        style={onPointClick ? { cursor: "pointer" } : undefined}
+      >
         <defs>
           <linearGradient id="fillC1" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={C1} stopOpacity={0.5} />
@@ -58,12 +72,12 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
           </linearGradient>
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
-        <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} />
+        <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} tickFormatter={xTickFormatter} />
         <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} yAxisId="left" />
         {secondaryKey && (
           <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} yAxisId="right" orientation="right" />
         )}
-        <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} />} />
+        <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} labelFormatter={xTickFormatter} />} />
         <Area yAxisId="left" type="monotone" dataKey={dataKey} stroke={C1} strokeWidth={2} fill="url(#fillC1)" name={humanize(dataKey)} unit={unit} />
         {secondaryKey && (
           <Area yAxisId="right" type="monotone" dataKey={secondaryKey} stroke={C2} strokeWidth={1.5} strokeDasharray="4 3" fill="url(#fillC2)" name={humanize(secondaryKey)} unit={secondaryUnit} />

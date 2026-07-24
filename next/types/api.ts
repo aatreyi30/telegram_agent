@@ -9,7 +9,13 @@ export interface OverviewResponse {
   queue_counts: Record<string, number>; affiliate_provider: string; publishing_gates: PublishingGate[];
 }
 
-export interface GrowthDailyPoint { date: string; subs_end: number | null; joined: number; left: number; net: number; }
+export interface GrowthDailyPoint {
+  date: string; subs_end: number | null; joined: number; left: number; net: number;
+  /** >1 means this row's joined/left/net is NOT one day's growth — it's the
+   * accumulated total across a collection gap this many days wide (the scheduler
+   * was off), bucketed onto this date because that's when observation resumed. */
+  spans_days: number;
+}
 
 // Telegram's admin-only "views by source" / "joins by source" breakdown (requires
 // Channel.can_view_stats). Absent (undefined/null) when the channel doesn't qualify.
@@ -20,6 +26,9 @@ export interface SourceBreakdown {
 
 export type GrowthResponse =
   | { available: true; current: number | null; joined: number; left: number; net: number; days: number;
+      /** True when any daily row spans a multi-day collection gap — the UI must
+       * caveat "Joined"/"Left" instead of implying per-day activity. */
+      has_collection_gap: boolean;
       first_date: string; last_date: string; daily: GrowthDailyPoint[];
       view_sources?: SourceBreakdown | null; follower_sources?: SourceBreakdown | null; }
   | { available: false; reason: string; current: number | null; days: number;
@@ -129,11 +138,17 @@ export interface PostsResponse extends PageMeta { items: PostItem[]; }
 export interface QueueItem {
   id: number; post_id: number | null; channel: string | null;
   post_type: string | null; merchant: string | null; affiliate_status: string | null;
-  text: string | null; bucket: string | null;
+  text: string | null; bucket: string | null; rationale: StrategyRationale | null;
   status: string; scheduled_at: string | null; overdue?: boolean; attempts: string; note: string;
 }
 
 export interface QueueResponse extends PageMeta { counts: Record<string, number>; items: QueueItem[]; }
+
+export interface ActivityEvent {
+  type: "draft_created" | "post_published" | "post_blocked" | "job_run";
+  at: string | null; label: string; ref_id: number | null;
+}
+export interface ActivityResponse { events: ActivityEvent[]; server_time: string; }
 
 export interface CompetitorBenchmarkRow { dimension: string; owned_value: number | null; competitor_value: number | null; delta: number | null; }
 
@@ -148,6 +163,11 @@ export interface CompetitorEntity {
   similarity_to_us?: number | null; benchmarks?: CompetitorBenchmarkRow[];
   posts_per_hour_ist?: Record<string, number>; weekday_distribution?: Record<string, number>;
   posts?: number; tenure_label?: string;
+  /** True when this entity's observation window is wildly different from owned's
+   * (e.g. owned has a year of history, this competitor only 20 days) — posts_per_day/
+   * avg_views_per_post are each computed over the entity's OWN window, so comparing
+   * them side by side looks apples-to-apples but isn't. */
+  window_mismatch?: boolean | null;
   [key: string]: any;
 }
 

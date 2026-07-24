@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { queryKeys } from "./keys";
 import type {
+  ActivityResponse,
   AnalyticsResponse, ChannelsResponse, CompetitorDashboardResponse, CompetitorDashboardTrendsResponse,
   CompetitorsResponse,
   DailyBrief, DataRangeResponse, DayResponse, DigestResponse, DraftsResponse, GrowthResponse, InsightsResponse,
@@ -13,6 +14,16 @@ import type {
 
 export function useOverview() {
   return useQuery({ queryKey: queryKeys.overview(), queryFn: () => api.get<OverviewResponse>("/overview") });
+}
+/** Polls for real events (drafts written, posts sent/blocked, jobs completed) —
+ * powers the live activity toast stream. 15s cadence, cheap read-only query. */
+export function useActivity(limit = 10) {
+  return useQuery({
+    queryKey: ["activity", limit],
+    queryFn: () => api.get<ActivityResponse>(`/activity/recent?limit=${limit}`),
+    refetchInterval: 15000,
+    refetchIntervalInBackground: false,
+  });
 }
 export function useInsights(start?: string | null, end?: string | null, opts?: { enabled?: boolean }) {
   const qs = start && end ? `?start=${start}&end=${end}` : "";

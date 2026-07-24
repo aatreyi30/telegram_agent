@@ -71,6 +71,14 @@ function PostsPerDayCell({ e }: { e: CompetitorEntity }) {
     <span className="text-xs whitespace-nowrap">
       {yours != null && <span className="text-muted-foreground">You {yours.toFixed(1)}/day · </span>}
       <span>Them {theirs.toFixed(1)}/day</span>
+      {e.window_mismatch && (
+        <span
+          className="ml-1 text-amber-600 dark:text-amber-400"
+          title="These are computed over very different observation windows (e.g. your months of history vs their few days tracked) — not a like-for-like comparison."
+        >
+          ⚠
+        </span>
+      )}
       {delta != null && (
         <span
           className={cn(

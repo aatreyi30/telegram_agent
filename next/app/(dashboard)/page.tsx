@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -8,13 +9,15 @@ import {
 } from "@hugeicons/core-free-icons";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Dialog } from "@/components/ui/dialog";
 import { StatCard } from "@/components/StatCard";
+import { LivePulse } from "@/components/LivePulse";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusCounts } from "@/components/StatusPill";
 import { Async } from "@/components/Async";
 import { TimelineChart } from "@/components/charts";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
-import { useOverview, useGrowth, useInsights, useDrafts, useQueue } from "@/queries/queries";
+import { useOverview, useGrowth, useInsights, useDrafts, useQueue, useActivity } from "@/queries/queries";
 import { titleCase, istDate } from "@/lib/format";
 import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint } from "@/types/api";
 
@@ -27,10 +30,14 @@ function fmtNum(n: number | null | undefined): string {
 // into an older half and an equally-sized most-recent half and compares them. Requires
 // no new backend data — reuses the daily rows the Growth card already fetched. Returns
 // null (no trend rendered) when there isn't enough history for a meaningful comparison,
-// or the older window is exactly 0 (a percentage delta would be undefined/fabricated).
+// the older window is exactly 0 (a percentage delta would be undefined/fabricated), OR
+// any row in play spans a multi-day collection gap — that row's total isn't one day's
+// activity, so a row-count-based "older half vs recent half" split would compare a real
+// period against a gap-inflated one and produce a wildly bogus %.
 function periodTrend(daily: GrowthDailyPoint[], key: "subs_end" | "joined" | "left" | "net", mode: "sum" | "avg" = "sum"): { value: number } | null {
   const n = daily.length;
   if (n < 4) return null;
+  if (daily.some((d) => d.spans_days > 1)) return null;
   const half = Math.floor(n / 2);
   const older = daily.slice(0, half);
   const recent = daily.slice(n - half);
@@ -45,16 +52,29 @@ function periodTrend(daily: GrowthDailyPoint[], key: "subs_end" | "joined" | "le
   return { value: Math.round(pct * 10) / 10 };
 }
 
+/** True when the agent has actually done something in the last 10 minutes —
+ * the honest signal behind the "Live" pulse, not a decorative always-on dot. */
+function useAgentIsLive(): boolean {
+  const activity = useActivity(1);
+  const at = activity.data?.events?.[0]?.at;
+  if (!at) return false;
+  return Date.now() - new Date(at).getTime() < 10 * 60 * 1000;
+}
+
 function ChannelHeader({ channel }: { channel: OverviewResponse["channel"] }) {
+  const live = useAgentIsLive();
   if (!channel?.available) return null;
   const initial = (channel.title ?? channel.username ?? "?").trim().charAt(0).toUpperCase() || "?";
   return (
-    <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
-      <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary/10 text-base font-semibold text-primary">
+    <div className="relative overflow-hidden flex items-center gap-3 rounded-xl border border-primary/15 bg-gradient-to-r from-primary/[0.08] via-card to-card p-4">
+      <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-primary to-primary/60 text-base font-semibold text-primary-foreground shadow-sm">
         {initial}
       </div>
-      <div className="min-w-0">
-        <p className="truncate text-base font-semibold leading-tight">{channel.title ?? "Untitled channel"}</p>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="truncate text-base font-semibold leading-tight">{channel.title ?? "Untitled channel"}</p>
+          <LivePulse label={live ? "Agent live" : "Agent idle"} active={live} />
+        </div>
         <p className="mt-0.5 flex flex-wrap items-center gap-1.5 truncate text-sm text-muted-foreground">
           {channel.username && <span>@{channel.username}</span>}
           {channel.username && channel.subscribers != null && <span aria-hidden>·</span>}
@@ -95,6 +115,56 @@ function PriorityCard({ rec }: { rec: GrowthRecommendation }) {
   );
 }
 
+const DIGEST_SESSION_KEY = "dw_digest_shown";
+
+/** A dismissible "what happened since you were last here" pop-up — real counts
+ * from the same activity feed the toast stream uses, framed as a summary instead
+ * of a live stream. Shows once per browser session (sessionStorage-gated), and
+ * only if something actually happened — an empty digest isn't worth a pop-up. */
+function SessionDigest() {
+  const activity = useActivity(50);
+  const growth = useGrowth();
+  const [open, setOpen] = useState(false);
+  const decided = useRef(false);
+
+  useEffect(() => {
+    if (decided.current || !activity.data) return;
+    decided.current = true;
+    if (typeof window === "undefined" || sessionStorage.getItem(DIGEST_SESSION_KEY)) return;
+    const events = activity.data.events;
+    const published = events.filter((e) => e.type === "post_published").length;
+    const blocked = events.filter((e) => e.type === "post_blocked").length;
+    const drafted = events.filter((e) => e.type === "draft_created").length;
+    if (published + blocked + drafted === 0) return;
+    setOpen(true);
+    sessionStorage.setItem(DIGEST_SESSION_KEY, "1");
+  }, [activity.data]);
+
+  if (!open || !activity.data) return null;
+  const events = activity.data.events;
+  const published = events.filter((e) => e.type === "post_published").length;
+  const blocked = events.filter((e) => e.type === "post_blocked").length;
+  const drafted = events.filter((e) => e.type === "draft_created").length;
+  const subsTrend = growth.data?.available ? periodTrend(growth.data.daily, "subs_end", "avg") : null;
+
+  return (
+    <Dialog open={open} onClose={() => setOpen(false)} title="Since you were last here">
+      <div className="space-y-2 text-sm">
+        <p>
+          <span className="font-medium">{drafted}</span> post{drafted === 1 ? "" : "s"} drafted,{" "}
+          <span className="font-medium">{published}</span> sent
+          {blocked > 0 ? <>, <span className="font-medium text-amber-600 dark:text-amber-400">{blocked}</span> blocked</> : ""}.
+        </p>
+        {subsTrend && (
+          <p className="text-muted-foreground">
+            Subscribers {subsTrend.value >= 0 ? "up" : "down"} {Math.abs(subsTrend.value)}% vs the prior period.
+          </p>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
 export default function OverviewPage() {
   const overview = useOverview();
   const growth = useGrowth();
@@ -102,6 +172,7 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
+      <SessionDigest />
       <PageHeader title="Overview" subtitle="Your channel at a glance — growth, what to do next, and what's in the pipeline." />
 
       <Async q={overview} rows={2}>
@@ -110,10 +181,10 @@ export default function OverviewPage() {
             <ChannelHeader channel={data.channel} />
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <StatCard label="Posts collected" value={data.posts.toLocaleString()} icon={<HugeiconsIcon icon={Note01Icon} className="h-4 w-4" />} />
-              <StatCard label="Competitors tracked" value={data.competitors.toLocaleString()} icon={<HugeiconsIcon icon={UserGroupIcon} className="h-4 w-4" />} />
-              <StatCard label="Drafts ready" value={data.drafts.toLocaleString()} icon={<HugeiconsIcon icon={Sent02Icon} className="h-4 w-4" />} />
-              <StatCard label="Queued" value={Object.values(data.queue_counts).reduce((a, b) => a + b, 0).toLocaleString()} sub={<QueueStats queue_counts={data.queue_counts} />} icon={<HugeiconsIcon icon={BarChartIcon} className="h-4 w-4" />} />
+              <StatCard variant="hero" label="Posts collected" value={data.posts.toLocaleString()} icon={<HugeiconsIcon icon={Note01Icon} className="h-5 w-5" />} />
+              <StatCard label="Competitors tracked" value={data.competitors.toLocaleString()} icon={<HugeiconsIcon icon={UserGroupIcon} className="h-4 w-4" />} className="[animation-delay:75ms]" />
+              <StatCard label="Drafts ready" value={data.drafts.toLocaleString()} icon={<HugeiconsIcon icon={Sent02Icon} className="h-4 w-4" />} className="[animation-delay:150ms]" />
+              <StatCard label="Queued" value={Object.values(data.queue_counts).reduce((a, b) => a + b, 0).toLocaleString()} sub={<QueueStats queue_counts={data.queue_counts} />} icon={<HugeiconsIcon icon={BarChartIcon} className="h-4 w-4" />} className="[animation-delay:225ms]" />
             </div>
 
             <Card className="rounded-xl overflow-hidden">
@@ -138,14 +209,24 @@ export default function OverviewPage() {
                     const subsTrend = periodTrend(g.daily, "subs_end", "avg");
                     const joinedTrend = periodTrend(g.daily, "joined", "sum");
                     const netTrend = periodTrend(g.daily, "net", "sum");
+                    const gapDays = Math.max(1, ...g.daily.map((d) => d.spans_days));
+                    const gapNote = `covers ${gapDays} days, not just 1`;
                     return (
                       <div className="space-y-4">
+                        {g.has_collection_gap && (
+                          <p className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                            ⚠ Tracking was paused for {gapDays} days in this window. The Joined/Net numbers
+                            below are real, but they're the total for all {gapDays} days combined — not one day's growth.
+                          </p>
+                        )}
                         <div className="grid grid-cols-3 gap-3">
                           <StatCard label="Subscribers" value={fmtNum(g.current)}
                             trend={subsTrend ? { ...subsTrend, label: "vs prior period" } : undefined} />
                           <StatCard label="Joined" value={`+${fmtNum(g.joined)}`}
+                            sub={g.has_collection_gap ? gapNote : undefined}
                             trend={joinedTrend ? { ...joinedTrend, label: "vs prior period" } : undefined} />
                           <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)}
+                            sub={g.has_collection_gap ? gapNote : undefined}
                             trend={netTrend ? { ...netTrend, label: "vs prior period" } : undefined} />
                         </div>
                         <TimelineChart data={chartData} dataKey="subs_end" unit="" />
@@ -219,7 +300,7 @@ function DraftsQueueCard() {
           {(d) => (
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium">Drafts</span>
-              <Link href="/drafts" className="flex items-center gap-2 text-2xl font-bold tabular-nums hover:text-primary transition-colors">
+              <Link href="/posts?status=draft" className="flex items-center gap-2 text-2xl font-bold tabular-nums hover:text-primary transition-colors">
                 {d.total}
                 <Badge variant="secondary" className="text-xs font-normal">{d.total > 0 ? "ready" : "empty"}</Badge>
               </Link>
@@ -231,7 +312,7 @@ function DraftsQueueCard() {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium">Queued</span>
-                <Link href="/queue" className="flex items-center gap-2 text-2xl font-bold tabular-nums hover:text-primary transition-colors">
+                <Link href="/posts?status=all" className="flex items-center gap-2 text-2xl font-bold tabular-nums hover:text-primary transition-colors">
                   {q.total}
                   <Badge variant="secondary" className="text-xs font-normal">{q.total > 0 ? "waiting" : "empty"}</Badge>
                 </Link>

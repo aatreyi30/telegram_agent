@@ -1,16 +1,20 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { Async } from "@/components/Async";
 import { BarsChart, TimelineChart } from "@/components/charts";
+import { DayDetail } from "@/components/DayDetail";
 import { StatCard } from "@/components/StatCard";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useAnalytics, useDataRange } from "@/queries/queries";
 import { useQueryParams } from "@/lib/use-search-params";
-import { postTypeLabel, merchantLabel } from "@/lib/format";
+import { postTypeLabel, merchantLabel, isoSlash } from "@/lib/format";
 import { CHART_AXIS_COLOR as AXIS, CHART_GRID_COLOR as GRID } from "@/constants/charts";
 
 function fmtNum(n: number | null | undefined): string {
@@ -59,6 +63,7 @@ export default function AnalyticsPage() {
   const range = useDataRange();
   const min = range.data?.min ?? undefined;
   const max = range.data?.max ?? undefined;
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
 
   const { get, set } = useQueryParams();
   const preset = get("preset", "7d");
@@ -124,33 +129,65 @@ export default function AnalyticsPage() {
           return (
             <div className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-4 xl:grid-cols-7">
-                <StatCard label="Posts" value={fmtNum(a.total_posts)} />
-                <StatCard label="Views" value={fmtNum(a.total_views)} />
+                <StatCard label="Posts" value={fmtNum(a.total_posts)} sub={`${win.days} days`} />
+                <StatCard variant="hero" label="Views" value={fmtNum(a.total_views)} />
                 <StatCard label="Total reactions" value={fmtNum(a.total_reactions)} />
                 <StatCard label="Total forwards" value={fmtNum(a.total_forwards)} />
-                <StatCard label="Eng. rate" value={fmtPct(a.engagement_rate)} />
-                <StatCard label="CTA usage" value={fmtPct(a.cta_rate)} />
-                <StatCard label="Deal rate" value={fmtPct(a.deal_rate)} />
+                <StatCard label="Eng. rate" value={fmtPct(a.engagement_rate)} sub={`n=${win.n}`} />
+                <StatCard label="CTA usage" value={fmtPct(a.cta_rate)} sub={`n=${win.n}`} />
+                <StatCard label="Deal rate" value={fmtPct(a.deal_rate)} sub={`n=${win.n}`} />
               </div>
 
               <ChartCard title="Views & engagement over time"
-                sub={`Daily total views (area) + engagement rate (dashed) · hover for post count · ${win.start || "?"} → ${win.end || "?"}`}>
+                sub={`Daily total views (area) + engagement rate (dashed) · hover for post count · click a day for detail · ${win.start ? isoSlash(win.start) : "?"} → ${win.end ? isoSlash(win.end) : "?"}`}>
                 <TimelineChart data={a.timeline || []} dataKey="total_views" unit=" views"
-                  secondaryKey="engagement_rate" secondaryUnit="%" countKey="n" countLabel="Posts" />
+                  secondaryKey="engagement_rate" secondaryUnit="%" countKey="n" countLabel="Posts"
+                  xTickFormatter={isoSlash} onPointClick={setSelectedDay} />
               </ChartCard>
+
+              {selectedDay && (
+                <Card className="overflow-hidden">
+                  <CardHeader className="flex-row items-center justify-between space-y-0 border-b bg-muted/20">
+                    <CardTitle className="text-base">Day detail — {isoSlash(selectedDay)}</CardTitle>
+                    <Button variant="ghost" size="sm" onClick={() => setSelectedDay(null)}>
+                      <HugeiconsIcon icon={Cancel01Icon} className="h-4 w-4" />
+                    </Button>
+                  </CardHeader>
+                  <CardContent className="pt-4">
+                    <DayDetail start={selectedDay} end={selectedDay} />
+                  </CardContent>
+                </Card>
+              )}
 
               {a.growth?.available && (
                 <>
                   <ChartCard title="Subscriber growth" sub="Follower count over time from collection snapshots.">
-                    <div className="grid gap-3 sm:grid-cols-4">
-                      <StatCard label="Current subscribers" value={fmtNum(a.growth.current)} />
-                      <StatCard label="Joined" value={`+${fmtNum(a.growth.joined)}`} />
-                      <StatCard label="Left" value={a.growth.left > 0 ? `-${fmtNum(a.growth.left)}` : "0"} />
-                      <StatCard label="Net change" value={a.growth.net > 0 ? `+${fmtNum(a.growth.net)}` : fmtNum(a.growth.net)} />
-                    </div>
+                    {(() => {
+                      const gapDays = Math.max(1, ...a.growth.daily.map((d) => d.spans_days));
+                      const gapNote = `covers ${gapDays} days, not just 1`;
+                      return (
+                        <>
+                          {a.growth.has_collection_gap && (
+                            <p className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                              ⚠ Tracking was paused for {gapDays} days in this window. The Joined/Left numbers
+                              below are real, but they're the total for all {gapDays} days combined — not one day's activity.
+                            </p>
+                          )}
+                          <div className="grid gap-3 sm:grid-cols-4">
+                            <StatCard label="Current subscribers" value={fmtNum(a.growth.current)} />
+                            <StatCard label="Joined" value={`+${fmtNum(a.growth.joined)}`}
+                              sub={a.growth.has_collection_gap ? gapNote : undefined} />
+                            <StatCard label="Left" value={a.growth.left > 0 ? `-${fmtNum(a.growth.left)}` : "0"}
+                              sub={a.growth.has_collection_gap ? gapNote : undefined} />
+                            <StatCard label="Net change" value={a.growth.net > 0 ? `+${fmtNum(a.growth.net)}` : fmtNum(a.growth.net)}
+                              sub={a.growth.has_collection_gap ? gapNote : undefined} />
+                          </div>
+                        </>
+                      );
+                    })()}
                     <div className="mt-3">
                       <TimelineChart
-                        data={(a.growth.daily || []).map((d) => ({ label: d.date, subs_end: d.subs_end ?? 0 }))}
+                        data={(a.growth.daily || []).map((d) => ({ label: isoSlash(d.date), subs_end: d.subs_end ?? 0 }))}
                         dataKey="subs_end"
                       />
                     </div>
@@ -274,6 +311,12 @@ export default function AnalyticsPage() {
                   <CardContent className="flex-1 space-y-3">
                     {a.growth?.available ? (
                       <>
+                        {a.growth.has_collection_gap && (
+                          <p className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                            ⚠ Tracking was paused for {Math.max(1, ...a.growth.daily.map((d) => d.spans_days))} days
+                            in this window — the numbers below are real, but cover multiple days combined.
+                          </p>
+                        )}
                         <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
                           <span className="text-sm text-muted-foreground">Current</span>
                           <span className="text-sm font-semibold">{fmtNum(a.growth.current)}</span>
@@ -291,7 +334,8 @@ export default function AnalyticsPage() {
                           <span className="text-sm font-semibold">{a.growth.net > 0 ? `+${fmtNum(a.growth.net)}` : fmtNum(a.growth.net)}</span>
                         </div>
                         <div className="pt-2 text-xs text-muted-foreground">
-                          {a.growth.first_date?.slice(0, 10)} → {a.growth.last_date?.slice(0, 10)}
+                          {isoSlash(a.growth.first_date)} → {isoSlash(a.growth.last_date)}
+                          {a.growth.has_collection_gap && " (spans a paused-tracking gap)"}
                         </div>
                       </>
                     ) : (
@@ -320,7 +364,7 @@ export default function AnalyticsPage() {
               </div>
 
               <p className="text-xs text-muted-foreground text-center">
-                {win.n} posts · {win.days} days · {win.start} → {win.end}
+                {win.n} posts · {win.days} days · {isoSlash(win.start)} → {isoSlash(win.end)}
               </p>
             </div>
           );
