@@ -8,6 +8,8 @@ Rules (verbatim from the spec):
   * Amazon  → https://www.amazon.in/dp/<PRODUCT_ID>/?tag=<tag>  (only the /dp/ id;
               no other query params copied).
   * Flipkart → strip everything from '?', then append the GrabOn affiliate params.
+  * Myntra  → url-encode the product URL and substitute it into the affinity deeplink
+              template (GRABON_MYNTRA_DEEPLINK) at its "<encoded_deal>" token.
   * Shortener → POST {shortener_url} {"originalUrl": "<affiliate_url>"}; the
               shortener always receives the AFFILIATE url, never the raw merchant URL.
 
@@ -18,6 +20,7 @@ interface.
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 import httpx
 
@@ -60,6 +63,7 @@ class GrabOnAffiliateProvider(AffiliateProvider):
         self.shortener_url = settings.grabon_shortener_url
         self.amazon_tag = settings.grabon_amazon_tag
         self.flipkart_params = settings.grabon_flipkart_params
+        self.myntra_deeplink = getattr(settings, "grabon_myntra_deeplink", None)
         # shorten EVERY link (even no-rule merchants) so output matches the channel,
         # whose links are all grbn.in. Fallback still never blocks posting.
         self.shorten_all = getattr(settings, "grabon_shorten_all", True)
@@ -75,6 +79,8 @@ class GrabOnAffiliateProvider(AffiliateProvider):
             return "amazon"
         if "flipkart." in host:
             return "flipkart"
+        if "myntra." in host:
+            return "myntra"
         return None
 
     # ---- pure URL builders (no network — unit tested directly) ---- #
@@ -83,7 +89,12 @@ class GrabOnAffiliateProvider(AffiliateProvider):
         if not m:
             return None, ["Amazon URL has no /dp/<id> — cannot build affiliate link; using clean URL."]
         product_id = m.group(1)
-        return f"https://www.amazon.in/dp/{product_id}/?tag={self.amazon_tag}", []
+        # grabon_amazon_tag may be a BARE Associates tag ("tlg022-21") or a FULL query
+        # string ("th=1&psc=1&linkCode=ll2&tag=tlg022-21"). Use a full string as-is;
+        # wrap a bare tag as "tag=<value>". Only the /dp/<id> is kept from the source URL.
+        tag = (self.amazon_tag or "").strip().lstrip("?&")
+        params = tag if "=" in tag else f"tag={tag}"
+        return f"https://www.amazon.in/dp/{product_id}?{params}", []
 
     def _flipkart_affiliate_url(self, url: str) -> tuple[str | None, list[str]]:
         base = url.split("?", 1)[0]
@@ -91,11 +102,21 @@ class GrabOnAffiliateProvider(AffiliateProvider):
             return None, ["Flipkart URL missing product path (/p/) — using clean URL."]
         return f"{base}?{self.flipkart_params}", []
 
+    def _myntra_affiliate_url(self, url: str) -> tuple[str | None, list[str]]:
+        # Deeplink: url-encode the whole product URL and drop it into the template's
+        # "<encoded_deal>" token. {clickID}/{country_code} macros in the template are
+        # network-filled at click time and left as-is.
+        if not self.myntra_deeplink or "<encoded_deal>" not in self.myntra_deeplink:
+            return None, ["Myntra deeplink template not configured — using clean URL."]
+        return self.myntra_deeplink.replace("<encoded_deal>", quote(url, safe="")), []
+
     def build_affiliate_url(self, url: str, merchant: str | None) -> tuple[str | None, list[str]]:
         if merchant == "amazon":
             return self._amazon_affiliate_url(url)
         if merchant == "flipkart":
             return self._flipkart_affiliate_url(url)
+        if merchant == "myntra":
+            return self._myntra_affiliate_url(url)
         return None, [f"No GrabOn affiliate rule for merchant '{merchant or 'unknown'}' — using clean URL."]
 
     # ---- shortener (network; falls back gracefully) ---- #

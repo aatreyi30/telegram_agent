@@ -182,6 +182,9 @@ _SHORTENER_DOMAINS = {
     "grbn.in", "amzn.to", "amzn.in", "fkrt.cc", "fkrt.it", "bit.ly",
     "cutt.ly", "tinyurl.com", "t.co", "dl.flipkart.com", "myntr.it",
     "bitli.in", "wishlink.com", "ekaro.in", "inrdeals.com", "da.gd",
+    # Additional currently-active Flipkart shortlink domains observed in the
+    # extracted_links table alongside fkrt.cc/fkrt.it.
+    "fkrt.co", "fkrt.site", "fkrt.to",
 }
 
 _TRACKING_PARAM_KEYS = {

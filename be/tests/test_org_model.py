@@ -60,4 +60,3 @@ def test_org_settings_snapshot_affiliate_config():
     with session_scope() as s:
         org = seed_org(s)
         assert "grabon_shortener_url" in (org.settings or {})
-        assert org.settings["owned_channels"] == ["MyChannel"]

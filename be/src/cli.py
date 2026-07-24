@@ -19,7 +19,6 @@ from src.services.collection.affiliate import AffiliateLinkCollector
 from src.services.collection.base import JobRunner
 from src.services.collection.merchant import MerchantEnrichmentCollector
 from src.services.collection.merchants.registry import seed_merchants
-from src.services.collection.scheduler import CollectionScheduler
 from src.services.collection.telegram_competitor import CompetitorCollector
 from src.services.collection.telegram_owned import OwnedChannelCollector
 from src.config.settings import get_settings
@@ -243,26 +242,6 @@ def collect_owned(
     _print_job(job)
 
 
-@app.command("collect-stats")
-def collect_stats(
-    channel: str = typer.Argument(None, help="Owned channel username (default: first OWNED_CHANNELS)"),
-) -> None:
-    """Pull Telegram's admin-only broadcast stats (subscriber growth, reach). Dormant
-    until the account is a channel admin — then it activates automatically."""
-    from src.services.collection.telegram_stats import ChannelStatsCollector
-
-    ch = channel or (get_settings().owned_channels or [None])[0]
-    if not ch:
-        console.print("[yellow]No channel given and OWNED_CHANNELS is empty.[/yellow]")
-        raise typer.Exit(1)
-    job = JobRunner().run_collector(
-        ChannelStatsCollector(ch), collection_type=CollectionType.ANALYTICS, target=ch)
-    _print_job(job)
-    if job.status == "skipped":
-        console.print("[dim]Expected while the account is a member (not admin). "
-                      "The views-based Analytics page works today regardless.[/dim]")
-
-
 @app.command("collect-competitor")
 def collect_competitor(
     username: str = typer.Argument(..., help="Public channel username (no @)"),
@@ -305,7 +284,7 @@ def resolve_links(
     Lifts merchant coverage: each resolved link reveals the merchant we couldn't
     know at normalization time. Re-run until coverage stops rising.
     """
-    from sqlalchemy import func, select
+    from sqlalchemy import func, or_, select
 
     from src.services.collection.link_resolution import LinkResolutionEngine
     from src.db.models_normalization import ExtractedLink
@@ -320,11 +299,11 @@ def resolve_links(
         known = s.scalar(select(func.count()).select_from(ExtractedLink).where(
             ExtractedLink.merchant_key.isnot(None)))
         pending = s.scalar(select(func.count()).select_from(ExtractedLink).where(
-            ExtractedLink.is_shortlink.is_(True), ExtractedLink.merchant_key.is_(None),
-            ExtractedLink.resolved_url.is_(None)))
+            ExtractedLink.merchant_key.is_(None), ExtractedLink.resolved_url.is_(None),
+            or_(ExtractedLink.resolution_attempts.is_(None), ExtractedLink.resolution_attempts < 5)))
     cov = (100 * known / total) if total else 0
     console.print(f"[cyan]Merchant coverage:[/cyan] {known}/{total} links ({cov:.1f}%); "
-                  f"{pending} shortlinks still pending resolution.")
+                  f"{pending} links still pending resolution.")
 
 
 @app.command("normalize")
@@ -537,7 +516,7 @@ def merchant_intel_status() -> None:
 
 @app.command("competitor-intel")
 def competitor_intel() -> None:
-    """Phase 5: build competitor profiles, benchmarks, and evidence-backed signals."""
+    """Phase 5: build competitor profiles and benchmarks."""
     from src.services.intelligence.competitor import CompetitorIntelligenceEngine
 
     job = JobRunner().run_collector(
@@ -550,21 +529,11 @@ def competitor_intel() -> None:
 
 @app.command("competitor-intel-status")
 def competitor_intel_status() -> None:
-    """Show competitor profiles, similarity to us, and threats/opportunities."""
-    from sqlalchemy import select
-
-    from src.db.models_competitor_intel import (
-        COMPETITOR_INTEL_VERSION,
-        CompetitorProfile,
-        CompetitorSignal,
-    )
+    """Show competitor profiles and similarity to us."""
+    from src.services.intelligence.competitor import latest_profiles
 
     with session_scope() as s:
-        profiles = s.scalars(
-            select(CompetitorProfile)
-            .where(CompetitorProfile.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorProfile.post_count.desc())
-        ).all()
+        profiles = sorted(latest_profiles(s), key=lambda p: -(p.post_count or 0))
         if not profiles:
             console.print("[yellow]No competitor profiles. Run `tgagent competitor-intel`.[/yellow]")
             return
@@ -587,22 +556,6 @@ def competitor_intel_status() -> None:
             "[dim]t.me/s snapshot: views are rounded/cumulative; forwards & reactions "
             "unavailable; business category not extracted. Small samples -> low confidence.[/dim]"
         )
-
-        signals = s.scalars(
-            select(CompetitorSignal)
-            .where(CompetitorSignal.intel_version == COMPETITOR_INTEL_VERSION)
-            .order_by(CompetitorSignal.confidence.desc())
-        ).all()
-        if signals:
-            st = Table(title="Threats & opportunities (evidence-gated, sample>=20)")
-            for col in ("type", "competitor", "kind", "conf", "description"):
-                st.add_column(col)
-            for sig in signals:
-                st.add_row(sig.signal_type, sig.username or "-", sig.kind,
-                           f"{sig.confidence:.2f}", sig.description[:64])
-            console.print(st)
-        else:
-            console.print("[dim]No signals passed the evidence/sample threshold.[/dim]")
 
 
 @app.command("learn")
@@ -654,7 +607,7 @@ def learn_status() -> None:
             .where(PostTypePerformance.learning_version == LEARNING_VERSION)
             .order_by(PostTypePerformance.rank_by_views_per_day)
         ).all()
-        pt = Table(title="Post-type performance (age-normalized)")
+        pt = Table(title="Post-type performance (views/day)")
         for col in ("rank", "post type", "posts", "share", "avg views/day", "avg fwd", "conf"):
             pt.add_column(col)
         for p in perf:
@@ -1084,14 +1037,14 @@ def plan_status() -> None:
 
 @app.command("brief")
 def brief(weekly: bool = typer.Option(False, help="Weekly summary instead of daily")) -> None:
-    """AI growth briefing — plain-language, grounded in the engine outputs."""
-    from src.ai.briefing import BriefingGenerator
-    from src.ai.client import AIUnavailable
+    """Show the current plan digest — the AI plan's narrative doubles as the operator
+    briefing (win/concern/do-today). Reads the cached plan, does not regenerate."""
+    from src.controllers import service
 
-    try:
-        text = BriefingGenerator().generate(weekly=weekly)
-    except AIUnavailable as e:
-        console.print(f"[yellow]{e}[/yellow]")
+    data = service.weekly_report() if weekly else service.digest()
+    text = (data.get("ai_summary") if weekly else data.get("digest")) or ""
+    if not text:
+        console.print("[yellow]No plan digest yet — run the daily/weekly planner first.[/yellow]")
         raise typer.Exit(code=1)
     console.print(text)
 
@@ -1109,14 +1062,115 @@ def write_post(deal_id: str = typer.Argument(..., help="Enriched deal_id to writ
         raise typer.Exit(code=1)
 
 
+@app.command("dev-chats")
+def dev_chats_cmd(limit: int = typer.Option(30, help="How many recent chats to list")) -> None:
+    """DEV ONLY: list your recent Telegram chats (name, kind, chat_ref) so you can pick
+    the exact --chat value to pass to `dev-send`. Includes personal DMs, groups, and
+    channels your logged-in account can already see."""
+    from src.services.generation.dev_send import list_chats
+
+    try:
+        rows = list_chats(limit)
+    except Exception as e:  # noqa: BLE001 — surface any Telethon/config error directly to the operator
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    table = Table("name", "kind", "chat_ref", "id")
+    for r in rows:
+        table.add_row(r["name"], r["kind"], r["chat_ref"], str(r["id"]))
+    console.print(table)
+
+
+@app.command("dev-send")
+def dev_send_cmd(
+    chat: str = typer.Argument(..., help="Target chat your logged-in account can already see: "
+                                          "@username, invite-linked group, or numeric chat ID"),
+    text: str = typer.Option(None, "--text", help="Raw message text to send"),
+    deal_id: str = typer.Option(None, "--deal-id",
+                                help="AI-write the message from this enriched deal_id instead of --text"),
+) -> None:
+    """DEV ONLY: send a real message to a chat of your choosing via your own logged-in
+    Telegram session. Bypasses the production publish() gate entirely (no admin-rights
+    check, no sign-off) — for manually testing the send mechanic against a personal
+    test chat. Never point this at the production owned channel."""
+    from src.ai.client import AIUnavailable
+    from src.services.generation.dev_send import dev_send
+
+    if not text and not deal_id:
+        console.print("[red]Provide --text or --deal-id[/red]")
+        raise typer.Exit(code=1)
+    if deal_id:
+        from src.ai.copywriter import Copywriter
+        try:
+            text = Copywriter().write_for_deal(deal_id)
+        except AIUnavailable as e:
+            console.print(f"[yellow]{e}[/yellow]")
+            raise typer.Exit(code=1)
+    try:
+        result = dev_send(chat, text)
+    except Exception as e:  # noqa: BLE001 — surface any Telethon/config error directly to the operator
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]{result}[/green]")
+
+
+@app.command("dev-publish-drafts")
+def dev_publish_drafts_cmd(
+    chat: str = typer.Argument(..., help="Target chat, same as `dev-send` (use `--` before a "
+                                          "numeric/negative chat ID, e.g. -- -5291594307)"),
+    day: str = typer.Option(..., "--day", help="AI-plan day to pull existing drafts from, "
+                                               "e.g. 2026-07-13 (must match a plan's target_date)"),
+    include_sent: bool = typer.Option(False, "--include-sent",
+                                      help="Also re-send drafts already dev-sent earlier (off by default)"),
+    limit: int = typer.Option(0, "--limit", help="Only send the first N drafts (0 = all)"),
+    no_images: bool = typer.Option(False, "--no-images",
+                                   help="Send text-only; skip attaching the deal's feed image"),
+    pace_seconds: float = typer.Option(1.5, help="Delay between sends"),
+) -> None:
+    """DEV ONLY: push ALREADY-GENERATED jit_fill drafts for --day straight to `chat`,
+    without re-running any fetching/planning/AI-copy step. Use this when drafts
+    already exist in generated_posts (e.g. from an earlier collect_data.py run or
+    manual fill_due_slots call) and you just want them delivered now."""
+    from datetime import date as date_cls
+
+    from src.services.generation.dev_send import drafts_for_day, publish_drafts
+
+    try:
+        day_obj = date_cls.fromisoformat(day)
+    except ValueError:
+        console.print(f"[red]Invalid --day {day!r}, expected YYYY-MM-DD[/red]")
+        raise typer.Exit(code=1)
+    ids = drafts_for_day(day_obj, include_already_sent=include_sent)
+    if not ids:
+        console.print(f"[yellow]No pending drafts found for {day}.[/yellow]")
+        raise typer.Exit(code=0)
+    if limit > 0:
+        ids = ids[:limit]
+    console.print(f"Sending {len(ids)} draft(s) for {day} to {chat!r}...")
+    try:
+        results = publish_drafts(ids, chat, pace_seconds=pace_seconds, with_images=not no_images)
+    except Exception as e:  # noqa: BLE001 — surface any Telethon/config error directly to the operator
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    ok = sum(1 for r in results if r["ok"])
+    with_img = sum(1 for r in results if r.get("image"))
+    for r in results:
+        if not r["ok"]:
+            console.print(f"[red]  draft #{r['draft_id']} failed: {r['note']}[/red]")
+    console.print(f"[green]Sent {ok}/{len(results)} ({with_img} with image)[/green]")
+
+
 @app.command("coach")
 def coach(question: str = typer.Argument(..., help="Your growth question")) -> None:
     """Ask the agentic growth coach — it queries the engines and answers, grounded."""
     from src.ai.client import AIUnavailable
     from src.ai.coach import GrowthCoach
+    from src.config.settings import get_settings
+    from src.services.ai_outputs import record_ai_output
 
     try:
-        console.print(GrowthCoach().ask(question))
+        answer = GrowthCoach().ask(question)
+        console.print(answer)
+        record_ai_output("coach_qa", f"Q: {question}\nA: {answer}", get_settings().ai_model)
     except AIUnavailable as e:
         console.print(f"[yellow]{e}[/yellow]")
         raise typer.Exit(code=1)
@@ -1161,26 +1215,10 @@ def pipeline(
                       + (f" — {job.error_message}" if job.error_message else ""))
     console.print("[green]Pipeline complete.[/green]")
     if brief_after:
-        from src.ai.briefing import BriefingGenerator
-        from src.ai.client import AIUnavailable
-        try:
-            console.print("\n[bold]AI briefing:[/bold]\n" + BriefingGenerator().generate())
-        except AIUnavailable as e:
-            console.print(f"[dim]AI briefing skipped: {e}[/dim]")
-
-
-@app.command("run")
-def run() -> None:
-    """Start the scheduler and run continuously (Ctrl-C to stop)."""
-    scheduler = CollectionScheduler()
-    scheduler.start()
-    console.print("[green]Collection scheduler running.[/green] Press Ctrl-C to stop.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        scheduler.shutdown()
-        console.print("stopped.")
+        from src.controllers.service import digest as _digest
+        d = _digest().get("digest")
+        if d:
+            console.print("\n[bold]Plan digest:[/bold]\n" + d)
 
 
 @app.command("status")
@@ -1404,13 +1442,12 @@ def automate(
             console.print("[dim]Blocked = the account lacks admin post rights, or affiliate "
                           "integration is pending. This is expected on a member account.[/dim]")
         return
-    sched.start()
-    console.print("[green]Automation running.[/green] Press Ctrl-C to stop.")
+    console.print(f"[green]Automation running[/green] (poll {poll}s). Press Ctrl-C to stop.")
     try:
         while True:
-            time.sleep(1)
+            sched.process_due()
+            time.sleep(poll)
     except KeyboardInterrupt:
-        sched.shutdown()
         console.print("stopped.")
 
 

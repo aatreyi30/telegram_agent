@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import statistics
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
@@ -114,14 +114,26 @@ class DealEnrichmentEngine:
 
     def enrich_batch(self, raw_deals: list[RawDeal]) -> list[EnrichedDeal]:
         parsed = [self._pre_parse(rd) for rd in raw_deals]
-        discounts = [p["discount_percent"] for p in parsed if p["discount_percent"] is not None]
-        # data-derived loot threshold: top quartile of observed discounts (>= 4 samples)
-        loot_threshold = (statistics.quantiles(discounts, n=4)[-1]
-                          if len(discounts) >= 4 else None)
+        batch_discounts = [p["discount_percent"] for p in parsed if p["discount_percent"] is not None]
+        loot_threshold = self._loot_threshold(batch_discounts)
         out = []
         for rd, p in zip(raw_deals, parsed):
             out.append(self._finalize(rd, p, loot_threshold))
         return out
+
+    def _loot_threshold(self, batch_discounts: list[float]) -> float | None:
+        """Data-derived top-quartile discount (RULE 3 — no hardcoded threshold), but
+        over a 30-day ROLLING history of enriched deals blended with the current batch,
+        not the batch alone. The batch-only version left `is_loot` NULL for ~63% of
+        deals (any batch with <4 discounts) and made "loot" flip meaning day to day."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        hist = self.s.execute(
+            select(EnrichedDeal.discount_percent)
+            .where(EnrichedDeal.discount_percent.is_not(None),
+                   EnrichedDeal.created_at >= cutoff)
+        ).all()
+        pool = [d for (d,) in hist if d is not None] + list(batch_discounts)
+        return statistics.quantiles(pool, n=4)[-1] if len(pool) >= 4 else None
 
     # ------------------------------------------------------------------ #
     def _pre_parse(self, rd: RawDeal) -> dict:
@@ -130,8 +142,14 @@ class DealEnrichmentEngine:
         current = _to_float(rd.scraped_price)
         mrp = _to_float(rd.scraped_mrp)
         discount_pct = _to_float(rd.discount)
-        # derive discount from prices when not given, but never guess when absent
-        if discount_pct is None and current is not None and mrp and mrp > 0 and current <= mrp:
+        # reject implausible SOURCE discounts (100% "free", negatives, >100) — that's
+        # corrupt feed data, not a real deal; a 100% off means current=0 which no real
+        # shopper deal has. Fall through to price-derivation below.
+        if discount_pct is not None and not (0 <= discount_pct < 100):
+            discount_pct = None
+        # derive discount from prices when not given, but never guess when absent.
+        # current > 0 keeps a bad current=0 row from deriving a bogus 100%.
+        if discount_pct is None and current is not None and current > 0 and mrp and mrp > 0 and current <= mrp:
             discount_pct = round((1 - current / mrp) * 100, 1)
         return {"merchant_key": merchant_key, "current": current, "mrp": mrp,
                 "discount_percent": discount_pct}

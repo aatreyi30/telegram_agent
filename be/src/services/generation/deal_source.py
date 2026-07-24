@@ -1,20 +1,29 @@
 """Live deal source connector (the "Scraping Layer" in source_truth/06).
 
-Fetches TODAY's latest deals from the operator's deal-scraping platform, maps
-them into the raw-deal contract, and hands them to the Deal Enrichment Engine.
-This is the correct input for NEW posts — never recycled historical links.
+Fetches TODAY's latest deals from the GrabCash EXPORT API, one retailer at a
+time, maps them into the raw-deal contract, and hands them to the Deal
+Enrichment Engine. This is the correct input for NEW posts — never recycled
+historical links.
+
+Source: GrabCash export API (https://deals.grabcash.in/api/v1/export/deals).
+Auth is a query param (`key=<API_SECRET_KEY>`), unlike the older `/deals`
+endpoint which took the key via header/bearer — see DEAL_API_AUTH below,
+still used by the Camoufox fallback. Queried once per allowed retailer
+(`?retailer=<key>`) so the merchant allow-list is enforced at the source
+instead of by filtering an unfiltered over-fetch afterward.
 
 Configuration (.env):
-  DEAL_API_BASE       full URL of the "latest deals" endpoint (required)
-  API_SECRET_KEY      credential for the platform
-  DEAL_API_AUTH       how the key is sent: "bearer" (Authorization: Bearer <key>),
-                      "header:<Name>" (e.g. header:X-API-Key), or "query:<param>"
-                      (e.g. query:api_key). Default: bearer.
+  DEAL_API_BASE       full URL of the legacy "latest deals" endpoint, used
+                      only by the Camoufox stealth-browser fallback below
+  API_SECRET_KEY      credential for the platform (export API's `key` param)
+  DEAL_API_AUTH       how the Camoufox fallback sends the key: "bearer",
+                      "header:<Name>" (e.g. header:X-API-Key), or "query:<param>".
+                      Default: bearer.
 
 Honesty: the response FIELD MAPPING below covers common names, but a real API's
 schema must be confirmed. `fetch-deals` logs the first raw item so the mapping
-can be verified/corrected before trusting generated posts. If DEAL_API_BASE is
-unset, the connector reports UNAVAILABLE (it never fabricates deals).
+can be verified/corrected before trusting generated posts. If no API key is
+configured, the connector reports UNAVAILABLE (it never fabricates deals).
 """
 
 from __future__ import annotations
@@ -24,10 +33,14 @@ import os
 import httpx
 
 from src.config.settings import get_settings
+from src.services.collection.deal_scraper import ALLOWED_MERCHANTS
+from src.services.generation.constants import PRICE_FIELD_ALIASES
 from src.services.generation.enrichment import RawDeal
 from src.logger import get_logger
 
 logger = get_logger(__name__)
+
+EXPORT_URL = "https://deals.grabcash.in/api/v1/export/deals"
 
 # Field names verified against the live GrabCash API response
 # (https://deals.grabcash.in/api/v1/deals). Aliases kept for resilience.
@@ -36,7 +49,7 @@ _FIELD_ALIASES = {
     "url": ["original_url", "url", "link", "deal_url", "product_url"],
     "merchant_url": ["merchant_url", "store_url", "source_url"],
     "image": ["image_url", "image", "img", "thumbnail"],
-    "scraped_price": ["discount_price", "scraped_price", "price", "current_price", "sale_price"],
+    "scraped_price": list(PRICE_FIELD_ALIASES),
     "scraped_mrp": ["mrp", "scraped_mrp", "original_price", "list_price"],
     "discount": ["discount_percentage", "discount", "discount_percent", "off"],
     "timestamp": ["ingested_at", "timestamp", "created_at", "posted_at"],
@@ -76,16 +89,6 @@ def _map_item(item: dict, source: str) -> RawDeal:
     )
 
 
-def _extract_items(payload) -> list[dict]:
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
-        for key in ("deals", "data", "results", "items", "products"):
-            if isinstance(payload.get(key), list):
-                return payload[key]
-    return []
-
-
 class DealSourceClient:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -95,53 +98,78 @@ class DealSourceClient:
         self.source = os.environ.get("DEAL_API_SOURCE", "deal_api")
 
     def available(self) -> tuple[bool, str | None]:
-        if not self.base:
-            return False, ("Deal source not configured. Set DEAL_API_BASE to the latest-deals "
-                           "endpoint (and API_SECRET_KEY) in .env.")
+        if not self.key:
+            return False, "Deal source not configured. Set API_SECRET_KEY in .env."
         return True, None
 
-    def _auth_kwargs(self) -> dict:
-        headers, params = {}, {}
-        if self.key:
-            if self.auth == "bearer":
-                headers["Authorization"] = f"Bearer {self.key}"
-            elif self.auth.startswith("header:"):
-                headers[self.auth.split(":", 1)[1]] = self.key
-            elif self.auth.startswith("query:"):
-                params[self.auth.split(":", 1)[1]] = self.key
-        return {"headers": headers, "params": params}
-
-    def _fetch_httpx(self, want: int, page_size: int) -> list[dict]:
-        """Direct API pull (fast path). Raises on Cloudflare 403 / network error."""
+    def _fetch_retailer_httpx(self, retailer: str, want: int, page_size: int,
+                              min_price: float | None = None,
+                              max_price: float | None = None) -> list[dict]:
+        """One retailer's pool from the GrabCash export API (fast path). Auth is the
+        `key` query param — NOT the header/bearer scheme the old /deals endpoint used.
+        Optional `min_price`/`max_price` push a price filter to the source (verified
+        params: server returns only deals within the band) — used for price-tier loots.
+        Paginates using the response's `total` vs items collected so far. Raises on
+        Cloudflare 403 / network error."""
         collected: list[dict] = []
         page = 1
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             while len(collected) < want:
-                kw = self._auth_kwargs()
-                kw["params"] = {**kw.get("params", {}), "page": page, "page_size": page_size}
-                resp = client.get(self.base, **kw)
+                params = {"key": self.key, "retailer": retailer,
+                          "page_size": page_size, "page": page}
+                if min_price is not None:
+                    params["min_price"] = int(min_price)
+                if max_price is not None:
+                    params["max_price"] = int(max_price)
+                resp = client.get(EXPORT_URL, params=params)
                 resp.raise_for_status()
                 payload = resp.json()
-                items = _extract_items(payload)
+                items = payload.get("items") or []
                 if not items:
                     break
                 collected.extend(items)
-                total_pages = payload.get("pages") if isinstance(payload, dict) else None
-                if total_pages and page >= total_pages:
+                if len(collected) >= (payload.get("total") or 0):
                     break
                 page += 1
-        return collected
+        return collected[:want]
 
-    def _collect_raw(self, want: int, page_size: int) -> list[dict]:
-        """Raw deal dicts via the direct API, falling back to the Camoufox stealth
-        browser when Cloudflare blocks the plain client (403)."""
+    def _collect_raw(self, want: int, page_size: int, min_price: float | None = None,
+                     max_price: float | None = None) -> list[dict]:
+        """Raw deal dicts via the export API, queried once per allowed retailer and
+        merged, falling back to the Camoufox stealth browser when Cloudflare blocks
+        the plain client (403) or the export calls fail outright. `min_price`/`max_price`
+        (when given) filter at the source for price-tier loots."""
+        per_retailer_want = max(-(-want // len(ALLOWED_MERCHANTS)), 1)  # ceil division
         try:
-            items = self._fetch_httpx(want, page_size)
-            if items:
-                logger.info("[deal_source] fetched %d items via direct API", len(items))
-                return items
-            logger.warning("[deal_source] direct API returned no items; trying browser")
-        except Exception as e:  # 403 / network / schema
+            collected: list[dict] = []
+            for retailer in sorted(ALLOWED_MERCHANTS):
+                items = self._fetch_retailer_httpx(retailer, per_retailer_want, page_size,
+                                                   min_price=min_price, max_price=max_price)
+                logger.info("[deal_source] fetched %d items for retailer=%s via export API",
+                            len(items), retailer)
+                collected.extend(items)
+            if collected:
+                return collected
+            logger.warning("[deal_source] export API returned no items for any retailer; "
+                            "trying browser")
+        except httpx.HTTPStatusError as e:
+            # Log the ACTUAL failure, not just str(e): status, whether Cloudflare's
+            # edge WAF blocked us (common — the request never reaches the app, so the
+            # API key is irrelevant), and a short body snippet. Then fall back.
+            resp = e.response
+            body = " ".join((resp.text or "")[:300].split())
+            is_cf = "cloudflare" in resp.headers.get("server", "").lower()
+            blocked = is_cf and ("Attention Required" in resp.text
+                                 or "you have been blocked" in resp.text)
+            logger.warning(
+                "[deal_source] direct API HTTP %s at %s%s (cf-ray=%s); body[:300]=%r; "
+                "falling back to Camoufox browser",
+                resp.status_code, e.request.url,
+                " - Cloudflare bot-block (edge WAF, request never reached the app; "
+                "API key is not the issue)" if blocked else "",
+                resp.headers.get("cf-ray", "-"), body,
+            )
+        except Exception as e:  # network / schema / other
             logger.warning("[deal_source] direct API failed (%s); using Camoufox browser", e)
         from src.services.collection.deal_scraper import CamoufoxDealSource
         return CamoufoxDealSource().fetch_raw(want=want, page_size=page_size)

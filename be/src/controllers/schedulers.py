@@ -26,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.logger import get_logger
+from src.controllers import cadences as C
 
 logger = get_logger(__name__)
 _RETRY_DELAYS_MIN = [5, 15, 30]
@@ -45,6 +46,55 @@ class Job:
     trigger: object       # APScheduler trigger
     priority: str         # critical | high | medium | low
     fn: Callable[[], dict]
+
+
+# --------------------------------------------------------------------------- #
+# Trigger+label builders — each returns (cadence_label, trigger) together so
+# the two can never say different things about when a job runs.
+# --------------------------------------------------------------------------- #
+def _every_min(n: int):
+    return f"every {n} min", IntervalTrigger(minutes=n)
+
+
+def _every_hr(n: int):
+    return f"every {n} h", IntervalTrigger(hours=n)
+
+
+def _daily(hm: tuple[int, int]):
+    h, m = hm
+    return f"daily {h:02d}:{m:02d} IST", CronTrigger(hour=h, minute=m)
+
+
+def _weekly(dow: str, hm: tuple[int, int]):
+    h, m = hm
+    return f"{dow.capitalize()} {h:02d}:{m:02d} IST", CronTrigger(day_of_week=dow, hour=h, minute=m)
+
+
+def _monthly(day: int, hm: tuple[int, int]):
+    h, m = hm
+    suffix = "st" if day == 1 else ("nd" if day == 2 else ("rd" if day == 3 else "th"))
+    return f"{day}{suffix} {h:02d}:{m:02d} IST", CronTrigger(day=day, hour=h, minute=m)
+
+
+def _cron_overdue_threshold(trigger) -> "timedelta | None":
+    """How stale a cron job's last run may be before we treat it as missed and catch it
+    up on boot. None for interval jobs (they fire on their own). The memory jobstore
+    recomputes next_run_time as a FUTURE time on every restart, so a daily/weekly job
+    whose window passed while the process was down is otherwise skipped forever — the
+    'frozen since July 15' bug. Thresholds allow one full period + slack."""
+    if not isinstance(trigger, CronTrigger):
+        return None
+    fields = {f.name: f for f in trigger.fields}
+
+    def _set(name: str) -> bool:
+        f = fields.get(name)
+        return f is not None and not f.is_default
+
+    if _set("day_of_week"):
+        return timedelta(days=8)     # weekly
+    if _set("day"):
+        return timedelta(days=32)    # monthly
+    return timedelta(hours=26)       # daily
 
 
 # --------------------------------------------------------------------------- #
@@ -73,27 +123,20 @@ def j_competitor_sync() -> dict:
     from src.config.settings import get_settings
     from src.db.models import CollectionType
     from src.services.collection.telegram_competitor import CompetitorCollector
-    added = 0
-    r = _job_runner()
-    for u in get_settings().competitor_channels:
-        job = r.run_collector(CompetitorCollector(u, max_pages=1),
-                              collection_type=CollectionType.INCREMENTAL, target=u)
-        added += job.records_added or 0
-    # also pull tracked (discovered) competitors from the DB
     from sqlalchemy import select
     from src.db.models import Competitor
     from src.db.session import session_scope
+    added = 0
+    r = _job_runner()
+    # Only use discovered competitors from database (no env var dependency),
+    # and only ones the operator hasn't turned monitoring off for.
     with session_scope() as s:
-        extra = [c.username for c in s.scalars(select(Competitor)) if c.username]
-    for u in extra:
-        if u in get_settings().competitor_channels:
-            continue
-        try:
-            job = r.run_collector(CompetitorCollector(u, max_pages=1),
-                                  collection_type=CollectionType.INCREMENTAL, target=u)
-            added += job.records_added or 0
-        except Exception:
-            pass
+        usernames = [c.username for c in s.scalars(
+            select(Competitor).where(Competitor.monitoring_enabled.is_(True))) if c.username]
+    for u in usernames:
+        job = r.run_collector(CompetitorCollector(u, max_pages=5),
+                              collection_type=CollectionType.INCREMENTAL, target=u)
+        added += job.records_added or 0
     return {"processed": added, "detail": f"+{added} competitor posts"}
 
 
@@ -110,25 +153,16 @@ def j_stats_refresh() -> dict:
     return {"processed": n, "detail": f"views refreshed (reactions/forwards need admin/bot)"}
 
 
+def j_link_resolution() -> dict:
+    from src.services.collection.link_resolution import LinkResolutionEngine
+    n = _run_engine(LinkResolutionEngine(), "link_resolution")
+    return {"processed": n, "detail": f"resolved up to {n} shortlinks"}
+
+
 def _run_engine(engine, target) -> int:
     from src.db.models import CollectionType
     job = _job_runner().run_collector(engine, collection_type=CollectionType.MANUAL, target=target)
     return (job.records_added or 0) + (job.records_updated or 0)
-
-
-def j_deal_ranking() -> dict:
-    return {"processed": 0, "status": "limited",
-            "detail": "limited: ranking runs at generation time; live re-score needs stored per-deal metrics"}
-
-
-def j_price_history() -> dict:
-    return {"processed": 0, "status": "limited",
-            "detail": "limited: per-product price scraping unavailable for most merchants (blocked/no API)"}
-
-
-def j_deal_monitoring() -> dict:
-    return {"processed": 0, "status": "limited",
-            "detail": "limited: per-deal stock/price checks need per-merchant scraping; URL/expiry via url_health"}
 
 
 def j_growth_detection() -> dict:
@@ -137,40 +171,71 @@ def j_growth_detection() -> dict:
     return {"processed": n, "detail": "growth recommendations refreshed"}
 
 
+def j_competitor_discover() -> dict:
+    """Discover new competitor channels. Runs on its own cadence, ahead of sync,
+    so newly added competitors get their posts collected by j_competitor_sync
+    before j_competitor_intel profiles them (fixes the same-tick ordering bug)."""
+    from src.services.collection.discovery import discover_competitors
+    result = discover_competitors(max_add=5)
+    if result.get("status") == "disabled":
+        return {"processed": 0, "status": "limited",
+                "detail": "limited: auto_discover_competitors is off (Settings > Org)"}
+    added = result.get("added", 0)
+    return {"processed": added, "detail": f"+{added} competitors discovered"}
+
+
 def j_competitor_intel() -> dict:
-    # discover first, THEN generate competitor intelligence over all tracked channels
-    added = 0
-    try:
-        from src.services.collection.discovery import discover_competitors
-        added = discover_competitors(max_add=5).get("added", 0)
-    except Exception as e:
-        logger.warning("[sched] discovery skipped: %s", e)
+    # profile ONLY over competitors that already have collected posts;
+    # discovery runs separately in j_competitor_discover (see above)
     from src.services.intelligence.competitor import CompetitorIntelligenceEngine
     n = _run_engine(CompetitorIntelligenceEngine(), "competitor-intel")
-    return {"processed": n, "detail": f"+{added} discovered; competitor intel refreshed"}
-
-
-def _briefing(weekly=False) -> str:
-    from src.ai.briefing import BriefingGenerator
-    return BriefingGenerator().generate(weekly=weekly)
-
-
-def j_ai_daily_summary() -> dict:
-    try:
-        txt = _briefing(False)
-        return {"processed": 1, "detail": (txt or "").split("\n")[0][:80]}
-    except Exception as e:
-        return {"processed": 0, "status": "limited", "detail": f"limited: AI unavailable ({e})"}
+    return {"processed": n, "detail": "competitor intel refreshed"}
 
 
 def j_weekly_report() -> dict:
+    from datetime import timedelta
     from src.services.planning.campaign import CampaignPlanningEngine
-    _run_engine(CampaignPlanningEngine(), "plan")     # ensure weekly plan is fresh
+    from src.db.session import session_scope
+    _run_engine(CampaignPlanningEngine(), "plan")     # ensure deterministic weekly plan is fresh
+
+    # Structured AI weekly plan: analyses last week's merchant traction + post-type
+    # performance and directs this week's loot:deal ratio + per-day themes. Stored as
+    # the most-recent WEEKLY row so the daily planner's this_week_theme lookup picks it.
+    ai_note = "AI weekly plan skipped"
     try:
-        _briefing(True)
-        return {"processed": 1, "detail": "weekly plan + AI summary refreshed"}
-    except Exception:
-        return {"processed": 1, "detail": "weekly plan refreshed (AI summary skipped)"}
+        from src.controllers.service import ensure_weekly_ai_plan
+        from src.services.analytics.periods import ist_today
+        with session_scope() as s:
+            ws = ist_today() - timedelta(days=ist_today().weekday())
+            # Route through the shared merge path so the AI's loot_deal_ratio /
+            # merchant_priorities / daily_themes actually land in the persisted blueprint
+            # (they were dropped when this job persisted the raw AI plan directly).
+            wk = ensure_weekly_ai_plan(s, ws, ws + timedelta(days=6))
+            themes = (wk.blueprint or {}).get("daily_themes") if wk else None
+            ai_note = (f"AI weekly plan: {len(themes or [])} day themes"
+                       if wk else "AI weekly plan skipped")
+    except Exception as e:
+        ai_note = f"AI weekly plan skipped ({e})"
+
+    return {"processed": 1, "detail": f"weekly plan refreshed — {ai_note}"}
+
+
+def j_weekly_retro() -> dict:
+    """Phase 2.4 -- builds the WeeklyRetro for the week that just ended (the
+    IST Monday->Sunday preceding today), so weekly_report/weekly_brief right
+    after it (08:30) can read a fresh retro. Runs every Monday at 07:30 IST --
+    30 min before weekly_report -- see cadences.WEEKLY_RETRO_TIME."""
+    from src.db.session import session_scope
+    from src.services.analytics.periods import to_ist
+    from src.services.analytics.retro import build_weekly_retro
+
+    today_ist = to_ist(_now()).date()
+    this_monday = today_ist - timedelta(days=today_ist.weekday())
+    week_start = this_monday - timedelta(days=7)
+    with session_scope() as s:
+        row = build_weekly_retro(s, week_start)
+        n_adj = len(row.metrics.get("adjustments") or [])
+    return {"processed": 1, "detail": f"retro for week of {week_start.isoformat()} — {n_adj} adjustment(s)"}
 
 
 def j_monthly_report() -> dict:
@@ -190,12 +255,24 @@ def j_learning() -> dict:
     return {"processed": n, "detail": "learning dataset (emoji/CTA/merchant/category) rebuilt"}
 
 
+def j_reasoning() -> dict:
+    """Persist ReasonedInsight rows (the 'what changed and why' the plan prompts consume).
+    Was only reachable via the manual pipeline button, so reasoned_insights never
+    populated on a cadence — the daily/weekly prompts' reasoning section stayed empty."""
+    from src.services.intelligence.reasoning import ReasoningEngine
+    n = _run_engine(ReasoningEngine(), "reason")
+    return {"processed": n, "detail": "reasoned insights rebuilt", "status": "limited" if not n else "success"}
+
+
 def j_queue_processor() -> dict:
     from src.services.automation.scheduler import PostingScheduler
     stats = PostingScheduler().process_due(pacing_seconds=0)
+    reclaimed = stats.get("reclaimed", 0)
+    detail = f"{stats.get('due',0)} due · {stats.get('blocked',0)} blocked (send gated on admin)"
+    if reclaimed:
+        detail += f" · reclaimed {reclaimed} stuck 'sending'"
     return {"processed": stats.get("due", 0), "success": stats.get("published", 0),
-            "failure": stats.get("failed", 0),
-            "detail": f"{stats.get('due',0)} due · {stats.get('blocked',0)} blocked (send gated on admin)"}
+            "failure": stats.get("failed", 0), "detail": detail}
 
 
 def _url_health(limit: int) -> dict:
@@ -221,20 +298,16 @@ def _url_health(limit: int) -> dict:
             "detail": f"{ok} ok / {broken} broken of {len(urls[:limit])} checked"}
 
 
-def j_deal_expiry() -> dict:
-    return _url_health(limit=15)
-
-
 def j_url_health() -> dict:
     return _url_health(limit=40)
 
 
-def j_analytics_aggregation() -> dict:
-    from src.services.analytics import views as vv
-    from src.db.session import session_scope
-    with session_scope() as s:
-        a = vv.compute(s)
-    return {"processed": a.get("total_posts", 0), "detail": f"aggregated {a.get('total_posts',0)} posts"}
+def j_normalize_posts() -> dict:
+    from src.db.models import CollectionType
+    from src.services.processing.normalizer import PostNormalizer
+    r = _job_runner()
+    job = r.run_collector(PostNormalizer(), collection_type=CollectionType.INCREMENTAL, target="normalize")
+    return {"processed": job.records_added or 0, "detail": f"{job.records_added} owned + {job.records_updated} competitor normalized"}
 
 
 def j_merchant_feed_sync() -> dict:
@@ -258,13 +331,20 @@ def j_notification_engine() -> dict:
     from src.db.models_scheduler import RunStatus, SchedulerRun
     from src.db.session import session_scope
     with session_scope() as s:
-        blocked = s.scalar(select(func.count()).select_from(ScheduledPost)
-                           .where(ScheduledPost.status == ScheduleStatus.BLOCKED)) or 0
+        blocked_errors = s.scalars(select(ScheduledPost.last_error)
+                                   .where(ScheduledPost.status == ScheduleStatus.BLOCKED)).all()
         failed = s.scalar(select(func.count()).select_from(SchedulerRun)
                           .where(SchedulerRun.status == RunStatus.FAILED)) or 0
+    blocked = len(blocked_errors)
     alerts = []
     if blocked:
-        alerts.append(f"{blocked} posts blocked (need admin rights)")
+        # Report the ACTUAL block reason (last_error prefix), not a blanket
+        # "need admin rights" — most live blocks were revalidation timeouts, and the
+        # old wording sent operators to check permissions that were never the problem.
+        from collections import Counter
+        reasons = Counter((e or "unknown").split(":")[0].strip() for e in blocked_errors)
+        reason_str = ", ".join(f"{n}×{r}" for r, n in reasons.most_common(3))
+        alerts.append(f"{blocked} posts blocked ({reason_str})")
     if failed:
         alerts.append(f"{failed} scheduler failures")
     return {"processed": len(alerts), "status": "limited" if not alerts else "success",
@@ -287,52 +367,107 @@ def j_org_health() -> dict:
 
 
 def j_daily_plan() -> dict:
-    from src.services.generation.daily_planner import build_and_schedule_day
+    """Generate today's AI daily plan (per-post slots: window/type/theme/merchant).
+    The slots are filled with fresh inventory just-in-time by `jit_fill` — this job
+    only produces the plan, it no longer pre-renders drafts (which went stale)."""
+    from src.controllers.service import ensure_daily_ai_plan
+    from src.services.analytics.periods import ist_today
     from src.db.session import session_scope
     with session_scope() as s:
-        r = build_and_schedule_day(s)
+        row = ensure_daily_ai_plan(s, ist_today())
+        n = len((row.blueprint or {}).get("post_slots") or []) if row else 0
+    if row is None:
+        return {"processed": 0, "status": "limited",
+                "detail": "no AI daily plan (AI unavailable or no owned data yet)"}
+    return {"processed": n, "detail": f"AI daily plan ready: {n} slots (filled just-in-time)"}
+
+
+def j_jit_fill() -> dict:
+    """Fill AI-plan slots due within the lookahead with fresh, just-scraped deals."""
+    from src.services.generation.jit_fill import fill_due_slots
+    from src.db.session import session_scope
+    with session_scope() as s:
+        r = fill_due_slots(s)
     if not r.get("ok"):
         return {"processed": 0, "status": "limited", "detail": f"limited: {r.get('reason')}"}
-    return {"processed": len(r["scheduled"]),
-            "detail": f"{len(r['scheduled'])} category posts queued across "
-                      f"{len(r['categories'])} categories at proven hours (deduped)"}
+    return {"processed": r.get("filled", 0),
+            "detail": f"filled {r.get('filled', 0)}/{r.get('due', 0)} due slots fresh"}
+
+
+def j_daily_report() -> dict:
+    """Persist yesterday's DailyChannelReport rows (owned + competitor)."""
+    from src.db.session import session_scope
+    from src.services.analytics.daily_report import run_daily_reports
+    with session_scope() as s:
+        return run_daily_reports(s)  # defaults to latest owned date
+
+
+def j_outcome_collector() -> dict:
+    from src.services.analytics.outcomes import collect_due_outcomes
+    from src.db.session import session_scope
+    with session_scope() as s:
+        n = collect_due_outcomes(s)
+    return {"processed": n, "detail": f"{n} post outcomes advanced"}
 
 
 def j_db_cleanup() -> dict:
+    from sqlalchemy import func, select
     from src.db.models import CollectionEvent
+    from src.db.models_competitor_intel import CompetitorBenchmark, CompetitorProfile
     from src.db.models_scheduler import SchedulerRun
     from src.db.session import session_scope
     cutoff = _now() - timedelta(days=30)
+    intel_cutoff = _now() - timedelta(days=90)
     removed = 0
     with session_scope() as s:
         removed += s.query(SchedulerRun).filter(SchedulerRun.started_at < cutoff).delete()
         removed += s.query(CollectionEvent).filter(CollectionEvent.created_at < cutoff).delete()
-    return {"processed": removed, "detail": f"pruned {removed} old log rows (>30d)"}
+
+        # Competitor intel (0.1): keep 90 days of snapshot history, but never drop a
+        # competitor's newest snapshot even if it's older than that (so a competitor
+        # profiled only once, long ago, doesn't lose its only data point).
+        for model in (CompetitorProfile, CompetitorBenchmark):
+            latest_per_competitor = dict(s.execute(
+                select(model.competitor_id, func.max(model.computed_at))
+                .group_by(model.competitor_id)
+            ).all())
+            stale = s.scalars(select(model).where(model.computed_at < intel_cutoff)).all()
+            for row in stale:
+                if row.computed_at == latest_per_competitor.get(row.competitor_id):
+                    continue
+                s.delete(row)
+                removed += 1
+    return {"processed": removed, "detail": f"pruned {removed} old rows (>30d logs, >90d competitor intel)"}
 
 
 # --------------------------------------------------------------------------- #
 JOBS: list[Job] = [
-    Job("telegram_sync", "Telegram Channel Sync", "every 5 min", IntervalTrigger(minutes=5), "critical", j_telegram_sync),
-    Job("competitor_sync", "Competitor Channel Sync", "every 10 min", IntervalTrigger(minutes=10), "high", j_competitor_sync),
-    Job("stats_refresh", "Message Statistics Refresh", "every 30 min", IntervalTrigger(minutes=30), "high", j_stats_refresh),
-    Job("deal_monitoring", "Deal Monitoring", "every 2 h", IntervalTrigger(hours=2), "critical", j_deal_monitoring),
-    Job("price_history", "Price History Update", "every 6 h", IntervalTrigger(hours=6), "medium", j_price_history),
-    Job("deal_ranking", "Deal Ranking Engine", "every 30 min", IntervalTrigger(minutes=30), "high", j_deal_ranking),
-    Job("growth_detection", "Growth Opportunity Detection", "daily 06:00", CronTrigger(hour=6, minute=0), "medium", j_growth_detection),
-    Job("competitor_intel", "Competitor Intelligence", "daily 07:00", CronTrigger(hour=7, minute=0), "medium", j_competitor_intel),
-    Job("ai_daily_summary", "AI Daily Summary", "daily 08:00", CronTrigger(hour=8, minute=0), "medium", j_ai_daily_summary),
-    Job("weekly_report", "Weekly Report", "Mon 08:30", CronTrigger(day_of_week="mon", hour=8, minute=30), "medium", j_weekly_report),
-    Job("monthly_report", "Monthly Report", "1st 00:00", CronTrigger(day=1, hour=0, minute=5), "medium", j_monthly_report),
-    Job("learning", "AI Learning Dataset Builder", "daily 02:00", CronTrigger(hour=2, minute=0), "medium", j_learning),
-    Job("deal_expiry", "Deal Expiry Monitor", "every 1 h", IntervalTrigger(hours=1), "high", j_deal_expiry),
-    Job("queue_processor", "Scheduler Queue Processor", "every 1 min", IntervalTrigger(minutes=1), "critical", j_queue_processor),
-    Job("url_health", "URL Health Check", "every 12 h", IntervalTrigger(hours=12), "low", j_url_health),
-    Job("analytics_aggregation", "Analytics Aggregation", "every 1 h", IntervalTrigger(hours=1), "low", j_analytics_aggregation),
-    Job("merchant_feed_sync", "Merchant Feed Sync", "every 30 min", IntervalTrigger(minutes=30), "high", j_merchant_feed_sync),
-    Job("notification_engine", "Notification Engine", "every 5 min", IntervalTrigger(minutes=5), "medium", j_notification_engine),
-    Job("org_health", "Organization Health Check", "every 1 h", IntervalTrigger(hours=1), "low", j_org_health),
-    Job("db_cleanup", "Database Cleanup", "daily 03:00", CronTrigger(hour=3, minute=0), "low", j_db_cleanup),
-    Job("daily_plan", "Daily Post Planner", "daily 05:30 IST", CronTrigger(hour=5, minute=30), "high", j_daily_plan),
+    Job("telegram_sync", "Telegram Channel Sync", *_every_min(C.TELEGRAM_SYNC_MIN), "critical", j_telegram_sync),
+    Job("competitor_sync", "Competitor Channel Sync", *_every_min(C.COMPETITOR_SYNC_MIN), "high", j_competitor_sync),
+    Job("normalize_posts", "Post Normalizer", *_every_min(C.NORMALIZE_POSTS_MIN), "high", j_normalize_posts),
+    Job("stats_refresh", "Message Statistics Refresh", *_every_min(C.STATS_REFRESH_MIN), "high", j_stats_refresh),
+    # Defer reading runtime settings until SchedulerRegistry.start() to avoid
+    # calling get_settings() at module import time (startup/circular import issues).
+    # Use the default cadence constant here; the real cadence/trigger will be applied at start().
+    Job("link_resolution", "Shortlink Resolution", *_every_min(C.LINK_RESOLUTION_DEFAULT_MIN), "high", j_link_resolution),
+    Job("growth_detection", "Growth Opportunity Detection", *_daily(C.GROWTH_DETECTION_TIME), "medium", j_growth_detection),
+    Job("competitor_discover", "Competitor Discovery", *_daily(C.COMPETITOR_DISCOVER_TIME), "medium", j_competitor_discover),
+    Job("competitor_intel", "Competitor Intelligence", *_daily(C.COMPETITOR_INTEL_TIME), "medium", j_competitor_intel),
+    Job("weekly_retro", "Weekly Retro", *_weekly("mon", C.WEEKLY_RETRO_TIME), "medium", j_weekly_retro),
+    Job("weekly_report", "Weekly Report", *_weekly(C.WEEKLY_REPORT_DOW, C.WEEKLY_REPORT_TIME), "medium", j_weekly_report),
+    Job("monthly_report", "Monthly Report", *_monthly(C.MONTHLY_REPORT_DAY, C.MONTHLY_REPORT_TIME), "medium", j_monthly_report),
+    Job("reasoning", "AI Reasoning (Insights)", *_daily(C.REASONING_TIME), "medium", j_reasoning),
+    Job("learning", "AI Learning Dataset Builder", *_daily(C.LEARNING_TIME), "medium", j_learning),
+    Job("queue_processor", "Scheduler Queue Processor", *_every_min(C.QUEUE_PROCESSOR_MIN), "critical", j_queue_processor),
+    Job("url_health", "URL Health Check", *_every_hr(C.URL_HEALTH_HOURS), "low", j_url_health),
+    Job("merchant_feed_sync", "Merchant Feed Sync", *_every_min(C.MERCHANT_FEED_SYNC_MIN), "high", j_merchant_feed_sync),
+    Job("notification_engine", "Notification Engine", *_every_min(C.NOTIFICATION_ENGINE_MIN), "medium", j_notification_engine),
+    Job("outcome_collector", "Outcome Collector", *_every_min(C.OUTCOME_COLLECTOR_MIN), "high", j_outcome_collector),
+    Job("org_health", "Organization Health Check", *_every_hr(C.ORG_HEALTH_HOURS), "low", j_org_health),
+    Job("db_cleanup", "Database Cleanup", *_daily(C.DB_CLEANUP_TIME), "low", j_db_cleanup),
+    Job("daily_report", "Daily Channel Report", *_daily(C.DAILY_REPORT_TIME), "high", j_daily_report),
+    Job("daily_plan", "Daily Post Planner", *_daily(C.DAILY_PLAN_TIME), "high", j_daily_plan),
+    Job("jit_fill", "Just-in-Time Slot Fill", *_every_min(C.QUEUE_PROCESSOR_MIN), "high", j_jit_fill),
 ]
 
 
@@ -365,8 +500,12 @@ def _acquire_singleton_lock():
 
 class SchedulerRegistry:
     def __init__(self) -> None:
-        self._sched = BackgroundScheduler(timezone=IST_TZ,
-                                          job_defaults={"coalesce": True, "max_instances": 1})
+        self._sched = BackgroundScheduler(
+            timezone=IST_TZ,
+            # misfire_grace_time: tolerate a late run (e.g. after a brief restart) instead
+            # of silently dropping the tick. Cross-restart daily/weekly misses are handled
+            # by _catch_up_missed() since the memory jobstore can't track them.
+            job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 3600})
         self._by_key = {j.key: j for j in JOBS}
         self._attempts: dict[str, int] = {}
         self.enabled = False
@@ -390,12 +529,61 @@ class SchedulerRegistry:
     def start(self) -> dict:
         if not self._sched.running:
             self._sched.start()
+        # Apply runtime settings for jobs that depend on configuration. This
+        # avoids calling get_settings() at module import time which can cause
+        # startup-time NameError / circular import problems.
+        try:
+            from src.config.settings import get_settings
+            s = get_settings()
+            for j in JOBS:
+                if j.key == "link_resolution":
+                    j.cadence = f"every {s.link_resolve_interval_min} min"
+                    j.trigger = IntervalTrigger(minutes=s.link_resolve_interval_min)
+        except Exception:
+            # If settings aren't available, keep the safe default trigger.
+            pass
         for j in JOBS:
             self._sched.add_job(self._make(j.key), trigger=j.trigger, id=j.key,
                                 replace_existing=True)
         self.enabled = True
+        self._catch_up_missed()
         logger.info("[schedulers] started %d jobs", len(JOBS))
         return self.status()
+
+    def _catch_up_missed(self) -> None:
+        """Run any daily/weekly/monthly cron job that's overdue per SchedulerRun history.
+
+        Fixes the 'frozen since July 15' bug: interval jobs fire whenever the box is up,
+        but cron jobs only fire if the process is alive at their exact IST minute, and the
+        memory jobstore recomputes next_run_time as a future time on every boot — so a
+        missed daily/weekly window is never caught up. Here we compare each cron job's last
+        run against a per-cadence staleness threshold and schedule one staggered catch-up."""
+        from sqlalchemy import func, select
+        from src.db.models_scheduler import SchedulerRun
+        from src.db.session import session_scope
+
+        now = _now()
+        stagger = 0
+        try:
+            with session_scope() as s:
+                for j in JOBS:
+                    thresh = _cron_overdue_threshold(j.trigger)
+                    if thresh is None:
+                        continue  # interval job — fires on its own
+                    last = s.scalar(select(func.max(SchedulerRun.started_at))
+                                    .where(SchedulerRun.scheduler_key == j.key))
+                    if last is not None and last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    if last is None or (now - last) > thresh:
+                        stagger += 15
+                        self._sched.add_job(
+                            self._make(j.key), "date",
+                            run_date=now + timedelta(seconds=stagger),
+                            id=f"{j.key}__catchup", replace_existing=True)
+                        logger.info("[schedulers] catch-up scheduled for %s (last run: %s)",
+                                    j.key, last)
+        except Exception:
+            logger.exception("[schedulers] catch-up sweep failed")
 
     def stop(self) -> dict:
         for j in JOBS:

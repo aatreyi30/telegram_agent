@@ -18,7 +18,6 @@ from __future__ import annotations
 import time as _time
 from datetime import datetime, timedelta, timezone
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import or_, select
 
 from src.db.models_automation import ScheduledPost, ScheduleStatus
@@ -31,6 +30,11 @@ logger = get_logger(__name__)
 
 # permanent-failure signals in a publish note -> BLOCKED, do not retry
 _PERMANENT_STATUSES = {PostStatus.BLOCKED}
+
+# A real send finishes in seconds. A post left in SENDING far longer than that means the
+# worker died between "claim (mark SENDING)" and "record outcome" — it's stranded, because
+# _due_ids only ever re-selects QUEUED/RETRY. Reclaim it after this many minutes.
+_STALE_SENDING_MIN = 10
 
 
 def backoff_seconds(attempts: int) -> int:
@@ -48,7 +52,6 @@ class PostingScheduler:
         self.poll_interval_seconds = poll_interval_seconds
         self.send_pacing_seconds = send_pacing_seconds
         self.bus = get_event_bus()
-        self.scheduler = BackgroundScheduler(job_defaults={"coalesce": True, "max_instances": 1})
 
     # ------------------------------------------------------------------ #
     def _due_ids(self, now: datetime) -> list[int]:
@@ -65,14 +68,32 @@ class PostingScheduler:
             ).all()
             return list(rows)
 
+    def _reclaim_stale_sending(self, now: datetime) -> int:
+        """Reset posts stranded in SENDING (worker died mid-send) back to QUEUED so the
+        next tick reprocesses them — otherwise they sit past their fire time forever."""
+        cutoff = now - timedelta(minutes=_STALE_SENDING_MIN)
+        with session_scope() as s:
+            stale = s.scalars(select(ScheduledPost).where(
+                ScheduledPost.status == ScheduleStatus.SENDING,
+                ScheduledPost.scheduled_at < cutoff)).all()
+            for r in stale:
+                r.status = ScheduleStatus.QUEUED
+                r.last_error = "reclaimed: stuck in 'sending' (worker restarted mid-send)"
+            n = len(stale)
+        if n:
+            logger.warning("[scheduler] reclaimed %d stale 'sending' post(s) -> queued", n)
+        return n
+
     def process_due(self, now: datetime | None = None, publish_fn=None,
                     pacing_seconds: float | None = None) -> dict:
         """Process every due item once. Returns a stats dict."""
         now = now or datetime.now(timezone.utc)
         publish_fn = publish_fn or _default_publish_fn
         pacing = self.send_pacing_seconds if pacing_seconds is None else pacing_seconds
-        stats = {"due": 0, "published": 0, "blocked": 0, "retried": 0, "failed": 0, "errors": 0}
+        stats = {"due": 0, "published": 0, "blocked": 0, "retried": 0, "failed": 0,
+                 "errors": 0, "reclaimed": 0}
 
+        stats["reclaimed"] = self._reclaim_stale_sending(now)
         due_ids = self._due_ids(now)
         stats["due"] = len(due_ids)
         for i, sid in enumerate(due_ids):
@@ -150,14 +171,3 @@ class PostingScheduler:
         logger.info("[automation] processed %(due)d due: %(published)d published, "
                     "%(blocked)d blocked, %(retried)d retry, %(failed)d failed", stats)
         return stats
-
-    # ------------------------------------------------------------------ #
-    def start(self) -> None:
-        self.scheduler.add_job(self.process_due, "interval",
-                               seconds=self.poll_interval_seconds, id="posting_queue")
-        self.scheduler.start()
-        logger.info("posting scheduler started (poll every %ds)", self.poll_interval_seconds)
-
-    def shutdown(self) -> None:
-        self.scheduler.shutdown(wait=False)
-        logger.info("posting scheduler stopped")

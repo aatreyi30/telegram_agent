@@ -23,6 +23,7 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("org_id", "INTEGER"),
         ("kind", "VARCHAR(16) DEFAULT 'owned'"),
         ("status", "VARCHAR(16) DEFAULT 'active'"),
+        ("stats_synced_at", "DATETIME"),
     ],
     "generated_posts": [
         ("strategy_rationale", "JSON"),
@@ -33,7 +34,17 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("last_login_at", "DATETIME"),
     ],
     # multi-tenancy: attribute each derived row to a channel (backfilled by backfill_channel_id)
-    "campaign_plans": [("channel_id", "INTEGER")],
+    "campaign_plans": [
+        ("channel_id", "INTEGER"),
+        ("is_ai_generated", "BOOLEAN DEFAULT 0"),
+        ("ai_digest", "TEXT"),
+        ("cited_numbers", "JSON"),
+        ("factcheck_status", "VARCHAR(16)"),
+        ("report_ids", "JSON"),
+        ("adherence", "JSON"),
+        ("reconciliation", "JSON"),
+        ("operator_directive", "TEXT"),
+    ],
     "channel_style_profiles": [("channel_id", "INTEGER")],
     "post_type_performance": [("channel_id", "INTEGER")],
     "learning_records": [("channel_id", "INTEGER")],
@@ -41,7 +52,31 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
     "growth_recommendations": [("channel_id", "INTEGER")],
     "reasoned_insights": [("channel_id", "INTEGER")],
     "normalized_posts": [("channel_id", "INTEGER")],
+    "competitors": [
+        ("category", "VARCHAR(16)"),
+        ("resolution_confidence", "FLOAT"),
+        ("verified_by", "VARCHAR(16)"),
+        # per-competitor monitoring toggle; DEFAULT 1 keeps every existing
+        # competitor's cron behaviour unchanged after this column lands.
+        ("monitoring_enabled", "BOOLEAN DEFAULT 1"),
+    ],
+    # link resolution bookkeeping (async rewrite): distinguish "never attempted"
+    # (NULL) from "failed" / "resolved" / "no_match", and cap retries.
+    "extracted_links": [
+        ("resolution_status", "VARCHAR(16)"),
+        ("resolution_error", "TEXT"),
+        ("resolution_attempts", "INTEGER DEFAULT 0"),
+    ],
+    # gap-honesty: flag a subscriber-stat row whose joined/left/net total actually
+    # spans more than one calendar day (a collection outage), so it's never silently
+    # read as "one day's growth".
+    "daily_subscriber_stats": [("spans_days", "INTEGER DEFAULT 1")],
 }
+
+
+# tables whose ORM model was removed from the codebase; drop them from disk since
+# create_all() only ever creates tables, it never drops orphaned ones.
+_REMOVED_TABLES: tuple[str, ...] = ("channel_stat_snapshots", "competitor_signals", "deal_scores")
 
 
 def _existing_columns(conn, table: str) -> set[str]:
@@ -65,6 +100,22 @@ def add_missing_columns(engine: Engine) -> None:
                 if name not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {decl}"))
                     logger.info("[migrate] added %s.%s", table, name)
+
+
+def drop_removed_tables(engine: Engine) -> None:
+    """Drop tables whose ORM model has been deleted from the codebase. Idempotent:
+    ``DROP TABLE IF EXISTS`` is a no-op once the table is gone."""
+    if not engine.url.get_backend_name().startswith("sqlite"):
+        return  # this helper targets the project's SQLite store only
+    with engine.begin() as conn:
+        existing_tables = {
+            r[0] for r in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+        }
+        for table in _REMOVED_TABLES:
+            if table in existing_tables:
+                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+                logger.info("[migrate] dropped removed table %s", table)
 
 
 # derived tables that were computed from the single owned channel before multi-tenancy;
@@ -107,3 +158,55 @@ def backfill_channel_id(engine: Engine) -> None:
                                  {"c": primary}).rowcount
                 if n:
                     logger.info("[migrate] backfilled %s.channel_id -> %s (%s rows)", t, primary, n)
+
+
+def dedupe_and_index_campaign_plans(engine: Engine) -> None:
+    """Guard the daily/weekly AI-plan cache against the race where two
+    near-simultaneous requests both miss the cache and both persist a plan for the
+    same (campaign_version, plan_type, target_date, is_ai_generated) — that used to
+    silently create duplicate rows (and burn two AI calls) since the only index was
+    the non-unique ``ix_plan_type_date``.
+
+    Before adding the unique index, dedupe any rows that already violate it (keeping
+    the most-recently-generated row per group) — SQLite refuses to create a unique
+    index over data that isn't unique yet.
+    """
+    if not engine.url.get_backend_name().startswith("sqlite"):
+        return  # this helper targets the project's SQLite store only
+    with engine.begin() as conn:
+        existing_tables = {
+            r[0] for r in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+        }
+        if "campaign_plans" not in existing_tables:
+            return  # create_all will make it with the index already, nothing to dedupe
+
+        dupes = conn.execute(text(
+            "SELECT campaign_version, plan_type, target_date, is_ai_generated, COUNT(*) c "
+            "FROM campaign_plans "
+            "GROUP BY campaign_version, plan_type, target_date, is_ai_generated "
+            "HAVING c > 1"
+        )).fetchall()
+        deleted = 0
+        for cv, ptype, tdate, is_ai, _c in dupes:
+            # Keep the newest row (by generated_at) in each dupe group, delete the rest.
+            # target_date can be NULL; SQLite's IS/IS NOT handles that correctly, unlike =/!=.
+            keep = conn.execute(text(
+                "SELECT id FROM campaign_plans "
+                "WHERE campaign_version = :cv AND plan_type = :pt "
+                "AND target_date IS :td AND is_ai_generated IS :ai "
+                "ORDER BY generated_at DESC, id DESC LIMIT 1"
+            ), {"cv": cv, "pt": ptype, "td": tdate, "ai": is_ai}).scalar()
+            n = conn.execute(text(
+                "DELETE FROM campaign_plans "
+                "WHERE campaign_version = :cv AND plan_type = :pt "
+                "AND target_date IS :td AND is_ai_generated IS :ai AND id != :keep"
+            ), {"cv": cv, "pt": ptype, "td": tdate, "ai": is_ai, "keep": keep}).rowcount
+            deleted += n
+        if deleted:
+            logger.info("[migrate] deduped campaign_plans: deleted %s duplicate row(s)", deleted)
+
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_version_type_date_ai "
+            "ON campaign_plans (campaign_version, plan_type, target_date, is_ai_generated)"
+        ))

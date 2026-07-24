@@ -63,7 +63,18 @@ class SaleEvent(Base, TimestampMixin):
 
 class CampaignPlan(Base, TimestampMixin):
     __tablename__ = "campaign_plans"
-    __table_args__ = (Index("ix_plan_type_date", "plan_type", "target_date"),)
+    __table_args__ = (
+        Index("ix_plan_type_date", "plan_type", "target_date"),
+        # Guards the daily/weekly AI-plan cache against a race: two near-simultaneous
+        # requests for the same day both missing the cache and both persisting an
+        # AI-generated plan. SQLite treats each NULL as distinct, so this only
+        # constrains rows that actually have a target_date (all daily/weekly rows do).
+        Index(
+            "uq_plan_version_type_date_ai",
+            "campaign_version", "plan_type", "target_date", "is_ai_generated",
+            unique=True,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), index=True)
@@ -80,3 +91,15 @@ class CampaignPlan(Base, TimestampMixin):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(16), default="draft")  # draft/approved
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # --- AI analyst/planner provenance (rescue plan §2.5) ---
+    is_ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)
+    ai_digest: Mapped[str | None] = mapped_column(Text)
+    cited_numbers: Mapped[list | None] = mapped_column(JSON)
+    factcheck_status: Mapped[str | None] = mapped_column(String(16))  # passed|warn|failed|skipped
+    report_ids: Mapped[list | None] = mapped_column(JSON)             # DailyChannelReport ids fed to the model
+    # --- closed-loop feedback (§3.5) ---
+    adherence: Mapped[dict | None] = mapped_column(JSON)              # planned vs published (deterministic)
+    reconciliation: Mapped[dict | None] = mapped_column(JSON)         # expected-vs-actual + AI summary
+    # --- Steer & Regenerate: operator-supplied guidance the AI was asked to honor ---
+    operator_directive: Mapped[str | None] = mapped_column(Text)

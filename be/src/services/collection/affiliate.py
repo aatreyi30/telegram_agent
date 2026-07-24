@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from src.services.collection.base import BaseCollector, CollectorResult
 from src.services.collection.merchants.registry import detect_merchant_key
+from src.config.settings import get_settings
 from src.db.models import AffiliateLink, Merchant
 from src.db.session import session_scope
 from src.services.events import Event, EventType, get_event_bus
@@ -43,7 +44,7 @@ class AffiliateLinkCollector(BaseCollector):
             with httpx.Client(
                 timeout=20.0,
                 follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; TGIntelBot/1.0)"},
+                headers={"User-Agent": get_settings().tme_user_agent},
             ) as client:
                 resp = client.get(self.short_url)
                 resolved_url = str(resp.url)

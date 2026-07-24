@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens: white / Telegram blue / black. Note these are bare HSL
+ * triplets ("H S% L%"), NOT full oklch()/hsl() values — tailwind.config.ts
+ * consumes every one of these via hsl(var(--x)), so a token defined as a full
+ * color function (e.g. oklch(...)) produces invalid nested CSS like
+ * hsl(oklch(...)) that browsers silently drop, which is why colors weren't
+ * rendering correctly before. Keep every token below a bare triplet.
+ */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 9%;
+
+    /* Telegram blue */
+    --primary: 200 100% 40%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 9%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 200 100% 95%;
+    --accent-foreground: 200 100% 28%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142 71% 40%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 222 47% 9%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 200 100% 40%;
+    --radius: 0.625rem;
+
+    /* Sidebar matches the white/black/blue palette — no separate dark theme,
+       which is what caused hover states to render white-on-white before. */
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 222 47% 9%;
+    --sidebar-primary: 200 100% 40%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 200 100% 95%;
+    --sidebar-accent-foreground: 200 100% 28%;
+    --sidebar-border: 214 32% 91%;
+    --sidebar-ring: 200 100% 40%;
+
+    /* Real hues for charts, not the previous all-grayscale palette */
+    --chart-1: 200 90% 45%;
+    --chart-2: 262 60% 60%;
+    --chart-3: 160 60% 40%;
+    --chart-4: 38 92% 55%;
+    --chart-5: 340 65% 58%;
+  }
+
+  .dark {
+    --background: 222 47% 7%;
+    --foreground: 210 40% 96%;
+    --card: 222 40% 11%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 40% 11%;
+    --popover-foreground: 210 40% 96%;
+
+    --primary: 200 90% 55%;
+    --primary-foreground: 222 47% 8%;
+
+    --secondary: 217 33% 18%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 16%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 20%;
+    --accent-foreground: 200 90% 70%;
+
+    --destructive: 0 63% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142 52% 46%;
+    --success-foreground: 222 47% 8%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 222 47% 8%;
+
+    --border: 217 33% 20%;
+    --input: 217 33% 22%;
+    --ring: 200 90% 55%;
+
+    --sidebar: 222 47% 9%;
+    --sidebar-foreground: 210 40% 92%;
+    --sidebar-primary: 200 90% 55%;
+    --sidebar-primary-foreground: 222 47% 8%;
+    --sidebar-accent: 217 33% 20%;
+    --sidebar-accent-foreground: 200 90% 70%;
+    --sidebar-border: 217 33% 20%;
+    --sidebar-ring: 200 90% 55%;
+
+    --chart-1: 200 90% 58%;
+    --chart-2: 262 70% 68%;
+    --chart-3: 160 56% 52%;
+    --chart-4: 38 92% 60%;
+    --chart-5: 340 72% 65%;
+  }
+
+  * {
+    @apply border-border;
+    outline-color: hsl(var(--ring) / 50%);
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+@layer utilities {
+  .hover-lift {
+    @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md;
+  }
+}

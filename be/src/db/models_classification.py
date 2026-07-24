@@ -73,4 +73,5 @@ class PostClassification(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     classified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    normalized_post: Mapped["NormalizedPost"] = relationship(back_populates="classifications")
     cluster: Mapped["PostTypeCluster"] = relationship(back_populates="classifications")

@@ -69,8 +69,9 @@ class PostGenerationEngine(BaseCollector):
             ranked = DealRanker(s).rank(enriched)
             selected = StrategyAwareSelector(strategy).select(ranked, count=self.count)
             # 4) FORMAT -> draft GeneratedPosts (affiliate links + emoji policy enforced)
+            templates = (org.settings or {}).get("post_templates") if org else None
             formatter = PostFormatter(s, affiliate_provider=get_affiliate_provider(org=org),
-                                      strategy=strategy)
+                                      strategy=strategy, templates=templates)
             created = 0
 
             for deal, bucket in selected:
@@ -79,20 +80,22 @@ class PostGenerationEngine(BaseCollector):
                     generated_at=now, post_type="single", selection_bucket=bucket,
                     deal_ids=[deal.deal_id], rendered_text=text, format_meta=meta,
                     rank_score=deal.rank_score, status=PostStatus.DRAFT,
-                    strategy_rationale=strategy.rationale("single"),
+                    strategy_rationale=strategy.rationale("single", deal=deal),
                     publish_note="Draft — review before publishing.",
                 ))
                 created += 1
 
             if self.make_collection and len(selected) >= 2:
                 deals = [d for d, _ in selected]
-                text, meta = formatter.format_collection(deals, theme="Today's Top Picks")
+                # No explicit theme -> falls back to the org's editable
+                # collection_theme_default template (Settings > Post Templates).
+                text, meta = formatter.format_collection(deals)
                 s.add(GeneratedPost(
                     generated_at=now, post_type="collection", selection_bucket="collection",
                     deal_ids=[d.deal_id for d in deals], rendered_text=text, format_meta=meta,
                     rank_score=(sum(d.rank_score or 0 for d in deals) / len(deals)),
                     status=PostStatus.DRAFT,
-                    strategy_rationale=strategy.rationale("collection"),
+                    strategy_rationale=strategy.rationale("collection", deals=deals),
                     publish_note="Draft collection — review before publishing.",
                 ))
                 created += 1
@@ -150,8 +153,9 @@ class LiveDealGenerationEngine(BaseCollector):
             )
             org = _default_org(s)
             strategy = PostingStrategy.load(s)
+            templates = (org.settings or {}).get("post_templates") if org else None
             formatter = PostFormatter(s, affiliate_provider=get_affiliate_provider(org=org),
-                                      strategy=strategy)
+                                      strategy=strategy, templates=templates)
             # Strategy: multi-link collections are the winning type -> prefer them; cap
             # single-deal posts (a below-average type) at ~20% of the batch.
             single_cap = max(1, self.count // 5)
@@ -163,12 +167,13 @@ class LiveDealGenerationEngine(BaseCollector):
                 if len(deals) >= 2:
                     text, meta = formatter.format_category_collection(cat, deals)
                     ptype, rationale = "category_collection", strategy.rationale(
-                        "collection", note=f"Category: {cat}")
+                        "collection", note=f"Category: {cat}", deals=deals)
                 else:
                     if singles >= single_cap:
                         continue  # honor the strategy cap on single-deal posts
                     text, meta = formatter.format_single(deals[0])
-                    ptype, rationale = "single", strategy.rationale("single", note=f"Category: {cat}")
+                    ptype, rationale = "single", strategy.rationale(
+                        "single", note=f"Category: {cat}", deal=deals[0])
                     singles += 1
                 s.add(GeneratedPost(
                     generated_at=now, post_type=ptype, selection_bucket=cat,
@@ -233,16 +238,21 @@ class ObservedPostGenerationEngine(BaseCollector):
 
             org = _default_org(s)
             strategy = PostingStrategy.load(s)
+            templates = (org.settings or {}).get("post_templates") if org else None
             formatter = PostFormatter(s, affiliate_provider=get_affiliate_provider(org=org),
-                                      strategy=strategy)
+                                      strategy=strategy, templates=templates)
             created = 0
             for c in selected:
+                type_vpd = perf.get(c.cluster or "", 0.0)
+                cand_note = (f"This theme's post type averages ~{type_vpd:.0f} views/day historically — "
+                             "ranked above other observed-deal candidates on that basis."
+                             if type_vpd else None)
                 if c.kind == "collection":
                     text, meta = formatter.format_observed_collection(c)
-                    ptype, rk = "loot_collection", strategy.rationale("collection")
+                    ptype, rk = "loot_collection", strategy.rationale("collection", note=cand_note)
                 else:
                     text, meta = formatter.format_observed_single(c)
-                    ptype, rk = "single", strategy.rationale("single")
+                    ptype, rk = "single", strategy.rationale("single", note=cand_note)
                 meta["source_post_id"] = c.source_post_id
                 s.add(GeneratedPost(
                     generated_at=now, post_type=ptype, selection_bucket=(c.cluster or "")[:32],

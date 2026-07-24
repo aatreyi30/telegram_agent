@@ -75,27 +75,28 @@ class PostNormalizer(BaseCollector):
 
     def _fetch_pending(self, s: Session, source_type: str, model, limit: int):
         """Posts needing (re)normalization: never normalized, content changed
-        since last time, or normalized under an older NORMALIZATION_VERSION."""
-        existing = select(
-            NormalizedPost.source_id,
-            NormalizedPost.raw_content_sha256,
-            NormalizedPost.normalization_version,
-        ).where(NormalizedPost.source_type == source_type)
-        norm_map = {sid: (sha, ver) for sid, sha, ver in s.execute(existing).all()}
+        since last time, or normalized under an older NORMALIZATION_VERSION.
 
-        pending = []
-        stmt = select(model).order_by(model.id)
-        for raw in s.scalars(stmt):
-            prior = norm_map.get(raw.id)
-            if (
-                prior is None
-                or prior[0] != raw.content_sha256
-                or prior[1] < NORMALIZATION_VERSION
-            ):
-                pending.append(raw)
-            if len(pending) >= limit:
-                break
-        return pending
+        The pending predicate is pushed into SQL as a correlated NOT EXISTS so
+        the DB returns only the rows that need work — no full in-memory scan of
+        every Post/NormalizedPost row. A row is *up to date* (skipped) exactly
+        when a NormalizedPost exists for it with a matching content hash and a
+        current-or-newer normalization version; anything else is pending. This
+        is behaviour-identical to the previous per-row dict lookup because
+        NormalizedPost has UniqueConstraint(source_type, source_id) — at most
+        one NormalizedPost per raw row, so EXISTS reflects that single prior."""
+        up_to_date = (
+            select(NormalizedPost.id)
+            .where(
+                NormalizedPost.source_type == source_type,
+                NormalizedPost.source_id == model.id,
+                NormalizedPost.raw_content_sha256 == model.content_sha256,
+                NormalizedPost.normalization_version >= NORMALIZATION_VERSION,
+            )
+            .exists()
+        )
+        stmt = select(model).where(~up_to_date).order_by(model.id).limit(limit)
+        return list(s.scalars(stmt))
 
     def _normalize_one(self, s: Session, source_type: str, raw, emits: list) -> tuple[int, int]:
         text = raw.text
@@ -124,7 +125,12 @@ class PostNormalizer(BaseCollector):
         if known:
             counts = Counter(known)
             primary_merchant, top = counts.most_common(1)[0]
-            primary_conf = round(top / len(all_urls), 3)  # share of links that agree
+            # Denominator = known-merchant links only (NOT all links), matching
+            # link_resolution._backfill_primary_merchant so the field keeps the
+            # same meaning (share of resolved/known-merchant links that agree)
+            # before and after shortlink resolution.
+            primary_conf = round(top / len(known), 3)
+            logger.info("[normalizer] merchant detection: source_id=%d primary_merchant=%s confidence=%s known_merchants=%s", raw.id, primary_merchant, primary_conf, dict(counts))
 
         confidence = self._completeness(bool(prices), bool(all_urls), primary_merchant is not None)
 
@@ -162,6 +168,7 @@ class PostNormalizer(BaseCollector):
         )
         s.add(np)
         s.flush()
+        logger.info("[normalizer] normalized_post created: id=%d source_type=%s source_id=%d num_links=%d", np.id, source_type, raw.id, len(all_urls))
 
         for pm in prices:
             s.add(ExtractedPrice(
@@ -176,6 +183,7 @@ class PostNormalizer(BaseCollector):
                 is_shortlink=info.is_shortlink, merchant_key=mk,
                 tracking_params=info.tracking_params,
             ))
+        logger.info("[normalizer] extracted_links created: normalized_post_id=%d link_count=%d", np.id, len(all_urls))
 
         # queue events (published after commit)
         emits.append((EventType.POST_NORMALIZED, str(np.id),

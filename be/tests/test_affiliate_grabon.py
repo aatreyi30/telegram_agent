@@ -20,6 +20,7 @@ def _settings():
         grabon_shortener_url="https://shortner-api.grabon.com/api/url/shorten",
         grabon_amazon_tag="tlg022-21",
         grabon_flipkart_params="affid=bh7162&affExtParam1=1005&affExtParam2=gb",
+        grabon_myntra_deeplink="https://ww44.affinity.net/sssweb?enk=KEY&di=%7BclickID%7D&subid=tl&d=<encoded_deal>",
         affiliate_provider="grabon",
         affiliate_provider_name="grabon",
     )
@@ -30,8 +31,17 @@ def test_amazon_extracts_dp_id_and_drops_other_params():
     p = GrabOnAffiliateProvider(_settings())
     url = "https://www.amazon.in/AYSIS-Transparent-Organizer/dp/B0H416WF2T?ref=abc&th=1"
     aff, notes = p.build_affiliate_url(url, "amazon")
-    assert aff == "https://www.amazon.in/dp/B0H416WF2T/?tag=tlg022-21"
+    assert aff == "https://www.amazon.in/dp/B0H416WF2T?tag=tlg022-21"   # bare tag → tag=
     assert notes == []
+
+
+def test_amazon_full_param_string_used_as_is():
+    # when grabon_amazon_tag already carries a full query string, append it verbatim
+    s = _settings()
+    s.grabon_amazon_tag = "th=1&psc=1&linkCode=ll2&tag=tlg022-21"
+    p = GrabOnAffiliateProvider(s)
+    aff, _ = p.build_affiliate_url("https://www.amazon.in/x/dp/B0H416WF2T?ref=abc", "amazon")
+    assert aff == "https://www.amazon.in/dp/B0H416WF2T?th=1&psc=1&linkCode=ll2&tag=tlg022-21"
 
 
 def test_amazon_without_dp_falls_back():
@@ -51,6 +61,29 @@ def test_flipkart_strips_query_and_appends_params():
     assert notes == []
 
 
+# ------------------------- Myntra rule ------------------------- #
+def test_myntra_encodes_deal_into_deeplink_template():
+    from urllib.parse import unquote
+    p = GrabOnAffiliateProvider(_settings())
+    url = "https://www.myntra.com/tshirts/roadster/x/12345?src=feed"
+    aff, notes = p.build_affiliate_url(url, "myntra")
+    assert notes == []
+    assert aff.startswith("https://ww44.affinity.net/sssweb?enk=KEY")
+    assert "<encoded_deal>" not in aff              # token was substituted
+    assert "%7BclickID%7D" in aff and "subid=tl" in aff  # network macros untouched
+    enc = aff.split("&d=", 1)[1]
+    assert unquote(enc) == url                      # the full product URL round-trips
+    assert "www.myntra.com" not in aff.split("&d=", 1)[0]  # raw url only in the encoded tail
+
+
+def test_myntra_without_template_falls_back():
+    s = _settings()
+    s.grabon_myntra_deeplink = None
+    p = GrabOnAffiliateProvider(s)
+    aff, notes = p.build_affiliate_url("https://www.myntra.com/123", "myntra")
+    assert aff is None and "not configured" in notes[0]
+
+
 def test_unknown_merchant_has_no_rule():
     p = GrabOnAffiliateProvider(_settings())
     aff, notes = p.build_affiliate_url("https://www.nykaa.com/x/p/123", "nykaa")
@@ -63,6 +96,7 @@ def test_detects_merchant_from_host_when_not_given():
     p = GrabOnAffiliateProvider(_settings())
     assert p._detect_merchant("https://www.amazon.in/dp/B01", None) == "amazon"
     assert p._detect_merchant("https://www.flipkart.com/x/p/itm1", None) == "flipkart"
+    assert p._detect_merchant("https://www.myntra.com/12345", None) == "myntra"
     assert p._detect_merchant("https://example.com/x", None) is None
 
 
@@ -73,7 +107,7 @@ def test_generate_uses_short_url_when_shortener_succeeds(monkeypatch):
     res = p.generate("https://www.amazon.in/x/dp/B0H416WF2T?th=1", "amazon")
     assert res.final_url == "https://grbn.in/abc123"
     assert res.shortened is True
-    assert res.affiliate_url == "https://www.amazon.in/dp/B0H416WF2T/?tag=tlg022-21"
+    assert res.affiliate_url == "https://www.amazon.in/dp/B0H416WF2T?tag=tlg022-21"
 
 
 def test_generate_falls_back_to_affiliate_url_when_shortener_fails(monkeypatch):

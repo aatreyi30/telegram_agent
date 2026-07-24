@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
+venv/
 be/.venv/
 
 # secrets / local data (never commit)
@@ -18,8 +19,12 @@ be/.env
 fe/node_modules/
 fe/dist/
 
-*.md
-/*.md
+next/node_modules/
+next/.next/
+
+next/.next
+*.next/
+
 # generated build artifacts
 fe/*.tsbuildinfo
 fe/vite.config.js

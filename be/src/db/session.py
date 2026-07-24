@@ -35,7 +35,14 @@ def get_engine() -> Engine:
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
             cur.execute("PRAGMA journal_mode=WAL")
-            cur.execute("PRAGMA busy_timeout=5000")  # wait, don't instantly lock-fail
+            # SQLite allows only ONE writer at a time. The scheduler runs many jobs in
+            # parallel threads, so writers queue behind each other — busy_timeout is how
+            # long a blocked writer WAITS for the lock before giving up with "database is
+            # locked". 5s was too short under that concurrency; 30s lets them serialise
+            # cleanly. synchronous=NORMAL (safe in WAL) skips an fsync per commit, so each
+            # writer holds the lock for less time -> less contention.
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.execute("PRAGMA synchronous=NORMAL")
             cur.close()
 
     return engine
@@ -73,11 +80,22 @@ def init_db() -> None:
     from src.db import models_reasoning  # noqa: F401  (Phase 8 tables)
     from src.db import models_generation  # noqa: F401  (Phase 9 tables)
     from src.db import models_campaign  # noqa: F401  (Phase 10 tables)
+    from src.db import models_report  # noqa: F401  (daily aggregate report rows)
     from src.db import models_automation  # noqa: F401  (Phase 11 tables)
     from src.db import models_scheduler  # noqa: F401  (scheduler run logs)
+    from src.db import models_ai_output  # noqa: F401  (Phase 0.2: persisted AI outputs)
+    from src.db import models_ai_trace  # noqa: F401  (per-call AI trace ledger)
+    from src.db import models_prediction  # noqa: F401  (Phase 2: predict/outcome/retro tables)
 
     Base.metadata.create_all(get_engine())
     # create_all does not ALTER existing tables; add columns introduced after first run.
-    from src.db.migrate import add_missing_columns, backfill_channel_id
+    from src.db.migrate import (
+        add_missing_columns,
+        backfill_channel_id,
+        dedupe_and_index_campaign_plans,
+        drop_removed_tables,
+    )
     add_missing_columns(get_engine())
     backfill_channel_id(get_engine())  # attribute pre-multi-tenancy derived rows to a channel
+    drop_removed_tables(get_engine())  # drop tables whose ORM model no longer exists
+    dedupe_and_index_campaign_plans(get_engine())  # backstop the daily/weekly AI-plan cache race

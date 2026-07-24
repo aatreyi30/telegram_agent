@@ -25,6 +25,13 @@ logger = get_logger(__name__)
 MIN_DEAL_SCORE = 70
 MIN_DISCOUNT = 40
 
+# Merchants we're actually allowed to post right now. The GrabCash feed carries many
+# more retailers (Nykaa, TataCliq, Shopsy, ...) than we have a real posting
+# relationship with -- restrict here, at the single shared relevance gate, so every
+# consumer of filter_relevant() (jit_fill, DealSourceClient.fetch_latest) is
+# automatically limited to the same allow-list instead of drifting independently.
+ALLOWED_MERCHANTS = {"amazon", "flipkart", "myntra", "ajio"}
+
 
 def _num(v):
     try:
@@ -34,9 +41,11 @@ def _num(v):
 
 
 def is_relevant(it: dict) -> bool:
-    """A deal worth posting: real product + merchant, a genuine saving, strong
-    discount and deal score."""
+    """A deal worth posting: real product + merchant (from the allow-list), a
+    genuine saving, strong discount and deal score."""
     if not (it.get("product_title") and it.get("original_url") and it.get("retailer_key")):
+        return False
+    if str(it["retailer_key"]).lower() not in ALLOWED_MERCHANTS:
         return False
     mrp, price = _num(it.get("mrp")), _num(it.get("discount_price"))
     disc, score = _num(it.get("discount_percentage")) or 0, _num(it.get("deal_score")) or 0

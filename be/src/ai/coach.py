@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from src.ai import context as ctx
 from src.ai.client import AIClient
+from src.ai.prompts import COACH_SYSTEM as _COACH_SYSTEM
 from src.db.session import session_scope
 
 # Read-only tools over the deterministic engines.
@@ -25,16 +26,9 @@ _TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_merchant_intel", "description": "Merchant profiles (engagement/price) and opportunities.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "get_competitor_intel", "description": "Competitor profiles, similarity to us, threats/opportunities.",
+    {"name": "get_competitor_intel", "description": "Competitor profiles and similarity to us.",
      "input_schema": {"type": "object", "properties": {}}},
 ]
-
-_COACH_SYSTEM = (
-    "You are the operator's growth coach. Use the tools to fetch whatever engine "
-    "outputs you need before answering — do not answer from assumptions. Base every "
-    "claim on tool results, cite the numbers, and if the tools don't have what's needed "
-    "to answer, say so plainly. Give a direct, prioritized answer, then the evidence."
-)
 
 
 def _tool_runner(name: str, _input: dict) -> str:
@@ -54,8 +48,7 @@ def _tool_runner(name: str, _input: dict) -> str:
             return ctx.to_json({"profiles": ctx.merchant_profiles(s),
                                 "opportunities": ctx.merchant_opportunities(s)})
         if name == "get_competitor_intel":
-            return ctx.to_json({"profiles": ctx.competitor_profiles(s),
-                                "signals": ctx.competitor_signals(s)})
+            return ctx.to_json({"profiles": ctx.competitor_profiles(s)})
     return f"Unknown tool: {name}"
 
 

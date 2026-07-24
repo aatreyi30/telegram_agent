@@ -92,15 +92,16 @@ def test_selection_is_diverse_across_buckets():
 
 
 def test_deal_source_maps_grabcash_schema():
-    from src.services.generation.deal_source import _extract_items, _map_item
+    from src.services.generation.deal_source import _map_item
 
+    # The export API returns a {total, items:[...]} envelope; items are mapped directly.
     payload = {"items": [{
         "id": "deal_abc", "product_title": "Puma Walking Shoes", "original_url": "https://www.ajio.com/p/469763551001",
         "retailer_key": "ajio", "discount_price": 2369.0, "mrp": 5999.0, "discount_percentage": 61,
         "category_key": "fashion-and-lifestyle", "subcategory_key": "shoes", "deal_score": 96,
         "coupon_code": None, "ingested_at": "2026-07-02T20:09:01Z",
     }], "total": 1, "pages": 1}
-    items = _extract_items(payload)
+    items = payload["items"]
     assert len(items) == 1
     rd = _map_item(items[0], "grabcash_api")
     assert rd.title == "Puma Walking Shoes"

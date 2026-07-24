@@ -114,9 +114,13 @@ class PostingStrategy:
                and m.get("avg_views_per_day")]
         return max(inc, key=lambda m: m["avg_views_per_day"], default=None)
 
-    def rationale(self, kind: str, note: str | None = None) -> dict:
+    def rationale(self, kind: str, note: str | None = None, deal=None, deals=None) -> dict:
         """Per-draft explanation of WHY this post follows the strategy, with the
-        underlying numbers + the period they cover (so it never reads as vague)."""
+        underlying numbers + the period they cover (so it never reads as vague).
+
+        ``deal`` (a single ranked ``EnrichedDeal``) or ``deals`` (a collection)
+        additionally attaches WHY THIS SPECIFIC DEAL beat its alternatives —
+        the ranker's own score breakdown, not just the type/window-level strategy."""
         win = self.best_window()
         r = {"kind": kind, "period": self.window_desc,
              "emoji_policy": self.emoji_policy()}
@@ -137,4 +141,38 @@ class PostingStrategy:
                              f"type, {self.window_desc}); reserved for high-value standouts.")
         if note:
             r["note"] = note
+        if deal is not None:
+            r["why_this_deal"] = self._deal_rationale(deal)
+        elif deals:
+            best = max(deals, key=lambda d: (d.rank_score or 0))
+            r["why_this_deal"] = {**self._deal_rationale(best), "deal_count": len(deals)}
         return r
+
+    @staticmethod
+    def _deal_rationale(deal) -> dict:
+        """Surfaces the ranker's own score breakdown (ranking.py::DealRanker) so
+        the operator sees why THIS deal beat the other candidates that day, not
+        just why this post type/window fits the strategy. Some generation paths
+        (live-deal fetch) sort by discount only and never run DealRanker — stay
+        honest about that instead of fabricating a score-based explanation."""
+        bd = deal.score_breakdown or {}
+        if bd:
+            mf = bd.get("merchant_factor", 1.0)
+            vf = bd.get("value_factor", 1.0)
+            why = (f"{deal.merchant_key or 'This merchant'} scores {mf:.2f}x the channel's learned "
+                   "baseline views/day"
+                   + (f", and a {deal.discount_percent:.0f}% discount lifts its value factor to "
+                      f"{vf:.2f}x — together these ranked it above the other candidates today."
+                      if deal.discount_percent else " — that ranked it above the other candidates today."))
+        else:
+            why = (f"Selected for its discount — {deal.discount_percent:.0f}% off, the best in its "
+                   "category among today's fetched deals." if deal.discount_percent else
+                   "Selected among today's fetched deals for this category (not run through the "
+                   "learned ranker).")
+        return {
+            "rank_score": deal.rank_score,
+            "merchant": deal.merchant_key,
+            "discount_percent": deal.discount_percent,
+            "score_breakdown": bd or None,
+            "why": why,
+        }
