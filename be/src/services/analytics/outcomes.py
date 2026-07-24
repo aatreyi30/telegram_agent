@@ -28,10 +28,14 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 # (phase key, target hours-since-posted, nearest-snapshot tolerance in hours)
+# Tolerances MATCH prediction._HORIZON_* so the training path and the outcome/accuracy
+# path anchor on the SAME snapshot for a given post. The 6h/24h tolerance was 0.75h,
+# which — because stats_refresh doesn't reliably capture within ±0.75h of the 24h mark —
+# made ~65% of posts give up with null 24h views (and disagreed with training's 2.0h).
 _HORIZONS: tuple[tuple[str, float, float], ...] = (
     ("1h", 1.0, 0.75),
-    ("6h", 6.0, 0.75),
-    ("24h", 24.0, 0.75),
+    ("6h", 6.0, 2.0),
+    ("24h", 24.0, 2.0),
 )
 # if a phase is due but no snapshot ever lands within tolerance even after this
 # much extra time, give up (mark done with nulls) rather than retry forever --
