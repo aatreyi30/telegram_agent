@@ -149,12 +149,15 @@ def summarize(s: Session, day: date | None = None, end: date | None = None) -> d
     # itself) to a multi-day range (excludes the whole range, not just its start).
     prior_start = start - timedelta(days=30)
     prior = list(_rows_between(s, prior_start, start))
-    prior_days = 30
+    # Average over days actually posted in the window, NOT a hardcoded 30 — a
+    # channel with only ~10 active days would otherwise divide by 30 and understate
+    # the baseline ~3x, inflating every "vs baseline" delta on this page.
+    prior_active_days = len({to_ist(r[1]).date() for r in prior if r[1] is not None})
     prior_views = [r[2] for r in prior if r[2] is not None]
     baseline = {
-        "avg_posts_per_day": round(len(prior) / prior_days, 1) if prior else 0,
+        "avg_posts_per_day": round(len(prior) / prior_active_days, 1) if prior_active_days else 0,
         "avg_views_per_post": round(statistics.fmean(prior_views)) if prior_views else 0,
-        "window": f"trailing 30 days ({prior_start.date().isoformat()}→{day.isoformat()})",
+        "window": f"avg per active day, trailing 30 days ({prior_start.date().isoformat()}→{day.isoformat()})",
     }
 
     result = {
@@ -166,7 +169,9 @@ def summarize(s: Session, day: date | None = None, end: date | None = None) -> d
         "merchant_mix": merchant_mix.most_common(6),
         "baseline": baseline,
         "vs_baseline": {
-            "posts_delta": len(rows) - baseline["avg_posts_per_day"],
+            # round: an int count minus a 1-dp average otherwise surfaces float noise
+            # ("+6.700000000000003 posts") straight to the UI.
+            "posts_delta": round(len(rows) - baseline["avg_posts_per_day"], 1),
             "views_delta_pct": (round((avg_views / baseline["avg_views_per_post"] - 1) * 100)
                                 if baseline["avg_views_per_post"] else None),
         },
