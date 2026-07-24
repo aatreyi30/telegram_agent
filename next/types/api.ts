@@ -328,7 +328,7 @@ export interface DailyBrief {
   trajectory: DailyTrajectory;
   today: DailyPlanToday;
   digest: string;
-  factcheck_status: "pass" | "warn" | null;
+  factcheck_status: "pass" | "warn" | "failed" | "fallback" | "skipped" | null;
   ai_available: boolean;
   upcoming_event: UpcomingEventBrief | null;
   operator_directive?: string | null;
@@ -353,6 +353,7 @@ export interface WeeklyBrief {
   recommended_posts_per_day: number;
   upcoming_events: UpcomingEventRow[];
   digest: string;
+  factcheck_status: "pass" | "warn" | "failed" | "fallback" | "skipped" | null;
   ai_available: boolean;
   operator_directive?: string | null;
   can_regenerate?: boolean;

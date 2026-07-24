@@ -249,11 +249,15 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
               <AiBadge />
             </div>
             <DigestBlock text={brief.digest} />
-            {brief.factcheck_status === "warn" && (
+            {brief.factcheck_status === "failed" ? (
+              <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                ⚠ This plan failed verification — the numbers aren't grounded in the data. Regenerate it.
+              </p>
+            ) : brief.factcheck_status === "warn" ? (
               <p className="text-xs text-amber-600 dark:text-amber-400">
                 Some cited numbers could not be verified against the data.
               </p>
-            )}
+            ) : null}
           </div>
         ) : !brief.ai_available ? (
           <p className="text-xs text-muted-foreground">AI narrative unavailable — relying on the numbers below.</p>
@@ -508,7 +512,7 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Stat label="Posts" value={String(w.totals.posts)} />
           <Stat label="Total views" value={w.totals.views_total.toLocaleString()} />
-          <Stat label="Avg posts/day" value={w.totals.avg_posts_per_day.toFixed(1)} />
+          <Stat label="Posts/day so far (actual)" value={w.totals.avg_posts_per_day.toFixed(1)} />
           <Stat label="Recommended/day" value={String(w.recommended_posts_per_day)} />
         </div>
 
@@ -519,7 +523,7 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
             <p className="mb-1.5 text-xs font-medium text-muted-foreground">Daily themes</p>
             <Table>
               <TableHeader>
-                <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Theme focus</TableHead><TableHead>Posts</TableHead></TableRow>
+                <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Theme focus</TableHead></TableRow>
               </TableHeader>
               <TableBody>
                 {w.themes.map((t, i) => (
@@ -527,7 +531,6 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
                     <TableCell className="font-medium">{t.day}</TableCell>
                     <TableCell className="text-muted-foreground">{isoSlash(t.date)}</TableCell>
                     <TableCell>{t.theme_focus}</TableCell>
-                    <TableCell>{t.posts_planned}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -578,7 +581,18 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                     <AiBadge />
                   </div>
                 </CardHeader>
-                <CardContent><DigestBlock text={w.digest} /></CardContent>
+                <CardContent>
+                  <DigestBlock text={w.digest} />
+                  {w.factcheck_status === "failed" ? (
+                    <p className="mt-1.5 text-xs font-medium text-red-600 dark:text-red-400">
+                      ⚠ This plan failed verification — the numbers aren't grounded in the data. Regenerate it.
+                    </p>
+                  ) : w.factcheck_status === "warn" ? (
+                    <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                      Some cited numbers could not be verified against the data.
+                    </p>
+                  ) : null}
+                </CardContent>
               </Card>
             ) : !w.ai_available ? (
               <p className="text-xs text-muted-foreground">AI narrative unavailable — relying on the numbers above.</p>
