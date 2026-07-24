@@ -762,7 +762,7 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
     `regenerate_daily` (forced fresh generation after deleting the stale cache row)
     so the two paths can never drift apart."""
     from src.ai.planner import generate_day_plan
-    from src.ai.factcheck import check_cited_numbers
+    from src.ai.factcheck import check_cited_numbers, extract_prose_numbers, plan_structural_numbers
     from src.services.generation.ai_execution import persist_ai_plan
 
     # Only pass `directive` through when set — keeps the call signature identical
@@ -790,8 +790,14 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
             fc = {"status": "fallback"}
             fc_status = "fallback"
         else:
-            fc = check_cited_numbers(plan.get("cited_numbers", []), ai_res.get("facts", []))
-            fc_status = "pass" if fc["status"] == "passed" else "warn"
+            # Fact-check the PROSE, not the model's always-empty `cited_numbers`
+            # (see ai/factcheck.py). The plan's own decision numbers go into the
+            # pool as one flat dict so restating them never flags as fabrication.
+            structural = plan_structural_numbers(plan)
+            facts_pool = [*ai_res.get("facts", []), {f"s{i}": v for i, v in enumerate(structural)}]
+            fc = check_cited_numbers(extract_prose_numbers({**plan, "digest": digest}), facts_pool)
+            fc_status = ("pass" if fc["status"] == "passed"
+                        else "failed" if fc["status"] == "failed" else "warn")
         row = persist_ai_plan(s, {**ai_res, "factcheck": fc},
                               recent_median=recommended, recent_max_30d=recent_max_30d)
         if row is not None:
@@ -933,13 +939,24 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
             plan = cached.blueprint or {}
             digest = cached.ai_digest or ""
             fc_status = ("fallback" if cached.factcheck_status == "fallback"
-                        else "pass" if cached.factcheck_status == "passed" else "warn")
+                        else "skipped" if cached.factcheck_status == "skipped"
+                        else "pass" if cached.factcheck_status == "passed"
+                        else "failed" if cached.factcheck_status == "failed"
+                        else "warn")
             plan_row = cached
         else:
             gen = _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                                       directive=directive, recent_max_30d=recent_max_30d)
             ai_ok, plan, digest, fc_status, plan_row = (
                 gen["ai_ok"], gen["plan"], gen["digest"], gen["fc_status"], gen["row"])
+
+        if fc_status == "failed":
+            # FIX 2 — a failed fact-check means the digest itself likely cites a
+            # fabricated number; never surface it to the operator as if trusted.
+            # The plan row still persists with its real `failed` status (so
+            # jit_fill's existing (passed/warn) check already refuses to fill it).
+            digest = ("This plan could not be verified against the data (some cited "
+                      "numbers are unsupported) — regenerate it.")
 
         if ai_ok and plan.get("recommended_posts") is not None:
             # recommended_posts is already clamped at persist time (G10); read the
@@ -1014,13 +1031,17 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
                    "date_confidence": e.date_confidence} for e in events]
     from datetime import datetime, timezone
     eng = CampaignPlanningEngine()
-    recent = eng._recent_distribution(s, datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    recent = eng._recent_distribution(s, now)
+    # Pass s/now so _weekly_plan uses the real recent-cadence median, not the stale
+    # posting_frequency_baseline — kills the WeekCard's third, different posts/day.
     blueprint = eng._weekly_plan(
-        bp_growth, perf, week_start, event_data, recent)["blueprint"]
+        bp_growth, perf, week_start, event_data, recent, s, now)["blueprint"]
     themes = blueprint.get("daily_themes") or []
 
     ai_summary, ai_ok = "", False
     ai_plan = None
+    wk_fc_status = None
     try:
         from src.ai.client import AIUnavailable
         from src.ai.planner import generate_week_plan
@@ -1030,6 +1051,16 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
             ai_ok = bool(ai_summary)
             if res.get("available"):
                 ai_plan = res.get("plan")
+            # FIX 2 (weekly) — same prose fact-check gate as the daily path. The
+            # weekly digest doubles as the operator's weekly retro and renders in
+            # the UI; a `failed` check means it likely cites a fabricated number,
+            # so never surface it as trusted. The plan's own DECISIONS
+            # (loot_deal_ratio/merchant_priorities/daily_themes) are structural and
+            # still merged below — only the narrative prose is withheld.
+            wk_fc_status = (res.get("factcheck") or {}).get("status")
+            if wk_fc_status == "failed":
+                ai_summary = ("This week's summary could not be verified against the "
+                              "data (some cited numbers are unsupported) — regenerate it.")
         except AIUnavailable:
             ai_summary = ""
     except Exception:
@@ -1064,6 +1095,8 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
                                   digest=ai_summary, is_ai_generated=ai_ok)
         if wk is not None and directive is not None:
             wk.operator_directive = directive
+    if wk is not None and wk_fc_status is not None:
+        wk.factcheck_status = wk_fc_status
     return ai_summary, ai_ok, themes, wk
 
 
@@ -1180,6 +1213,7 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
                 "days": days, "totals": totals, "themes": themes,
                 "recommended_posts_per_day": traj["recent_cadence"],
                 "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok,
+                "factcheck_status": (wk.factcheck_status if wk is not None else None),
                 "operator_directive": wk.operator_directive if wk is not None else None,
                 "can_regenerate": week_start >= current_week_start}
 
