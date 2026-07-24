@@ -271,13 +271,19 @@ def available_deals(s: Session, limit: int = 15) -> list[dict]:
     merchant's deep discounts can't crowd every other merchant/category out of the
     menu the planner sees. That top-15-by-discount pool was a root cause of the
     'always one merchant/category' symptom. Degrades correctly to a single merchant
-    when the feed genuinely only carries one that day."""
+    when the feed genuinely only carries one that day.
+
+    Merchant-allowlisted (same ALLOWED_MERCHANTS as the collection-time relevance
+    gate) so a stale row for a merchant we don't actually have a posting
+    relationship with (Nykaa, Croma, ...) can't surface into the planner's menu."""
     from collections import OrderedDict
 
     from src.db.models_generation import DealValidity, EnrichedDeal
+    from src.services.collection.deal_scraper import ALLOWED_MERCHANTS
     candidates = s.scalars(
         select(EnrichedDeal)
-        .where(EnrichedDeal.deal_validity != DealValidity.INVALID)
+        .where(EnrichedDeal.deal_validity != DealValidity.INVALID,
+               EnrichedDeal.merchant_key.in_(ALLOWED_MERCHANTS))
         .order_by(EnrichedDeal.discount_percent.is_(None),
                   EnrichedDeal.discount_percent.desc())
         .limit(300)
