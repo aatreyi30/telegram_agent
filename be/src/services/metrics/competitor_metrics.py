@@ -33,6 +33,16 @@ logger = get_logger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Floor the posts/day divisor: a short t.me/s scrape spanning a few hours must not
+# imply "150 posts/day". Only affects the raw rate; the benchmark delta is separate.
+MIN_SPAN_DAYS_FOR_RATE = 7
+
+# avg_views gating: withhold the average when the sample looks like a broken/empty
+# scrape rather than report a fake number (e.g. "2.2 views/post" from near-zero values).
+MIN_VIEWS_SAMPLE = 5             # too few points to average
+TINY_VIEWS_SAMPLE = 20           # below this, also flag...
+BROKEN_SCRAPE_VIEW_CEILING = 10  # ...all views under this as a broken scrape
+
 
 def _aware(dt: datetime | None) -> datetime | None:
     if dt is None:
@@ -73,7 +83,7 @@ class ChannelBehaviour:
         span_days = None
         posts_per_day = None
         if dated:
-            span_days = max((max(dated) - min(dated)).days, 0) + 1
+            span_days = max((max(dated) - min(dated)).days + 1, MIN_SPAN_DAYS_FOR_RATE)
             posts_per_day = round(n / span_days, 3)
         logger.info("[competitor_metrics] summary: label=%s dated_posts=%d span_days=%s posts_per_day=%s", self.label, len(dated), span_days, posts_per_day)
         
@@ -106,6 +116,16 @@ class ChannelBehaviour:
         def mean(vals) -> float | None:
             return round(statistics.fmean(vals), 3) if vals else None
 
+        def gated_avg_views(vals: list[int]) -> float | None:
+            """None (not a fake number) when the sample can't be trusted: too few
+            views recorded, or a tiny sample that's all suspiciously-near-zero --
+            the signature of a broken/empty scrape rather than real traffic."""
+            if len(vals) < MIN_VIEWS_SAMPLE:
+                return None
+            if len(vals) < TINY_VIEWS_SAMPLE and max(vals) < BROKEN_SCRAPE_VIEW_CEILING:
+                return None
+            return mean(vals)
+
         result = {
             "label": self.label,
             "post_count": n,
@@ -121,7 +141,7 @@ class ChannelBehaviour:
             "multi_deal_rate": rate(lambda p: p.is_multi_deal),
             "avg_links": mean([p.num_links for p in f]),
             "media_rate": rate(lambda p: p.has_media),
-            "avg_views": mean(views),
+            "avg_views": gated_avg_views(views),
             "views_sample_size": len(views),
             "top_posting_hour_ist": top_hour,
             "hour_distribution_ist": dict(sorted(hours.items())) or None,
@@ -275,3 +295,56 @@ def _len(col):
     from sqlalchemy import func
 
     return func.length(col)
+
+
+def _selfcheck() -> None:
+    """Fix 9 (span floor) + Fix 10 (avg_views gate) — no DB needed."""
+
+    def _pf(dt, views):
+        return PostFeature(
+            posted_at=dt, text_len=1, has_media=False, views=views, num_links=0,
+            has_coupon=False, is_multi_deal=False, emoji_count=0, hashtag_count=0,
+            has_cta=False, merchant_key=None, link_merchants=[], cluster=None,
+            known_link_count=0, total_link_count=0,
+        )
+
+    base = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
+
+    # Fix 9: 150 posts crammed into a single real day must NOT report 150/day.
+    burst = ChannelBehaviour(label="burst")
+    burst.features = [_pf(base + timedelta(minutes=i), 100) for i in range(150)]
+    s = burst.summary()
+    assert s["span_days"] == MIN_SPAN_DAYS_FOR_RATE, s["span_days"]
+    assert s["posts_per_day"] == round(150 / MIN_SPAN_DAYS_FOR_RATE, 3), s["posts_per_day"]
+
+    # A real multi-week span (> the floor) is left alone.
+    spread = ChannelBehaviour(label="spread")
+    spread.features = [_pf(base + timedelta(days=i), 100) for i in range(15)]  # 15-day span
+    s2 = spread.summary()
+    assert s2["span_days"] == 15, s2["span_days"]
+    assert s2["posts_per_day"] == round(15 / 15, 3), s2["posts_per_day"]
+
+    # Fix 10: tiny sample -> no avg_views at all.
+    tiny = ChannelBehaviour(label="tiny")
+    tiny.features = [_pf(base, 100), _pf(base, 100)]
+    assert tiny.summary()["avg_views"] is None
+
+    # Fix 10: small-but-not-tiny sample, all near-zero -> looks like a broken scrape.
+    broken = ChannelBehaviour(label="broken")
+    broken.features = [_pf(base + timedelta(hours=i), 2) for i in range(10)]
+    assert broken.summary()["avg_views"] is None
+
+    # Fix 10: legitimate sample (enough points, real-looking views) -> real average kept.
+    real = ChannelBehaviour(label="real")
+    real.features = [_pf(base + timedelta(hours=i), 500 + i) for i in range(25)]
+    r = real.summary()
+    assert r["avg_views"] == mean_of(range(500, 525)), r["avg_views"]
+
+
+def mean_of(vals) -> float:
+    return round(statistics.fmean(vals), 3)
+
+
+if __name__ == "__main__":
+    _selfcheck()
+    print("ok")
