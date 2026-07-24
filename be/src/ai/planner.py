@@ -25,6 +25,46 @@ PLAN_SCHEMA_KEYS = ("date", "recommended_posts", "cadence_why", "post_slots",
 _DEFAULT_LOOT_SHARE = 0.4
 _MIN_TYPE_SHARE = 0.3
 
+# ponytail: soft cap on any single merchant's share of a day's slots, enforced by
+# _repair_merchant_diversity below. Tune here if the diversity floor needs to move.
+_MAX_MERCHANT_SHARE = 0.4
+
+
+def _repair_merchant_diversity(slots: list[dict], available_merchants: list[str] | None) -> None:
+    """Enforce merchant rotation the prompt only asks for (whole windows come back
+    one merchant otherwise). Keep the model's merchant unless it repeats the prior
+    slot in the same window, isn't in today's feed, or exceeds ``_MAX_MERCHANT_SHARE``
+    — reassigning the fewest slots possible. A reassigned slot's ``why`` was written
+    for the OLD merchant, so overwrite it with a number-free rotation note (else the
+    text contradicts the data). No-op with <2 available merchants (a feed constraint)."""
+    merchants = [m for m in (available_merchants or []) if m]
+    if len(merchants) < 2 or not slots:
+        return
+    windows: dict[str, list[dict]] = {}
+    for sl in slots:
+        windows.setdefault(sl.get("window_ist") or "", []).append(sl)
+    cap = max(round(len(slots) * _MAX_MERCHANT_SHARE), 1)
+    counts = {m: 0 for m in merchants}
+    for win, win_slots in windows.items():
+        prev = None
+        for sl in win_slots:
+            cur = sl.get("merchant")
+            keep = (cur in counts and cur != prev and counts[cur] < cap)
+            if keep:
+                m = cur
+            else:
+                eligible = [x for x in merchants if counts[x] < cap] or merchants
+                pick_from = [x for x in eligible if x != prev] or eligible
+                m = min(pick_from, key=lambda x: counts[x])
+                if m != cur:
+                    sl["merchant"] = m
+                    sl["why"] = (f"Assigned {m} to keep the {win or 'day'} window "
+                                 "from concentrating on one store — auto-balanced for "
+                                 "merchant diversity, so this slot rotates off the "
+                                 "merchant the previous slot used.")
+            counts[m] += 1
+            prev = m
+
 
 def _extract_json_object(text: str) -> str | None:
     """The first top-level {...} object in ``text``, found by counting brace
@@ -447,6 +487,7 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
                 "AI planner returned an unparseable plan — a deterministic "
                 "fallback plan is active; regenerate once the AI is back for a "
                 "grounded plan."), "plan": fallback, "facts": facts, "is_fallback": True}
+    _repair_merchant_diversity(plan.get("post_slots") or [], plan_ctx.get("available_merchants"))
     return {"available": True, "digest": digest, "plan": plan, "facts": facts}
 
 
@@ -534,13 +575,23 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
         return {"available": False, "reason": "unparseable weekly plan", "plan": None,
                 "digest": digest, "facts": facts}
     plan.setdefault("week_start", week_start.isoformat())
-    return {"available": True, "digest": digest, "plan": plan, "facts": facts}
+    # FIX 1 (weekly) — same prose fact-check as the daily path: `cited_numbers` is
+    # always empty (the model never fills it in), so what needs checking is the
+    # PROSE (digest + direction + each day's why/theme text) against the facts it
+    # was grounded on, with the plan's own decision numbers (loot_deal_ratio,
+    # posts_planned, loot/single share) excluded as self-valid structural numbers.
+    from src.ai.factcheck import check_cited_numbers, extract_prose_numbers, plan_structural_numbers
+    structural = plan_structural_numbers(plan)
+    facts_pool = [*facts, {f"s{i}": v for i, v in enumerate(structural)}]
+    fc = check_cited_numbers(extract_prose_numbers({**plan, "digest": digest}), facts_pool)
+    return {"available": True, "digest": digest, "plan": plan, "facts": facts, "factcheck": fc}
 
 
 def _demo() -> None:
     """Runnable self-check (no DB): parse_plan + its type-mix nudge, the weekly
     loot/single-share normalization, and the deterministic fallback actually
     mixing both types across windows."""
+    from collections import Counter
     from datetime import date
 
     # trailing content after the real object (e.g. a stray aside with its own
@@ -618,6 +669,24 @@ def _demo() -> None:
     })
     assert {sl["type"] for sl in fb2["post_slots"]} == {"single", "collection"}
     assert all(sl["merchant"] == "" and sl["theme"] == "" for sl in fb2["post_slots"])
+
+    # FIX 3 — merchant diversity repair. 10 all-amazon slots across 2 windows (5
+    # each) + 3 available merchants: no window should collapse to one merchant,
+    # and amazon's day-wide share should land at the 40% cap, not run away.
+    slots10 = ([{"window_ist": "morning", "merchant": "amazon"} for _ in range(5)]
+              + [{"window_ist": "evening", "merchant": "amazon"} for _ in range(5)])
+    _repair_merchant_diversity(slots10, ["amazon", "flipkart", "myntra"])
+    by_win: dict[str, set] = {}
+    for sl in slots10:
+        by_win.setdefault(sl["window_ist"], set()).add(sl["merchant"])
+    assert all(len(v) > 1 for v in by_win.values()), by_win  # no single-merchant window
+    counts = Counter(sl["merchant"] for sl in slots10)
+    assert counts["amazon"] / len(slots10) <= _MAX_MERCHANT_SHARE, counts
+
+    # only 1 merchant in today's feed — a genuine constraint, leave untouched.
+    slots_single = [{"window_ist": "morning", "merchant": "amazon"} for _ in range(3)]
+    _repair_merchant_diversity(slots_single, ["amazon"])
+    assert all(sl["merchant"] == "amazon" for sl in slots_single)
 
     print("ai/planner.py self-check OK")
 
