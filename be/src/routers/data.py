@@ -107,6 +107,11 @@ def queue(page: int = 1, page_size: int = 20, date: str | None = None,
                             post_type=post_type, status=status, sort=sort))
 
 
+@router.get("/activity/recent")
+def activity_recent(since: str | None = Query(default=None), limit: int = Query(default=20)):
+    return ok(service.activity_recent(since=since, limit=limit))
+
+
 @router.get("/competitors")
 def competitors():
     return ok(service.competitors())

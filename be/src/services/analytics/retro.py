@@ -228,6 +228,11 @@ def _churn_vs_frequency(s: Session, channel_id: int | None, week_end: date) -> d
             DailySubscriberStat.stat_date <= week_end,
         )
     ).all()
+    # A row with spans_days > 1 is NOT one day's churn — it's an entire collection
+    # gap's joined/left total dumped onto the day observation resumed. Ranking it
+    # as a single "worst leave day" would be a false signal (see
+    # telegram_owned.py::_upsert_daily_subscriber_stat); exclude it outright.
+    stats = [r for r in stats if (r.spans_days or 1) == 1]
     # need at least two DISTINCT days to draw a worst-vs-best contrast at all
     if len({r.stat_date for r in stats}) < 2:
         return empty

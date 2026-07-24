@@ -52,6 +52,11 @@ class DailySubscriberStat(Base):
     subs_joined: Mapped[int] = mapped_column(Integer, default=0)
     subs_left: Mapped[int] = mapped_column(Integer, default=0)
     subs_net: Mapped[int] = mapped_column(Integer, default=0)
+    # 1 for a normal day. >1 when this row's delta was seeded from a PRIOR row more
+    # than a day old (a collection gap) — the whole gap's joined/left/net total
+    # lands on this one calendar day, so consumers must not read it as "one day's
+    # growth" without checking this field first. See _upsert_daily_subscriber_stat.
+    spans_days: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

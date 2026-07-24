@@ -114,6 +114,7 @@ def compute_growth(
     joined = sum(r.subs_joined or 0 for r in rows)
     left = sum(r.subs_left or 0 for r in rows)
     net = sum(r.subs_net or 0 for r in rows)
+    has_gap = any((r.spans_days or 1) > 1 for r in rows)
     daily = [
         {
             "date": r.stat_date.isoformat(),
@@ -121,6 +122,10 @@ def compute_growth(
             "joined": r.subs_joined or 0,
             "left": r.subs_left or 0,
             "net": r.subs_net or 0,
+            # >1 means this row's totals are NOT one day's growth — they're the
+            # accumulated total across a collection gap this many days wide,
+            # bucketed onto this date because that's when observation resumed.
+            "spans_days": r.spans_days or 1,
         }
         for r in rows
     ]
@@ -131,7 +136,13 @@ def compute_growth(
         "joined": joined,
         "left": left,
         "net": net,
-        "days": len(rows),
+        # real elapsed calendar days, NOT a row count — with a collection gap there
+        # are fewer rows than days actually elapsed, so `len(rows)` would understate it.
+        "days": (rows[-1].stat_date - rows[0].stat_date).days + 1,
+        # True when any row's joined/left/net is a multi-day gap total, not one
+        # day's growth — the UI must caveat "Joined"/"Left" instead of implying
+        # per-day activity when this is set.
+        "has_collection_gap": has_gap,
         "first_date": rows[0].stat_date.isoformat(),
         "last_date": rows[-1].stat_date.isoformat(),
         "daily": daily,

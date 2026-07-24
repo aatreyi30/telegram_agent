@@ -246,6 +246,48 @@ def test_churn_vs_frequency_high_vs_low_churn_days():
     assert out["low_leave_days_posts_per_day"] == pytest.approx(5.0)
 
 
+def test_churn_vs_frequency_excludes_gap_spanning_rows():
+    """A row with spans_days > 1 is an entire collection outage's churn dumped on
+    one date, not one real bad day — it must never be ranked as a 'worst leave
+    day' alongside genuine single-day rows."""
+    from src.db.models import Channel, Post
+    from src.db.models_growth_snapshot import DailySubscriberStat
+    from src.db.session import session_scope
+    from src.services.analytics.retro import _churn_vs_frequency
+
+    with session_scope() as s:
+        ch = Channel(tg_channel_id=402, username="gapchurnch", title="C2")
+        s.add(ch)
+        s.flush()
+        channel_id = ch.id
+
+        week_end = date(2026, 6, 28)
+        # one huge gap-spanning row (would dominate as "worst churn" if not excluded)
+        s.add(DailySubscriberStat(channel_id=channel_id, stat_date=week_end - timedelta(days=13),
+                                  subs_start=1000, subs_end=500, subs_joined=0, subs_left=500,
+                                  subs_net=-500, spans_days=10))
+        # 6 genuine single days of low, real churn
+        for i in range(6):
+            d = week_end - timedelta(days=5 - i)
+            s.add(DailySubscriberStat(channel_id=channel_id, stat_date=d, subs_start=1000,
+                                      subs_end=995, subs_joined=0, subs_left=5, subs_net=-5,
+                                      spans_days=1))
+            base = datetime(d.year, d.month, d.day, 12, 0, tzinfo=timezone.utc)
+            for j in range(4):
+                s.add(Post(channel_id=channel_id, tg_message_id=2000 * i + j,
+                           posted_at=base + timedelta(minutes=j), collected_at=base))
+        s.flush()
+
+    with session_scope() as s:
+        out = _churn_vs_frequency(s, channel_id, week_end)
+
+    # only the 6 real single-day rows are eligible; with all subs_left==5 there's
+    # no worst/best contrast — never null-crash, and never let the 500-subs_left
+    # gap row win "worst leave day".
+    assert out["high_leave_days_posts_per_day"] == pytest.approx(4.0)
+    assert out["low_leave_days_posts_per_day"] == pytest.approx(4.0)
+
+
 def test_churn_vs_frequency_no_channel_is_null():
     from src.db.session import session_scope
     from src.services.analytics.retro import _churn_vs_frequency

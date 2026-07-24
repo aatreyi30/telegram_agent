@@ -67,6 +67,10 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("resolution_error", "TEXT"),
         ("resolution_attempts", "INTEGER DEFAULT 0"),
     ],
+    # gap-honesty: flag a subscriber-stat row whose joined/left/net total actually
+    # spans more than one calendar day (a collection outage), so it's never silently
+    # read as "one day's growth".
+    "daily_subscriber_stats": [("spans_days", "INTEGER DEFAULT 1")],
 }
 
 

@@ -4,7 +4,6 @@ parse defensively; numbers are fact-checked downstream (ai/factcheck.py)."""
 from __future__ import annotations
 
 import json
-import re
 
 from sqlalchemy.orm import Session
 
@@ -27,12 +26,53 @@ _DEFAULT_LOOT_SHARE = 0.4
 _MIN_TYPE_SHARE = 0.3
 
 
-def parse_plan(raw: str) -> dict:
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
+def _extract_json_object(text: str) -> str | None:
+    """The first top-level {...} object in ``text``, found by counting brace
+    depth (string-literal aware) rather than ``re.search(r"\\{.*\\}")``. The
+    regex is greedy and DOTALL, so it spans from the FIRST '{' to the LAST '}'
+    in the whole text — if the model appends any trailing content containing
+    its own '}' (a stray aside, a second example, markdown), the regex swallows
+    it too and json.loads fails with "Extra data". Scanning for the position
+    where depth actually returns to 0 gets exactly the real object regardless
+    of what follows it."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def parse_plan(raw: str, available_merchants: list[str] | None = None) -> dict:
+    obj = _extract_json_object(raw)
+    if obj is None:
         raise ValueError("no JSON object found in model output")
     try:
-        data = json.loads(m.group(0))
+        # strict=False: the model occasionally embeds a raw control character
+        # inside a string value (e.g. a stray byte in a "why" field) — valid
+        # enough to mean, invalid per strict JSON's ban on unescaped control
+        # chars in strings. That was rejecting a real, well-formed plan and
+        # falling back to the generic deterministic one ~1 in 4-8 generations.
+        data = json.loads(obj, strict=False)
     except json.JSONDecodeError as e:
         raise ValueError(f"plan JSON invalid: {e}") from e
     data.setdefault("post_slots", [])
@@ -42,26 +82,62 @@ def parse_plan(raw: str) -> dict:
     if not isinstance(data.get("post_slots"), list):
         raise ValueError("post_slots must be a list")
     _check_type_mix(data["post_slots"])
+    _check_merchants(data["post_slots"], available_merchants)
     return data
 
 
+def _check_merchants(slots: list[dict], available_merchants: list[str] | None) -> None:
+    """The prompt tells the model every slot's merchant MUST come from
+    AVAILABLE_MERCHANTS (the real live deal feed's vocabulary — see
+    build_plan_context). If it still invents one (e.g. "shopsy", which our
+    scraper never collects — see ALLOWED_MERCHANTS in deal_scraper.py), jit_fill
+    can't match it to a real deal and silently broadens to a different merchant,
+    so the schedule the operator sees would show a merchant that will never
+    actually post. Reject so the caller falls back to the deterministic plan,
+    same pattern as _check_type_mix."""
+    if not available_merchants:
+        return
+    avail = {m.lower() for m in available_merchants}
+    for sl in slots:
+        merchant = (sl.get("merchant") or "").strip().lower()
+        if merchant and merchant not in avail:
+            raise ValueError(
+                f"slot merchant {merchant!r} is not in today's live deal feed "
+                f"{sorted(avail)} — model invented a merchant we don't collect")
+
+
 def _check_type_mix(slots: list[dict]) -> None:
-    """G3 HARD variety floor. The prompt asks for a loot/single mix; if the model still
-    collapses a day with enough slots (>=4) into a single type, we reject the plan
-    (raise) so parse_plan's caller falls back to the deterministic plan — which enforces
-    the 30% mix floor. Previously this only logged, so 100%-single days shipped anyway
-    (the 'only one type/category' the operator flagged)."""
+    """G3 HARD variety floor. The prompt asks for a loot/single mix with a 30% floor per
+    type (_MIN_TYPE_SHARE — same floor the deterministic fallback enforces by construction);
+    if the model collapses a day with enough slots (>=4) into a single type, OR drifts one
+    type below that floor while technically including both, we reject the plan (raise) so
+    parse_plan's caller falls back to the deterministic plan. Previously this only checked
+    "at least 2 types present", so a plan could pass with e.g. 86%/14% single/loot (a real
+    case seen live) — technically mixed, but not the mix the prompt/floor actually asks
+    for. Previously-previously this only logged, so 100%-single days shipped anyway."""
     total = sum(max(int(sl.get("count") or 1), 1) for sl in slots)
     if total < 4:
         return
-    types = {(sl.get("type") or "single") for sl in slots}
-    if len(types) < 2:
+    counts: dict[str, int] = {}
+    for sl in slots:
+        t = sl.get("type") or "single"
+        counts[t] = counts.get(t, 0) + max(int(sl.get("count") or 1), 1)
+    if len(counts) < 2:
         logger.warning(
             "[ai.planner] day plan collapsed to type(s) %r across %d slots — rejecting so "
-            "the floor-enforcing deterministic fallback runs instead", types, total)
+            "the floor-enforcing deterministic fallback runs instead", counts, total)
         raise ValueError(
-            f"day plan collapsed to a single type {types} across {total} slots — "
+            f"day plan collapsed to a single type {counts} across {total} slots — "
             "violates the loot/single variety floor")
+    minority_share = min(counts.values()) / total
+    if minority_share < _MIN_TYPE_SHARE:
+        logger.warning(
+            "[ai.planner] day plan skews to %r across %d slots (minority share %.0f%%, "
+            "floor is %.0f%%) — rejecting so the floor-enforcing deterministic fallback "
+            "runs instead", counts, total, minority_share * 100, _MIN_TYPE_SHARE * 100)
+        raise ValueError(
+            f"day plan minority type share {minority_share:.0%} across {counts} "
+            f"({total} slots) is below the {_MIN_TYPE_SHARE:.0%} variety floor")
 
 
 def _split_digest_and_plan(raw: str) -> tuple[str, str]:
@@ -205,7 +281,16 @@ def _fallback_day_plan(day, plan_ctx: dict) -> dict:
     MERCHANT_MIX/available categories. Marked ``is_fallback`` so callers/persist
     know it's a stand-in, not a grounded plan."""
     windows = plan_ctx.get("posting_windows") or []
-    merchants = [m["merchant"] for m in (plan_ctx.get("merchant_mix") or []) if m.get("merchant")]
+    # merchant_mix ranks by HISTORICAL posting share, which can include a merchant
+    # no longer in today's live deal feed (e.g. the scraper's allowed retailers
+    # narrowed since those posts went out) — jit_fill could never actually fill
+    # such a slot, so a slot assigned that merchant would show a merchant that
+    # will never really post (same failure mode _check_merchants guards against
+    # on the AI path). Keep merchant_mix's ranking but restrict to what's real
+    # today; fall back to the live feed unranked if none of the ranked ones remain.
+    available_merchants = set(plan_ctx.get("available_merchants") or [])
+    ranked_merchants = [m["merchant"] for m in (plan_ctx.get("merchant_mix") or []) if m.get("merchant")]
+    merchants = [m for m in ranked_merchants if m in available_merchants] or sorted(available_merchants)
     categories = plan_ctx.get("available_categories") or []
     recommended = int(plan_ctx.get("recommended_posts")
                        or sum((w.get("posts") or 0) for w in windows) or 1)
@@ -353,7 +438,7 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
                 "is_fallback": True}
     digest, plan_text = _split_digest_and_plan(raw)
     try:
-        plan = parse_plan(plan_text)
+        plan = parse_plan(plan_text, plan_ctx.get("available_merchants"))
     except ValueError:
         logger.warning("[ai.planner] unparseable day plan output — using "
                        "deterministic fallback")
@@ -366,11 +451,16 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
 
 
 def _parse_week_plan(raw: str) -> dict:
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
+    obj = _extract_json_object(raw)
+    if obj is None:
         raise ValueError("no JSON object found in model output")
     try:
-        data = json.loads(m.group(0))
+        # strict=False: the model occasionally embeds a raw control character
+        # inside a string value (e.g. a stray byte in a "why" field) — valid
+        # enough to mean, invalid per strict JSON's ban on unescaped control
+        # chars in strings. That was rejecting a real, well-formed plan and
+        # falling back to the generic deterministic one ~1 in 4-8 generations.
+        data = json.loads(obj, strict=False)
     except json.JSONDecodeError as e:
         raise ValueError(f"weekly plan JSON invalid: {e}") from e
     data.setdefault("daily_themes", [])
@@ -453,14 +543,47 @@ def _demo() -> None:
     mixing both types across windows."""
     from datetime import date
 
+    # trailing content after the real object (e.g. a stray aside with its own
+    # '}') must not get swallowed into "Extra data" — see _extract_json_object.
+    trailing = _extract_json_object('noise {"a": {"b": 1}} more noise } and }')
+    assert trailing == '{"a": {"b": 1}}', trailing
+
     plan = parse_plan(
-        '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x",'
-        '"post_slots":[{"type":"single","window_ist":"09:00-12:00","count":8,'
-        '"theme":"electronics","merchant":"amazon","max_price":null,"why":"x"}],'
+        '{"date":"2026-07-21","recommended_posts":9,"cadence_why":"x",'
+        '"post_slots":[{"type":"single","window_ist":"09:00-12:00","count":6,'
+        '"theme":"electronics","merchant":"amazon","max_price":null,"why":"x"},'
+        '{"type":"collection","window_ist":"18:00-21:00","count":3,'
+        '"theme":"fashion","merchant":"ajio","max_price":null,"why":"x"}],'
         '"emphasis":"e","watch":"w","cited_numbers":[]}'
     )
-    assert plan["recommended_posts"] == 8
-    assert len(plan["post_slots"]) == 1  # _check_type_mix only logs, never raises
+    assert plan["recommended_posts"] == 9
+    assert len(plan["post_slots"]) == 2  # a real mix (minority share 3/9=33% clears the 30% floor)
+
+    skewed_raw = (
+        '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x",'
+        '"post_slots":[{"type":"single","window_ist":"09:00-12:00","count":7,'
+        '"theme":"electronics","merchant":"amazon","max_price":null,"why":"x"},'
+        '{"type":"collection","window_ist":"18:00-21:00","count":1,'
+        '"theme":"fashion","merchant":"ajio","max_price":null,"why":"x"}],'
+        '"emphasis":"e","watch":"w","cited_numbers":[]}'
+    )
+    try:
+        parse_plan(skewed_raw)  # minority share 1/8=12.5%, below the 30% floor
+        raise AssertionError("expected a below-floor type skew to be rejected")
+    except ValueError:
+        pass
+
+    same_raw = (
+        '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x",'
+        '"post_slots":[{"type":"single","window_ist":"09:00-12:00","count":8,'
+        '"theme":"electronics","merchant":"shopsy","max_price":null,"why":"x"}],'
+        '"emphasis":"e","watch":"w","cited_numbers":[]}'
+    )
+    try:
+        parse_plan(same_raw, available_merchants=["amazon", "flipkart", "myntra", "ajio"])
+        raise AssertionError("expected merchant not in feed to be rejected")
+    except ValueError:
+        pass
 
     week = _parse_week_plan(
         '{"week_start":"2026-07-20","direction":"d",'
@@ -476,6 +599,7 @@ def _demo() -> None:
         "posting_windows": [{"part": "morning", "hours": "09:00-12:00", "posts": 4},
                             {"part": "evening", "hours": "18:00-21:00", "posts": 4}],
         "merchant_mix": [{"merchant": "amazon"}, {"merchant": "flipkart"}],
+        "available_merchants": ["amazon", "flipkart"],
         "available_categories": ["electronics", "fashion"],
         "recommended_posts": 8,
         "this_week_direction": {"loot_deal_ratio": {"loot": 4, "deal": 6}},

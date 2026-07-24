@@ -386,10 +386,23 @@ class LinkResolutionEngine(BaseCollector):
 
             async def _bounded(url: str) -> _ResolveOutcome:
                 async with sem:
-                    return await self._resolve_one(
-                        client, insecure_client, cache, url,
-                        domain_by_url.get(url), down_hosts,
-                    )
+                    try:
+                        return await self._resolve_one(
+                            client, insecure_client, cache, url,
+                            domain_by_url.get(url), down_hosts,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Last-resort net: an unanticipated failure for ONE url (e.g. a
+                        # malformed extra-hop redirect target reaching httpx's request
+                        # builder as a bare relative path, which raises a plain
+                        # ValueError outside _RESOLUTION_EXCEPTIONS) must not blow up
+                        # the whole gather() and silently drop every other url's real,
+                        # already-fetched result in this batch. See link_resolution.py
+                        # incident: this was discarding up to 2000 resolutions per run,
+                        # every run, for days — logged as "resolved up to 0 shortlinks"
+                        # while genuinely resolving 0.
+                        logger.warning("[link_resolution] unexpected failure resolving %s: %s", url, exc)
+                        return _ResolveOutcome(url, None, None, _STATUS_FAILED, error=str(exc)[:500])
 
             outcomes = await asyncio.gather(*[_bounded(u) for u in by_url])
 
@@ -566,7 +579,12 @@ class LinkResolutionEngine(BaseCollector):
             try:
                 await asyncio.sleep(min(max(delay, 0.0), 2.0))
                 response = await self._fetch(client, insecure_client, next_url, down_hosts)
-            except _RESOLUTION_EXCEPTIONS as exc:
+            except (*_RESOLUTION_EXCEPTIONS, ValueError) as exc:
+                # ValueError alongside the usual network exceptions: a meta-refresh/JS
+                # redirect target can urljoin to something httpx's request builder still
+                # rejects (e.g. a bare "/blank" with no scheme reaching stdlib urllib's
+                # cookie-jar compat shim -> "unknown url type"). Degrade gracefully as
+                # this branch already claims to, instead of propagating.
                 logger.warning(
                     "[link_resolution] extra-hop failed for %s -> %s: %s",
                     url, next_url, exc,

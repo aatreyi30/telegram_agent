@@ -81,6 +81,47 @@ def test_upsert_creates_then_accumulates_joined_and_left():
         assert got == t2
 
 
+def test_upsert_flags_a_collection_gap_instead_of_hiding_it():
+    """Regression test for the confirmed bug: a multi-day silent gap between two
+    DailySubscriberStat rows dumped the ENTIRE gap's growth onto the resumption
+    day with no way to tell it apart from a real single-day spike. spans_days
+    must record the real gap width, and get_growth must surface has_collection_gap."""
+    _fresh_db()
+    from sqlalchemy import select
+    from src.db.models import Channel
+    from src.db.models_growth_snapshot import DailySubscriberStat
+    from src.db.session import session_scope
+    from src.services.collection.telegram_owned import _upsert_daily_subscriber_stat
+    from src.services.analytics.growth import get_growth
+
+    with session_scope() as s:
+        ch = Channel(tg_channel_id=303, username="gapch", title="Gap", kind="owned")
+        s.add(ch)
+        s.flush()
+        channel_id = ch.id
+
+    day1 = date(2026, 7, 10)
+    day2 = date(2026, 7, 24)  # 14 days later — a real collection gap
+    t1 = datetime(2026, 7, 10, 6, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 7, 24, 6, 0, tzinfo=timezone.utc)
+
+    with session_scope() as s:
+        _upsert_daily_subscriber_stat(s, channel_id, day1, 26506, t1)
+        _upsert_daily_subscriber_stat(s, channel_id, day2, 28468, t2)
+
+    with session_scope() as s:
+        row = s.scalar(select(DailySubscriberStat).where(
+            DailySubscriberStat.channel_id == channel_id, DailySubscriberStat.stat_date == day2))
+        assert row.spans_days == 14
+        assert row.subs_joined == 1962  # still the real total — just now labeled honestly
+
+        g = get_growth(s)
+        assert g["has_collection_gap"] is True
+        assert g["days"] == 15  # real elapsed calendar span, not the 2-row count
+        gap_row = next(d for d in g["daily"] if d["date"] == "2026-07-24")
+        assert gap_row["spans_days"] == 14
+
+
 def test_get_growth_shape_and_date_filter():
     _fresh_db()
     from datetime import date as date_cls

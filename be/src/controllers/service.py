@@ -1401,6 +1401,7 @@ def queue(page: int = 1, page_size: int = 20, date: str | None = None,
                 "merchant": facts["merchant"], "affiliate_status": facts["affiliate_status"],
                 "text": gp.rendered_text if gp is not None else None,
                 "bucket": gp.selection_bucket if gp is not None else None,
+                "rationale": gp.strategy_rationale if gp is not None else None,
                 "status": r.status,
                 "scheduled_at": r.scheduled_at.isoformat() if r.scheduled_at else None,
                 "overdue": bool(r.scheduled_at and r.status in _pending
@@ -1408,6 +1409,76 @@ def queue(page: int = 1, page_size: int = 20, date: str | None = None,
                 "attempts": f"{r.attempts}/{r.max_attempts}",
                 "note": (r.last_error or "")})
     return {"counts": counts, "items": items, **_page_meta(total, page, page_size)}
+
+
+def activity_recent(since: str | None = None, limit: int = 20) -> dict:
+    """Recent real events — drafts written, posts sent/blocked, scheduler jobs
+    completed — merged into one feed, newest first. Not a new data source: a
+    union+sort over GeneratedPost/ScheduledPost/SchedulerRun, the same tables
+    `queue()`/`drafts()`/`scheduler_runs()` already read. Powers the live
+    activity toast stream and the Overview "since you were last here" digest.
+    """
+    from datetime import datetime, timezone
+    from src.db.models_scheduler import SchedulerRun
+
+    cutoff = None
+    if since:
+        try:
+            cutoff = datetime.fromisoformat(since.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            cutoff = None
+
+    events: list[dict] = []
+    with session_scope() as s:
+        gp_q = select(GeneratedPost).order_by(GeneratedPost.generated_at.desc()).limit(limit)
+        if cutoff:
+            gp_q = gp_q.where(GeneratedPost.generated_at > cutoff)
+        for gp in s.scalars(gp_q):
+            facts = _post_facts(gp)
+            events.append({
+                "type": "draft_created",
+                "at": gp.generated_at.isoformat() if gp.generated_at else None,
+                "label": f"Drafted a post — {facts['merchant'] or 'mixed'}, {gp.post_type or 'post'}",
+                "ref_id": gp.id,
+            })
+
+        sp_pub_q = (select(ScheduledPost)
+                    .where(ScheduledPost.status == ScheduleStatus.PUBLISHED,
+                           ScheduledPost.published_at.isnot(None))
+                    .order_by(ScheduledPost.published_at.desc()).limit(limit))
+        if cutoff:
+            sp_pub_q = sp_pub_q.where(ScheduledPost.published_at > cutoff)
+        for sp in s.scalars(sp_pub_q):
+            events.append({
+                "type": "post_published", "at": sp.published_at.isoformat(),
+                "label": f"Sent to {sp.channel_ref}", "ref_id": sp.generated_post_id,
+            })
+
+        sp_blk_q = (select(ScheduledPost)
+                    .where(ScheduledPost.status == ScheduleStatus.BLOCKED)
+                    .order_by(ScheduledPost.updated_at.desc()).limit(limit))
+        if cutoff:
+            sp_blk_q = sp_blk_q.where(ScheduledPost.updated_at > cutoff)
+        for sp in s.scalars(sp_blk_q):
+            events.append({
+                "type": "post_blocked",
+                "at": sp.updated_at.isoformat() if sp.updated_at else None,
+                "label": f"Blocked — {(sp.last_error or 'no reason recorded')[:80]}",
+                "ref_id": sp.generated_post_id,
+            })
+
+        job_q = (select(SchedulerRun).where(SchedulerRun.ended_at.isnot(None))
+                 .order_by(SchedulerRun.ended_at.desc()).limit(limit))
+        if cutoff:
+            job_q = job_q.where(SchedulerRun.ended_at > cutoff)
+        for r in s.scalars(job_q):
+            events.append({
+                "type": "job_run", "at": r.ended_at.isoformat(),
+                "label": f"{r.scheduler_key} — {r.status}", "ref_id": None,
+            })
+
+    events.sort(key=lambda e: e["at"] or "", reverse=True)
+    return {"events": events[:limit], "server_time": datetime.now(timezone.utc).isoformat()}
 
 
 def _cadence_minutes_by_key() -> dict[str, int]:

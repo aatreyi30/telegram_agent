@@ -76,6 +76,11 @@ def _upsert_daily_subscriber_stat(s, channel_id: int, day, count: int, updated_a
             .order_by(DailySubscriberStat.stat_date.desc())
         )
         start = prev.subs_end if prev else count
+        # How many real calendar days this seed delta actually covers — 1 for a
+        # normal consecutive day, more when the PREVIOUS row is older than
+        # yesterday (a collection gap). Callers must not read joined/left/net as
+        # "today's growth" without checking this.
+        span = (day - prev.stat_date).days if prev else 1
         s.add(
             DailySubscriberStat(
                 channel_id=channel_id,
@@ -85,6 +90,7 @@ def _upsert_daily_subscriber_stat(s, channel_id: int, day, count: int, updated_a
                 subs_joined=max(count - start, 0),
                 subs_left=max(start - count, 0),
                 subs_net=count - start,
+                spans_days=max(span, 1),
                 updated_at=updated_at,
             )
         )

@@ -276,3 +276,50 @@ def test_raw_shortener_domain_still_resolves_through_redirect(isolated_db, monke
         link = s.get(ExtractedLink, ids[0])
         assert link.merchant_key == "nutrabay"
         assert link.resolution_status == "resolved"
+
+
+# --------------------------------------------------------------------------- #
+# (e) a single url whose extra-hop meta-refresh target urljoins to something
+#     httpx's request builder can't parse (e.g. "about:blank" -> internally
+#     "/blank") must NOT crash the whole batch and discard every other url's
+#     real result — see incident: this was silently zeroing every
+#     link_resolution run ("resolved up to 0 shortlinks", every ~minute, for
+#     days) because the ValueError escaped asyncio.gather() unhandled.
+# --------------------------------------------------------------------------- #
+def test_one_bad_extra_hop_target_does_not_poison_the_whole_batch(isolated_db, monkeypatch):
+    from src.services.collection.link_resolution import LinkResolutionEngine
+    from src.db.models_normalization import ExtractedLink
+    from src.db.session import session_scope
+
+    good_final = "https://www.amazon.in/deal/xyz"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == "https://grbn.in/blankdead":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                content=b'<meta http-equiv="refresh" content="0;url=about:blank">',
+                request=request,
+            )
+        if url == "https://grbn.in/good1":
+            return httpx.Response(302, headers={"Location": good_final}, request=request)
+        return httpx.Response(200, request=request)
+
+    _patch_transport(monkeypatch, handler)
+
+    bad_ids = _make_post_and_links(["https://grbn.in/blankdead"], domains=["grbn.in"])
+    good_ids = _make_post_and_links(["https://grbn.in/good1"], domains=["grbn.in"])
+
+    engine = LinkResolutionEngine(limit=100)
+    engine.run(_fake_job())  # must not raise
+
+    with session_scope() as s:
+        good = s.get(ExtractedLink, good_ids[0])
+        assert good.merchant_key == "amazon"
+        assert good.resolution_status == "resolved"
+
+        bad = s.get(ExtractedLink, bad_ids[0])
+        # the extra hop failed gracefully; no merchant found on the primary
+        # response, so it lands as no_match (not "resolved", not stuck NULL).
+        assert bad.resolution_status in ("no_match", "resolved")

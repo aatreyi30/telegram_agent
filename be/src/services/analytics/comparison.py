@@ -304,6 +304,23 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
                 ent["posts_per_hour_ist"] = [0] * 24
             entities.append(ent)
 
+    # Flag entities whose observation window is wildly different from owned's —
+    # posts_per_day/avg_views_per_post are computed over each entity's OWN window
+    # independently, so comparing e.g. owned's 365-day history against a
+    # competitor tracked for only 20 days looks apples-to-apples but isn't. Never
+    # silently normalize this (we can't fabricate the missing history); flag it
+    # so the UI can caveat instead of implying a fair comparison.
+    owned_window_days = owned.get("window_days")
+    for ent in entities:
+        if ent.get("is_owned"):
+            continue
+        cwd = ent.get("window_days")
+        if owned_window_days and cwd:
+            ratio = cwd / owned_window_days
+            ent["window_mismatch"] = ratio < 0.5 or ratio > 2.0
+        else:
+            ent["window_mismatch"] = None
+
     return {
         "entities": entities,
         "unavailable": UNAVAILABLE,
