@@ -165,6 +165,15 @@ def channel_style(s: Session) -> dict:
             "top_hours_ist": st.top_hours_ist}
 
 
+def segment_performance(s: Session) -> dict:
+    """Top/bottom categories and discount bands by engagement rate — dimension-
+    level evidence (deal-dimension-intelligence AC5) so the daily plan can cite
+    a category/discount-band number instead of restating the channel average."""
+    from src.services.analytics import views as vv
+
+    return vv.segment_performance(s)
+
+
 def merchant_profiles(s: Session) -> list[dict]:
     return [{"merchant": p.merchant_key, "posts": p.post_count_owned,
              "avg_views_per_day": p.avg_views_per_day, "price_median": p.price_median,

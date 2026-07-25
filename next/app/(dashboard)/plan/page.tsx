@@ -21,9 +21,21 @@ import { postTypeLabel, merchantLabel, categoryLabel, titleCase, statusLabel, is
 import { useRegenerateDailyPlan, useRegenerateWeeklyPlan } from "@/queries/mutations";
 import { useDailyBrief, useLatestRetro, useWeeklyBrief } from "@/queries/queries";
 import type {
-  DailyBrief, DailyPlanToday, PlanRisk, RetroLatest, WeeklyBrief,
+  DailyBrief, DailyPlanToday, DailySlot, PlanRisk, RetroLatest, WeeklyBrief,
   WeeklyBriefDay, YesterdayBrief,
 } from "@/types/api";
+
+/** A slot's price intent, as the planner expressed it: a cap ("≤ ₹999"), a floor
+ * ("≥ ₹500"), or a band. Blank when the slot set no price constraint — most don't,
+ * and an em dash says that more honestly than a fabricated range. */
+function priceIntent(s: DailySlot): string {
+  const lo = s.min_price ?? null;
+  const hi = s.max_price ?? null;
+  if (lo != null && hi != null) return `₹${lo}–₹${hi}`;
+  if (hi != null) return `≤ ₹${hi}`;
+  if (lo != null) return `≥ ₹${lo}`;
+  return "—";
+}
 
 /** Compact "Steer this plan" control shared by the daily TodayCard and the weekly
  * card: a directive textarea (prefilled with whatever's already persisted on the
@@ -313,19 +325,21 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Window (IST)</TableHead><TableHead>Posts</TableHead>
+                  <TableHead>Time (IST)</TableHead><TableHead>Posts</TableHead>
                   <TableHead>Type</TableHead><TableHead>Theme</TableHead>
-                  <TableHead>Merchant</TableHead><TableHead>Why</TableHead>
+                  <TableHead>Merchant</TableHead><TableHead>Price</TableHead>
+                  <TableHead>Why</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {t.slots.map((s, i) => (
                   <TableRow key={i}>
-                    <TableCell className="font-medium tabular-nums">{s.window_ist}</TableCell>
-                    <TableCell className="tabular-nums">{s.count ?? 1}</TableCell>
+                    <TableCell className="font-medium tabular-nums">{s.time_ist || s.window_ist || "—"}</TableCell>
+                    <TableCell className="tabular-nums">{s.time_ist ? 1 : (s.count ?? 1)}</TableCell>
                     <TableCell><Badge variant="secondary" className="font-medium">{postTypeLabel(s.type)}</Badge></TableCell>
                     <TableCell className="text-muted-foreground">{categoryLabel(s.theme) || "—"}</TableCell>
                     <TableCell className="text-muted-foreground">{merchantLabel(s.merchant)}</TableCell>
+                    <TableCell className="text-muted-foreground tabular-nums">{priceIntent(s)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{s.why || "—"}</TableCell>
                   </TableRow>
                 ))}

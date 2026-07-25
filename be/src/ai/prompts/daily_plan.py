@@ -32,8 +32,11 @@ DAILY_PLAN_SYSTEM = (
     "(the channel's own emoji/caption-length/cta/coupon/media rates and top hours), a "
     "STYLE_FOLLOWER_CORRELATION (per-day style features vs that day's net follower "
     "change, plus median-split comparisons — day-level and CORRELATIONAL, never causal), "
-    "a COMPETITOR_BENCHMARK (our style + merchant share vs competitors'), and any "
-    "upcoming sale/festival EVENT), do the following, in order:\n"
+    "a COMPETITOR_BENCHMARK (our style + merchant share vs competitors'), a "
+    "SEGMENT_PERFORMANCE (top/bottom categories and discount bands by engagement "
+    "rate, each with its sample size n — dimension-level evidence, gated at a "
+    "minimum n so a thin bucket never ranks), and any upcoming sale/festival "
+    "EVENT), do the following, in order:\n"
     "1. Write a DIGEST (3-5 sentences, plain language) that doubles as the operator's "
     "morning briefing: what went WELL or badly YESTERDAY vs the recent norm (cite the "
     "numbers), then what to focus on TODAY and why, and END with the 1-2 concrete "
@@ -51,13 +54,19 @@ DAILY_PLAN_SYSTEM = (
     "trajectory (what the channel has actually been doing lately) — NEVER the "
     "LIFETIME_BASELINE, which is a stale all-time average dragged down by early "
     "low-activity history and does not describe current behaviour.\n"
-    "3. Build post_slots so every window listed in POSTING_WINDOWS is covered — one "
-    "slot per window at minimum, splitting a window into multiple slots when it "
-    "carries many posts (this is exactly where a window gets both a `single` slot and "
-    "a `collection` slot, rather than one type for its whole span). Never drop a "
-    "window silently. Across all slots, the `count` values should add up to roughly "
-    "recommended_posts, and the theme/merchant spread should reflect "
-    "DEAL_TYPE_ALLOCATION and MERCHANT_MIX.\n"
+    "3. Build post_slots as ONE OBJECT PER POST — not per window. Every object is "
+    "exactly one post, firing at its own `time_ist` (an exact HH:MM minute), never a "
+    "shared count. Cover every window listed in POSTING_WINDOWS with at least one "
+    "post's `time_ist` falling inside it, and SPREAD each window's posts across its "
+    "full span (e.g. a 09:00-12:00 window carrying 5 posts should land roughly every "
+    "~35-40 minutes across the 3 hours, not bunched in the first few minutes) — never "
+    "stack multiple posts on the same or adjacent minutes. Never drop a window "
+    "silently. The total number of post_slots objects should equal roughly "
+    "recommended_posts, and the theme/merchant spread across them should reflect "
+    "DEAL_TYPE_ALLOCATION and MERCHANT_MIX. Two chronologically CONSECUTIVE posts must "
+    "not repeat the same `merchant` or the same `theme` when the day's available "
+    "deals (AVAILABLE_MERCHANTS/AVAILABLE_CATEGORIES) offer an alternative — this is "
+    "how a single window ends up with a genuine mix instead of one brand repeated.\n"
     "   MIX BOTH TYPES ACROSS THE DAY. Split post_slots between `single` and "
     "`collection` per THIS_WEEK_DIRECTION's loot_deal_ratio when present (e.g. a "
     "loot:deal of 4:6 means today runs roughly 40% collection / 60% single, spread "
@@ -84,7 +93,12 @@ DAILY_PLAN_SYSTEM = (
     "plainly (e.g. 'no historical hourly data yet for this slot') instead of generic "
     "filler like 'this is a peak hour'. Use DAY_OF_WEEK when it's relevant to a "
     "weekday-vs-weekend timing pattern the DATA actually supports — don't assert a "
-    "weekday/weekend effect that isn't backed by a number.\n"
+    "weekday/weekend effect that isn't backed by a number. IMPORTANT: if SEGMENT_PERFORMANCE "
+    "is available and has an entry for this slot's theme (category) or discount band, cite "
+    "ITS engagement_rate and n instead of (or in addition to, if it adds real information) "
+    "the channel-wide avg_views/engagement_rate — a dimension-level number is always more "
+    "specific evidence than restating the channel average. If no SEGMENT_PERFORMANCE entry "
+    "exists for this slot's category/band, say so and fall back to the channel average.\n"
     "   b. MERCHANT FIT, AS A DECISION vs THE NEXT-BEST — cite the chosen merchant's "
     "recent_share, avg_views_per_day, sample_size, and basis from MERCHANT_MIX, AND "
     "name the specific runner-up merchant you passed over for this slot with ITS "
@@ -130,13 +144,16 @@ DAILY_PLAN_SYSTEM = (
     "EXACT shape (field names unchanged):\n"
     '{"date":"YYYY-MM-DD","recommended_posts":<int>,'
     '"cadence_why":"<why this many, grounded in RECENT_CADENCE/trajectory>",'
-    '"post_slots":[{"type":"single|collection","window_ist":"HH:MM-HH:MM",'
-    '"count":<int>,"theme":"<category>","merchant":"<merchant>","max_price":<int or null>,'
+    '"post_slots":[{"type":"single|collection","time_ist":"HH:MM",'
+    '"theme":"<category>","merchant":"<merchant>","max_price":<int or null>,'
     '"min_price":<int or null>,'
     '"why":"<3-4 sentences: type-choice(single vs collection)-with-stat + timing + '
     'merchant-fit-vs-next-best + expected-outcome/continuity-with-yesterday + event '
     'if relevant>"}],'
     '"emphasis":"<one line>","watch":"<one line>","cited_numbers":[<numbers you used>]}\n'
+    "Each post_slots object is EXACTLY ONE POST at EXACTLY `time_ist` — there is no "
+    "`count` field anymore; if you want N posts, output N objects with N different "
+    "spread-out `time_ist` values.\n"
     "No text before the digest and no text after the closing brace.\n"
     "max_price/min_price: OPTIONAL and only for `collection` (loot) slots — set integer "
     "rupee bounds to make a price-tier loot. max_price alone = 'Under ₹X'; both together = "
@@ -148,8 +165,8 @@ DAILY_PLAN_SYSTEM = (
 
     "CONTEXT: This is a Telegram deals/coupons channel targeting Indian shoppers; the "
     "audience is deal-seekers, not general subscribers, so relevance and price/discount "
-    "framing matter more than generic engagement tactics. All posting windows and times "
-    "you are given and must output (window_ist) are in IST. The plan you produce is a "
+    "framing matter more than generic engagement tactics. All posting windows you are "
+    "given, and every `time_ist` you output, are in IST. The plan you produce is a "
     "deterministic input the content-generation engine expands into actual posts — it "
     "is not published directly, so it must be concrete and unambiguous, not "
     "aspirational.\n\n"

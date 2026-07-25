@@ -4,6 +4,7 @@ parse defensively; numbers are fact-checked downstream (ai/factcheck.py)."""
 from __future__ import annotations
 
 import json
+import re
 
 from sqlalchemy.orm import Session
 
@@ -30,40 +31,210 @@ _MIN_TYPE_SHARE = 0.3
 _MAX_MERCHANT_SHARE = 0.4
 
 
-def _repair_merchant_diversity(slots: list[dict], available_merchants: list[str] | None) -> None:
-    """Enforce merchant rotation the prompt only asks for (whole windows come back
-    one merchant otherwise). Keep the model's merchant unless it repeats the prior
-    slot in the same window, isn't in today's feed, or exceeds ``_MAX_MERCHANT_SHARE``
-    — reassigning the fewest slots possible. A reassigned slot's ``why`` was written
-    for the OLD merchant, so overwrite it with a number-free rotation note (else the
-    text contradicts the data). No-op with <2 available merchants (a feed constraint)."""
-    merchants = [m for m in (available_merchants or []) if m]
-    if len(merchants) < 2 or not slots:
+_HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
+
+def _slot_minute(sl: dict) -> int | None:
+    """Minutes-since-midnight parsed from a slot's per-post ``time_ist`` (new
+    shape) or, for a legacy slot, the first HH:MM in its ``window_ist`` span.
+    None if neither parses — the caller keeps such a slot's original list
+    position as a fallback ordering."""
+    raw = sl.get("time_ist") or sl.get("window_ist") or ""
+    m = _HHMM_RE.search(raw)
+    if not m:
+        return None
+    return (int(m.group(1)) % 24) * 60 + int(m.group(2)) % 60
+
+
+def _feed_pairs(available_deals: list[dict] | None) -> dict[tuple[str, str], int]:
+    """(merchant, category) -> live-feed deal count, from ``plan_ctx["available_deals"]``
+    (see ``ai/context.py:available_deals``). The only source of truth for which
+    merchant/category pairings the feed can actually fill — a slot paired outside
+    this set is one ``jit_fill`` can never satisfy. Used both to build the
+    fallback plan's rotation and to keep ``_repair_plan_diversity``'s
+    reassignments feed-valid."""
+    counts: dict[tuple[str, str], int] = {}
+    for d in available_deals or []:
+        m, c = d.get("merchant_key"), d.get("category")
+        if m and c:
+            counts[(m, c)] = counts.get((m, c), 0) + 1
+    return counts
+
+
+def _pair_sequence(pair_counts: dict[tuple[str, str], int]) -> list[tuple[str, str]]:
+    """A round-robin (merchant, category) rotation from ``_feed_pairs``: cycle
+    merchants ordered by total stock (deepest first), and within each merchant
+    cycle its own categories (deepest first) one step per lap. This visits
+    every real pairing once — deepest merchants/categories first — before any
+    pairing repeats, so a 12-post day spans far more than
+    ``max(len(merchants), len(categories))`` distinct pairs, and a merchant
+    only ever gets a category it genuinely stocks."""
+    if not pair_counts:
+        return []
+    by_merchant: dict[str, dict[str, int]] = {}
+    for (m, c), n in pair_counts.items():
+        by_merchant.setdefault(m, {})[c] = n
+    merchant_order = sorted(by_merchant, key=lambda m: (-sum(by_merchant[m].values()), m))
+    cat_cycles = {m: [c for c, _ in sorted(by_merchant[m].items(), key=lambda kv: (-kv[1], kv[0]))]
+                  for m in merchant_order}
+    idx = {m: 0 for m in merchant_order}
+    seq: list[tuple[str, str]] = []
+    total = sum(len(v) for v in cat_cycles.values())
+    while len(seq) < total:
+        for m in merchant_order:
+            if idx[m] < len(cat_cycles[m]):
+                seq.append((m, cat_cycles[m][idx[m]]))
+                idx[m] += 1
+    return seq
+
+
+def _repair_plan_diversity(slots: list[dict], available_merchants: list[str] | None,
+                            available_categories: list[str] | None = None,
+                            available_pairs: set[tuple[str, str]] | dict[tuple[str, str], int] | None = None
+                            ) -> None:
+    """Enforce merchant AND theme rotation the prompt only asks for (a run of
+    slots otherwise comes back one merchant/category in a row). Renamed from
+    ``_repair_merchant_diversity`` now that it balances both dimensions.
+    Operates on the slots' CHRONOLOGICAL order (parsed via ``_slot_minute``),
+    not window grouping — with one-slot-per-post there's no window bucket left
+    to group by, and a legacy plan's slots are already chronological by list
+    order. Keeps the model's merchant unless it repeats the chronologically
+    PRIOR slot, isn't in today's feed, or exceeds ``_MAX_MERCHANT_SHARE``;
+    keeps the model's theme unless it repeats the prior slot's theme and an
+    alternative category is available — reassigning the fewest slots
+    possible. A reassigned slot's ``why`` was written for the OLD merchant/
+    theme, so overwrite it with a number-free rotation note (else the text
+    contradicts the data). No-op on a dimension with <2 available options (a
+    feed constraint). ``available_pairs`` (optional, keyword-only — new
+    callers can pass it, ``ai_execution.py``'s existing positional 3-arg call
+    stays valid and unconstrained) is the set of (merchant, category) pairs
+    the live feed can actually fill (``_feed_pairs``); when given, a
+    reassignment is only made into a pairing that's actually stocked — if no
+    valid alternative exists the slot is left as-is rather than stranded on
+    an impossible combination. ``available_pairs`` may instead be a
+    ``{pair: live_deal_count}`` dict (``_feed_pairs``'s own return shape,
+    which a plain membership check still works against) — when it is, a
+    pairing already carrying as many slots as it has deals is ALSO treated
+    as a violation eligible for reassignment (same soft-cap-then-last-resort
+    shape as the merchant cap below), and the reassignment target prefers
+    deeper-stocked pairings. A bare ``set`` (no counts) skips this stock
+    check — unconstrained by depth, same as before.
+
+    A single slot is one (merchant, theme) PAIR, but merchant and theme were
+    historically repaired in two independent passes, one dimension at a
+    time. That deadlocks when ``available_pairs`` is small (e.g. exactly 2
+    pairs that differ in BOTH dimensions): moving merchant alone lands on a
+    pairing not in the set, so the move is rejected and the slot is left
+    unchanged — same for theme alone — even though alternating the PAIR as a
+    whole is perfectly valid. So both dimensions are now resolved together,
+    per slot, in one chronological pass: try keeping the model's pick, else
+    the smallest single-dimension move that stays inside ``available_pairs``
+    (as before), and only when that alone can't clear the adjacency
+    violation, fall back to swapping to a different valid PAIR (moving both
+    fields together). Keep -> single-dimension move -> pair swap -> keep as
+    a last resort (never stranded on an invalid pair)."""
+    if not slots:
         return
-    windows: dict[str, list[dict]] = {}
-    for sl in slots:
-        windows.setdefault(sl.get("window_ist") or "", []).append(sl)
-    cap = max(round(len(slots) * _MAX_MERCHANT_SHARE), 1)
-    counts = {m: 0 for m in merchants}
-    for win, win_slots in windows.items():
-        prev = None
-        for sl in win_slots:
-            cur = sl.get("merchant")
-            keep = (cur in counts and cur != prev and counts[cur] < cap)
-            if keep:
-                m = cur
-            else:
-                eligible = [x for x in merchants if counts[x] < cap] or merchants
-                pick_from = [x for x in eligible if x != prev] or eligible
-                m = min(pick_from, key=lambda x: counts[x])
-                if m != cur:
-                    sl["merchant"] = m
-                    sl["why"] = (f"Assigned {m} to keep the {win or 'day'} window "
-                                 "from concentrating on one store — auto-balanced for "
-                                 "merchant diversity, so this slot rotates off the "
-                                 "merchant the previous slot used.")
-            counts[m] += 1
-            prev = m
+    ordered = sorted(slots, key=lambda sl: (_slot_minute(sl) is None, _slot_minute(sl) or 0))
+    changed: dict[int, list[str]] = {}
+
+    def _pair_ok(m: str | None, c: str | None) -> bool:
+        return available_pairs is None or not m or not c or (m, c) in available_pairs
+
+    # Stock depth, when ``available_pairs`` was handed the ``_feed_pairs`` dict rather
+    # than a bare set — {} (falsy) for a set or None, which disables every depth check
+    # below exactly like today (a plain set carries no count information to check).
+    pair_counts: dict[tuple[str, str], int] = (
+        available_pairs if isinstance(available_pairs, dict) else {})
+    pair_used: dict[tuple[str, str], int] = {}
+
+    merchants = [m for m in (available_merchants or []) if m]
+    categories = [c for c in (available_categories or []) if c]
+    do_merchant = len(merchants) >= 2
+    do_theme = len(categories) >= 2
+    if not do_merchant and not do_theme:
+        return
+
+    cap = max(round(len(slots) * _MAX_MERCHANT_SHARE), 1) if do_merchant else None
+    counts: dict[str, int] = {m: 0 for m in merchants} if do_merchant else {}
+    prev_m: str | None = None
+    prev_c: str | None = None
+
+    for sl in ordered:
+        cur_m, cur_c = sl.get("merchant"), sl.get("theme")
+        m, c = cur_m, cur_c
+
+        merchant_ok = (not do_merchant) or (cur_m in counts and cur_m != prev_m and counts[cur_m] < cap)
+        if do_merchant and not merchant_ok:
+            eligible = [x for x in merchants if counts[x] < cap] or merchants
+            pick_from = [x for x in eligible if x != prev_m] or eligible
+            valid = [x for x in pick_from if _pair_ok(x, cur_c)]
+            if valid:
+                m = min(valid, key=lambda x: counts.get(x, 0))
+
+        theme_ok = (not do_theme) or not (cur_c and cur_c == prev_c)
+        if do_theme and not theme_ok:
+            candidates = [x for x in categories if x != cur_c and _pair_ok(m, x)]
+            if candidates:
+                c = candidates[0]
+
+        # Single-dimension moves above still leave a violation exactly when no
+        # in-pool move stays inside available_pairs (the deadlock case) — fall back
+        # to swapping the whole pair. A merchant AT its cap (not just repeating the
+        # prior slot) counts too — the single-dimension move above may have found no
+        # feed-valid merchant to move to and silently kept `m` over cap; escalating
+        # here is what lets a pair swap (which can also move theme) find a compliant
+        # combination the single-dimension search couldn't. Same for a pairing
+        # already at its live-deal ceiling (``pair_counts``, when given).
+        merchant_violates = do_merchant and (m == prev_m or counts.get(m, 0) >= cap)
+        theme_violates = do_theme and c and c == prev_c
+        pair_violates = bool(pair_counts) and m and c and (
+            pair_used.get((m, c), 0) >= pair_counts.get((m, c), 0))
+        if available_pairs is not None and (merchant_violates or theme_violates or pair_violates):
+            def _in_scope(p: tuple[str, str]) -> bool:
+                pm_ok = (p[0] != prev_m) if do_merchant else (p[0] == cur_m)
+                pc_ok = (p[1] != prev_c) if do_theme else (p[1] == cur_c)
+                return pm_ok and pc_ok
+
+            cands = [p for p in available_pairs if _in_scope(p)]
+            if do_merchant:
+                capped = [p for p in cands if counts.get(p[0], 0) < cap]
+                cands = capped or cands
+            if pair_counts:
+                stocked = [p for p in cands if pair_used.get(p, 0) < pair_counts.get(p, 0)]
+                cands = stocked or cands
+            if cands:
+                cands.sort(key=lambda p: (
+                    0 if p[0] == m else 1,
+                    0 if p[1] == c else 1,
+                    -pair_counts.get(p, 0) if pair_counts else 0,
+                    counts.get(p[0], 0) if do_merchant else 0,
+                    p,
+                ))
+                m, c = cands[0]
+
+        if m != cur_m:
+            sl["merchant"] = m
+            changed.setdefault(id(sl), []).append("merchant")
+        if c != cur_c:
+            sl["theme"] = c
+            changed.setdefault(id(sl), []).append("theme")
+
+        if do_merchant:
+            counts[m] = counts.get(m, 0) + 1
+        if pair_counts and m and c:
+            pair_used[(m, c)] = pair_used.get((m, c), 0) + 1
+        prev_m, prev_c = m, c
+
+    for sl in ordered:
+        keys = changed.get(id(sl))
+        if keys:
+            sl["why"] = (
+                f"Auto-balanced for diversity — reassigned {' and '.join(keys)} so "
+                "this slot doesn't repeat the chronologically previous slot's pick; "
+                "rotated off it rather than the model's original stat-based "
+                "reasoning."
+            )
 
 
 def _extract_json_object(text: str) -> str | None:
@@ -301,6 +472,7 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
         "merchant_mix": inputs.get("merchant_allocation", []),
         "post_type_performance": ctx.post_type_performance(s),
         "channel_style": ctx.channel_style(s),
+        "segment_performance": ctx.segment_performance(s),
         "follower_trajectory": follower_trajectory,
         "style_follower_correlation": ctx.style_follower_correlation(s, days=14, end_day=prev),
         "competitor_benchmark": ctx.competitor_benchmark(s),
@@ -311,15 +483,67 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     }
 
 
+_WINDOW_SPAN_RE = re.compile(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})")
+
+
+def _spread_times(hours: str, n: int) -> list[str]:
+    """``n`` "HH:MM" IST times evenly spread across ``hours``'s "HH:MM-HH:MM"
+    span (first at the window start, last at/before the end) — never bunched
+    at the start the way a fixed-spacing burst would be. Falls back to a flat
+    09:00 for every post if the span can't be parsed (mirrors the old
+    "skip silently" safety, but the fallback plan must never emit zero posts,
+    so it still emits ``n`` slots, just untimed-spread)."""
+    if n <= 0:
+        return []
+    m = _WINDOW_SPAN_RE.match(hours or "")
+    if not m:
+        return ["09:00"] * n
+    sh, sm, eh, em = (int(x) for x in m.groups())
+    start, end = sh * 60 + sm, eh * 60 + em
+    if end <= start or n == 1:
+        return [f"{start // 60 % 24:02d}:{start % 60:02d}"] * n
+    step = (end - start) / (n - 1)
+    out = []
+    for i in range(n):
+        minute = round(start + step * i)
+        out.append(f"{minute // 60 % 24:02d}:{minute % 60:02d}")
+    return out
+
+
+def _interleave_counts(counts: dict[str, int]) -> list[str]:
+    """Evenly interleave labels by their counts (largest-remainder round robin)
+    so e.g. 3 collection + 5 single comes out spread across the sequence
+    instead of block-grouped ("collection,collection,collection,single,...").
+    Used to mix `single`/`collection` across a window's spread-out posts."""
+    total = sum(counts.values())
+    out: list[str] = []
+    acc = {k: 0.0 for k in counts}
+    for _ in range(total):
+        for k in acc:
+            acc[k] += counts[k]
+        k = max(acc, key=lambda x: acc[x])
+        acc[k] -= total
+        out.append(k)
+    return out
+
+
 def _fallback_day_plan(day, plan_ctx: dict) -> dict:
     """G6 — a REAL deterministic day plan for when the AI call fails or returns
     something unparseable. The channel must never go silent on an AI outage, so this
     covers every POSTING_WINDOW from ``plan_ctx`` (already computed for the AI call),
-    splits each window's slots between `single`/`collection` by the week's
+    splits each window's posts between `single`/`collection` by the week's
     loot_deal_ratio (or the same 60/40 single-lean default + 30% floor the prompt
-    uses), and assigns merchants/categories straight from the already-ranked
-    MERCHANT_MIX/available categories. Marked ``is_fallback`` so callers/persist
-    know it's a stand-in, not a grounded plan."""
+    uses), spreads each window's posts across its full span (``_spread_times``,
+    interleaved single/collection via ``_interleave_counts`` rather than
+    block-grouped), and rotates (merchant, category) PAIRS PER POST (not per window)
+    from ``available_deals`` — the real stocked pairings (``_feed_pairs``/
+    ``_pair_sequence``), so a merchant only ever gets a category it genuinely
+    carries, deepest pairings preferred, spanning variety rather than collapsing
+    onto one bucket. Without ``available_deals`` (degraded feed context), falls
+    back to the flat ``available_merchants``/``available_categories`` lists — but
+    the two cycles advance at DIFFERENT rates so they never lock into a fixed
+    per-index table (the defect this whole rotation exists to avoid). Marked
+    ``is_fallback`` so callers/persist know it's a stand-in, not a grounded plan."""
     windows = plan_ctx.get("posting_windows") or []
     # merchant_mix ranks by HISTORICAL posting share, which can include a merchant
     # no longer in today's live deal feed (e.g. the scraper's allowed retailers
@@ -332,6 +556,7 @@ def _fallback_day_plan(day, plan_ctx: dict) -> dict:
     ranked_merchants = [m["merchant"] for m in (plan_ctx.get("merchant_mix") or []) if m.get("merchant")]
     merchants = [m for m in ranked_merchants if m in available_merchants] or sorted(available_merchants)
     categories = plan_ctx.get("available_categories") or []
+    pairs = _pair_sequence(_feed_pairs(plan_ctx.get("available_deals")))
     recommended = int(plan_ctx.get("recommended_posts")
                        or sum((w.get("posts") or 0) for w in windows) or 1)
 
@@ -356,21 +581,44 @@ def _fallback_day_plan(day, plan_ctx: dict) -> dict:
            f"(~{loot_share:.0%} loot) with the 30%-floor; merchant/category picked by "
            "recent share from MERCHANT_MIX, not model reasoning. Regenerate once the AI "
            "planner is back for a grounded, per-slot rationale.")
-    for i, w in enumerate(windows):
+    post_idx = 0
+    for w in windows:
         n = max(round((w.get("posts") or 0) * recommended / win_total), 1) if win_total else 1
         loot_c = min(max(round(n * loot_share), 0), n)
         single_c = n - loot_c
         hours = w.get("hours") or "09:00-21:00"
-        merchant = merchants[i % len(merchants)] if merchants else ""
-        category = categories[i % len(categories)] if categories else ""
-        if single_c > 0:
-            slots.append({"type": "single", "window_ist": hours, "count": single_c,
-                          "theme": category, "merchant": merchant, "max_price": None,
-                          "why": why})
-        if loot_c > 0:
-            slots.append({"type": "collection", "window_ist": hours, "count": loot_c,
-                          "theme": category, "merchant": merchant, "max_price": None,
-                          "why": why})
+        if loot_c and single_c:
+            types = _interleave_counts({"collection": loot_c, "single": single_c})
+        elif loot_c:
+            types = ["collection"] * loot_c
+        else:
+            types = ["single"] * single_c
+        for t, tm in zip(types, _spread_times(hours, n)):
+            if pairs:
+                merchant, category = pairs[post_idx % len(pairs)]
+            else:
+                # ponytail: no available_deals to pair from — degrade to the flat
+                # lists, but advance the category cycle at a different rate than
+                # the merchant cycle (never post_idx % len for both) so equal-length
+                # lists don't lock into one fixed per-index table. Doesn't guarantee
+                # every category is reachable for every merchant; upgrade if a
+                # degraded-feed day ever needs that guarantee.
+                merchant = merchants[post_idx % len(merchants)] if merchants else ""
+                # advance the category cycle at HALF the merchant cycle's rate — a
+                # different divisor, not just a different offset, so equal-length
+                # lists can't fall back into a fixed 1:1 per-index table.
+                category = categories[(post_idx // 2) % len(categories)] if categories else ""
+            slots.append({"type": t, "time_ist": tm, "theme": category, "merchant": merchant,
+                          "max_price": None, "min_price": None, "why": why})
+            post_idx += 1
+    # The AI path runs the adjacency repair after parsing, but BOTH fallback returns in
+    # generate_day_plan hand this plan straight back — so without this call an AI outage
+    # is the one day nothing ever fixes adjacency. The pair walk above rotates merchants
+    # cleanly but can still put two windows' posts of the same category side by side.
+    # Feed-constrained, so a repair can't invent a pairing the feed won't fill.
+    _pairs = _feed_pairs(plan_ctx.get("available_deals"))
+    _repair_plan_diversity(slots, merchants or None, categories or None,
+                           available_pairs=_pairs or None)
     return {
         "date": day.isoformat(), "recommended_posts": recommended,
         "cadence_why": "AI unavailable — holding the recent posting cadence deterministically.",
@@ -435,6 +683,14 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     # Each is a flat dict or a list of flat dicts, so check_cited_numbers exposes them.
     if plan_ctx.get("channel_style"):
         facts.append(plan_ctx["channel_style"])
+    # segment_performance's numbers (top/bottom category & discount-band
+    # engagement rates) must be verifiable too — each row is its own top-level
+    # fact item, same one-level-of-nesting reasoning as available_deals above.
+    seg_perf = plan_ctx.get("segment_performance") or {}
+    if seg_perf.get("available"):
+        for _seg_key in ("top_categories", "bottom_categories",
+                         "top_discount_bands", "bottom_discount_bands"):
+            facts.extend(seg_perf.get(_seg_key) or [])
     sfc = plan_ctx.get("style_follower_correlation") or {}
     facts.extend(sfc.get("days") or [])
     facts.extend(sfc.get("comparisons") or [])
@@ -475,7 +731,8 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
                 f"({e}) — a deterministic fallback plan is active (covers every "
                 "posting window with a loot/single mix); regenerate once the AI "
                 "is back for a grounded plan.", "plan": fallback, "facts": facts,
-                "is_fallback": True}
+                "is_fallback": True,
+                "feed_pairs": _feed_pairs(plan_ctx.get("available_deals"))}
     digest, plan_text = _split_digest_and_plan(raw)
     try:
         plan = parse_plan(plan_text, plan_ctx.get("available_merchants"))
@@ -486,9 +743,14 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         return {"available": True, "digest": digest or (
                 "AI planner returned an unparseable plan — a deterministic "
                 "fallback plan is active; regenerate once the AI is back for a "
-                "grounded plan."), "plan": fallback, "facts": facts, "is_fallback": True}
-    _repair_merchant_diversity(plan.get("post_slots") or [], plan_ctx.get("available_merchants"))
-    return {"available": True, "digest": digest, "plan": plan, "facts": facts}
+                "grounded plan."), "plan": fallback, "facts": facts, "is_fallback": True,
+                "feed_pairs": _feed_pairs(plan_ctx.get("available_deals"))}
+    _feed_pair_counts = _feed_pairs(plan_ctx.get("available_deals"))
+    _repair_plan_diversity(plan.get("post_slots") or [], plan_ctx.get("available_merchants"),
+                           plan_ctx.get("available_categories"),
+                           available_pairs=_feed_pair_counts or None)
+    return {"available": True, "digest": digest, "plan": plan, "facts": facts,
+            "feed_pairs": _feed_pair_counts}
 
 
 def _parse_week_plan(raw: str) -> dict:
@@ -659,7 +921,11 @@ def _demo() -> None:
     assert fb["is_fallback"] is True
     types = {sl["type"] for sl in fb["post_slots"]}
     assert types == {"single", "collection"}, f"fallback did not mix types: {types}"
-    assert sum(sl["count"] for sl in fb["post_slots"]) == 8
+    assert len(fb["post_slots"]) == 8  # AC6: one object per post, no `count` field
+    assert all("count" not in sl and "time_ist" in sl for sl in fb["post_slots"])
+    # AC6: spread, not bunched — the day's posts don't all land on one minute.
+    times = [sl["time_ist"] for sl in fb["post_slots"]]
+    assert len(set(times)) >= 2, times
 
     # no week direction / no merchant/category data at all — still real, still mixed
     fb2 = _fallback_day_plan(date.fromisoformat("2026-07-21"), {
@@ -670,23 +936,44 @@ def _demo() -> None:
     assert {sl["type"] for sl in fb2["post_slots"]} == {"single", "collection"}
     assert all(sl["merchant"] == "" and sl["theme"] == "" for sl in fb2["post_slots"])
 
-    # FIX 3 — merchant diversity repair. 10 all-amazon slots across 2 windows (5
-    # each) + 3 available merchants: no window should collapse to one merchant,
-    # and amazon's day-wide share should land at the 40% cap, not run away.
-    slots10 = ([{"window_ist": "morning", "merchant": "amazon"} for _ in range(5)]
-              + [{"window_ist": "evening", "merchant": "amazon"} for _ in range(5)])
-    _repair_merchant_diversity(slots10, ["amazon", "flipkart", "myntra"])
-    by_win: dict[str, set] = {}
-    for sl in slots10:
-        by_win.setdefault(sl["window_ist"], set()).add(sl["merchant"])
-    assert all(len(v) > 1 for v in by_win.values()), by_win  # no single-merchant window
+    # AC1 — a per-post plan (new shape: `time_ist`, no `count`) parses and each
+    # object counts as exactly one post.
+    per_post_plan = parse_plan(
+        '{"date":"2026-07-21","recommended_posts":4,"cadence_why":"x",'
+        '"post_slots":[{"type":"single","time_ist":"09:05","theme":"electronics",'
+        '"merchant":"amazon","max_price":null,"why":"x"},'
+        '{"type":"single","time_ist":"10:40","theme":"fashion","merchant":"ajio",'
+        '"max_price":null,"why":"x"},'
+        '{"type":"collection","time_ist":"18:15","theme":"electronics",'
+        '"merchant":"amazon","max_price":null,"why":"x"}],'
+        '"emphasis":"e","watch":"w","cited_numbers":[]}'
+    )
+    assert len(per_post_plan["post_slots"]) == 3
+    assert per_post_plan["post_slots"][0]["time_ist"] == "09:05"
+
+    # AC4 — adjacency repair (renamed _repair_plan_diversity) now balances BOTH
+    # merchant and theme, chronologically. A run of identical merchants gets broken.
+    slots10 = [{"time_ist": f"{9 + i // 2:02d}:{(i % 2) * 30:02d}", "merchant": "amazon",
+               "theme": "electronics"} for i in range(10)]
+    _repair_plan_diversity(slots10, ["amazon", "flipkart", "myntra"], None)
+    ordered10 = sorted(slots10, key=lambda sl: sl["time_ist"])
+    assert all(ordered10[i]["merchant"] != ordered10[i + 1]["merchant"]
+              for i in range(len(ordered10) - 1)), ordered10  # no back-to-back repeat
     counts = Counter(sl["merchant"] for sl in slots10)
     assert counts["amazon"] / len(slots10) <= _MAX_MERCHANT_SHARE, counts
 
-    # only 1 merchant in today's feed — a genuine constraint, leave untouched.
-    slots_single = [{"window_ist": "morning", "merchant": "amazon"} for _ in range(3)]
-    _repair_merchant_diversity(slots_single, ["amazon"])
-    assert all(sl["merchant"] == "amazon" for sl in slots_single)
+    # A run of identical THEMES gets broken too, given >=2 available categories.
+    theme_slots = [{"time_ist": f"{9 + i:02d}:00", "merchant": "amazon", "theme": "electronics"}
+                  for i in range(4)]
+    _repair_plan_diversity(theme_slots, None, ["electronics", "fashion"])
+    assert all(theme_slots[i]["theme"] != theme_slots[i + 1]["theme"]
+              for i in range(len(theme_slots) - 1)), theme_slots
+
+    # only 1 merchant/category available — a genuine feed constraint, leave untouched.
+    slots_single = [{"time_ist": f"{9 + i:02d}:00", "merchant": "amazon", "theme": "electronics"}
+                    for i in range(3)]
+    _repair_plan_diversity(slots_single, ["amazon"], ["electronics"])
+    assert all(sl["merchant"] == "amazon" and sl["theme"] == "electronics" for sl in slots_single)
 
     print("ai/planner.py self-check OK")
 

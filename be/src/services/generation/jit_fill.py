@@ -28,6 +28,7 @@ from src.services.generation.enrichment import DealEnrichmentEngine
 from src.services.generation.formatting import PostFormatter, _loot_label
 from src.services.generation.strategy import PostingStrategy
 from src.services.generation.daily_planner import recently_used_urls
+from src.services.analytics.periods import ist_day_bounds_utc
 from src.config.settings import get_settings
 from src.db.models import Channel
 from src.db.models_campaign import CampaignPlan, PlanType
@@ -51,27 +52,91 @@ LOOT_MERCHANT_CAP_FRACTION = 0.5
 _HHMM = re.compile(r"(\d{1,2}):(\d{2})")
 
 
+def _hhmm_all(s: str) -> list[time]:
+    """Every HH:MM in `s`, as IST times. Invalid hours are dropped, not clamped —
+    a plan that says "25:00" has a broken window, and silently reading it as 01:00
+    would schedule posts at the wrong end of the day."""
+    out = []
+    for m in _HHMM.finditer(s or ""):
+        hh, mm = int(m.group(1)), int(m.group(2))
+        if hh < 24 and mm < 60:
+            out.append(time(hh, mm))
+    return out
+
+
 def _window_start(window_ist: str) -> time | None:
-    m = _HHMM.search(window_ist or "")
-    if not m:
+    times = _hhmm_all(window_ist)
+    return times[0] if times else None
+
+
+def _window_span(window_ist: str) -> tuple[time, time] | None:
+    """(start, end) of a "HH:MM-HH:MM" window. A window with only one time, or whose
+    end is not after its start, has no usable span — the caller falls back to minimum
+    spacing rather than inventing an end time."""
+    times = _hhmm_all(window_ist)
+    if len(times) < 2 or times[1] <= times[0]:
         return None
-    hh, mm = int(m.group(1)), int(m.group(2))
-    return time(hh % 24, mm % 60) if hh < 24 else None
+    return times[0], times[1]
+
+
+def _slot_fire_times(slot: dict, base_day) -> list[datetime]:
+    """The IST-anchored UTC fire time of every post in `slot`.
+
+    Two shapes are supported, because a stored plan outlives the prompt that wrote it:
+
+    * **per-post** (`time_ist: "HH:MM"`) — the agent chose this exact minute for this
+      exact post. One post, fired then. This is the shape the planner now emits.
+    * **legacy window** (`window_ist` + `count`) — `count` posts spread EVENLY across
+      the window's full span. This used to stack them `SPACING_MIN` apart from the
+      window start, so a 5-post 09:00-12:00 window fired 09:00-09:08 and then went
+      silent for three hours; the window's end time was parsed and discarded. Spreading
+      across the real span is what makes a "window" an actual schedule.
+
+    `SPACING_MIN` is now only a floor, so a narrow window or a large count can never
+    put two posts on the same minute.
+    """
+    explicit = _hhmm_all(str(slot.get("time_ist") or ""))
+    if explicit:
+        return [datetime.combine(base_day, explicit[0], tzinfo=IST).astimezone(timezone.utc)]
+
+    start = _window_start(slot.get("window_ist", ""))
+    if start is None:
+        return []
+    n = max(1, int(slot.get("count") or 1))
+    base = datetime.combine(base_day, start, tzinfo=IST)
+
+    span = _window_span(slot.get("window_ist", ""))
+    if span is None or n == 1:
+        step = float(SPACING_MIN)
+    else:
+        end = datetime.combine(base_day, span[1], tzinfo=IST)
+        # n posts across the span inclusive of both ends -> n-1 gaps.
+        step = max((end - base).total_seconds() / 60 / (n - 1), SPACING_MIN)
+    return [(base + timedelta(minutes=step * i)).astimezone(timezone.utc) for i in range(n)]
 
 
 def _expand_slots(post_slots: list[dict], base_day) -> list[tuple[datetime, dict, int, int]]:
-    """Each slot -> one entry per post (count), spaced SPACING_MIN apart from the
-    window start. Returns (fire_utc, slot, slot_index, sub_index), skipping slots
-    with an unparseable window. Pure — unit-tested in _selfcheck."""
+    """Each slot -> one entry per post it schedules, via `_slot_fire_times`. Returns
+    (fire_utc, slot, slot_index, sub_index), skipping slots with no usable time.
+    Pure — unit-tested in _selfcheck."""
     out: list[tuple[datetime, dict, int, int]] = []
     for si, slot in enumerate(post_slots or []):
-        start = _window_start(slot.get("window_ist", ""))
-        if start is None:
-            continue
-        base = datetime.combine(base_day, start, tzinfo=IST)
-        for sub in range(max(1, int(slot.get("count") or 1))):
-            fire = (base + timedelta(minutes=SPACING_MIN * sub)).astimezone(timezone.utc)
+        for sub, fire in enumerate(_slot_fire_times(slot, base_day)):
             out.append((fire, slot, si, sub))
+
+    # SPACING_MIN as a global floor. `_slot_fire_times` keeps posts apart WITHIN one
+    # slot, but nothing stops the planner emitting two slots on the same minute (the
+    # model picks each time_ist independently), and two posts firing together is the
+    # burst behaviour this whole change exists to remove. Walk in fire order and push
+    # any collision to the previous post's time + SPACING_MIN. Deterministic, so a
+    # slot's key/fire time doesn't drift between cron ticks.
+    out.sort(key=lambda e: (e[0], e[2], e[3]))
+    gap = timedelta(minutes=SPACING_MIN)
+    for i in range(1, len(out)):
+        earliest = out[i - 1][0] + gap
+        if out[i][0] < earliest:
+            fire, slot, si, sub = out[i]
+            out[i] = (earliest, slot, si, sub)
     return out
 
 
@@ -87,9 +152,14 @@ def _image_slot_indices(n: int, k: int = IMAGE_POSTS_PER_DAY) -> set[int]:
 
 def _image_slot_keys(full_slots: list[tuple[datetime, dict, int, int]]) -> set[tuple[int, int]]:
     """(slot_index, sub_index) pairs — from `full_slots` (all of _expand_slots, not
-    just due-now) — chosen as the day's ~5 image posts."""
-    idx = _image_slot_indices(len(full_slots))
-    return {(full_slots[i][2], full_slots[i][3]) for i in idx}
+    just due-now) — chosen as the day's ~5 image posts.
+
+    Ordered by FIRE TIME, not by slot index: now that a window's posts spread across
+    its whole span, plan order and chronological order diverge, and "evenly spaced
+    image slots" only means anything along the day's real timeline."""
+    ordered = sorted(full_slots, key=lambda e: e[0])
+    idx = _image_slot_indices(len(ordered))
+    return {(ordered[i][2], ordered[i][3]) for i in idx}
 
 
 def _norm(v: str | None) -> str:
@@ -213,23 +283,102 @@ def _in_band(it: dict, floor: float | None, cap: float | None) -> bool:
     return True
 
 
-def _pick_fresh(pool: list[dict], theme: str | None, merchant: str | None,
-                used: set[str]) -> tuple[dict | None, str | None]:
-    """Freshest attractive item for the slot + which tier matched, broadening on miss:
-    'exact' (theme+merchant) -> 'theme' -> 'any'. `pool` is already best-first.
-    The tier is recorded so a broadened (off-plan) fill is visible, not silent."""
-    def unused(it):
-        return it.get("original_url") not in used
+def _day_mix(s: Session, day) -> dict:
+    """Fill-time diversity state for the given IST day, read back from
+    `GeneratedPost.format_meta` — the only state that survives `jit_fill`'s separate
+    per-tick invocations (unlike the in-run `used` set, which resets every minute).
+    Returns merchant/theme counts of everything generated so far that day, plus the
+    most recently generated post's merchant/theme (None before the day's first fill).
+    """
+    start, stop = ist_day_bounds_utc(day)
+    merchant_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    last_merchant = last_category = None
+    # S3-e: only jit_fill's own drafts carry the `aislot:` selection_bucket prefix —
+    # drafts from other generation engines (controllers/jobs.py, the CLI generator)
+    # must not pollute this worker's own diversity tallies.
+    rows = s.scalars(select(GeneratedPost)
+                     .where(GeneratedPost.generated_at >= start, GeneratedPost.generated_at < stop,
+                            GeneratedPost.selection_bucket.like(f"{_SLOT_TAG}:%"))
+                     .order_by(GeneratedPost.generated_at))
+    for gp in rows:
+        meta = gp.format_meta or {}
+        merchant = meta.get("primary_merchant")
+        # S1-b: the theme actually FILLED, not the plan's requested theme — a broadened
+        # fill must not be tallied under a category it isn't. Falls back to the legacy
+        # `slot.theme` echo for rows written before `primary_category` existed.
+        category = meta.get("primary_category") or (meta.get("slot") or {}).get("theme")
+        if merchant:
+            key = _norm(merchant)
+            merchant_counts[key] = merchant_counts.get(key, 0) + 1
+            last_merchant = merchant
+        if category:
+            key = _norm(category)
+            category_counts[key] = category_counts.get(key, 0) + 1
+            last_category = category
+    return {"merchant_counts": merchant_counts, "category_counts": category_counts,
+            "last_merchant": last_merchant, "last_category": last_category}
 
-    for it in pool:
-        if unused(it) and _match(it.get("category_key"), theme) and _match(_item_merchant(it), merchant):
-            return it, "exact"
-    for it in pool:
-        if unused(it) and _match(it.get("category_key"), theme):
-            return it, "theme"
-    for it in pool:
-        if unused(it):
-            return it, "any"
+
+def _deal_keys(it: dict) -> list[str]:
+    """Every identifier that pins down this pool item: the source's own deal id first,
+    then the URL. The id is stable across price moves; the URL is not (and a deal can
+    resurface re-shortened or with different affiliate params), so matching on the URL
+    alone let the same product post twice. Used for BOTH the repeat check and what we
+    record as used, so the two can never key on different things."""
+    return [str(v) for v in (it.get("external_id"), it.get("original_url")) if v]
+
+
+def _pick_fresh(pool: list[dict], theme: str | None, merchant: str | None, used: set[str],
+                merchant_counts: dict[str, int] | None = None,
+                category_counts: dict[str, int] | None = None,
+                prev_merchant: str | None = None,
+                prev_category: str | None = None) -> tuple[dict | None, str | None]:
+    """Freshest attractive item for the slot + which tier matched, broadening on miss:
+    'exact' (theme+merchant) -> 'theme' -> 'merchant' -> 'any'. `pool` is already
+    best-first (discount desc). The tier is recorded so a broadened (off-plan) fill is
+    visible, not silent.
+
+    `merchant_counts`/`category_counts` (today's fill-so-far tallies, from `_day_mix`,
+    keyed via `_norm` — the plan and the deal source don't share a vocabulary) and
+    `prev_merchant`/`prev_category` (the immediately-previous post's, matched via the
+    looser `_match`) make the pick diversity-aware. A candidate repeating the previous
+    post's merchant is used only when every alternative in the tier ALSO repeats it —
+    that rule dominates the ranking outright, ahead of the day's counts, so it can
+    never be outvoted by a lower running count. Same rule for category. Once that's
+    settled, candidates are ranked by least-used merchant, then least-used category,
+    then the pool's own best-first order as the final tiebreak — the pool order alone
+    never decides a broadened pick. A pool genuinely carrying only the previous
+    merchant still fills; no slot is ever dropped for diversity."""
+    merchant_counts = merchant_counts or {}
+    category_counts = category_counts or {}
+
+    def unused(it):
+        return not any(k in used for k in _deal_keys(it))
+
+    def rank(it):
+        m, c = _item_merchant(it), it.get("category_key")
+        return (1 if m and prev_merchant and _match(m, prev_merchant) else 0,
+                1 if c and prev_category and _match(c, prev_category) else 0,
+                merchant_counts.get(_norm(m), 0),
+                category_counts.get(_norm(c), 0))
+
+    def best(candidates):
+        return min(candidates, key=rank) if candidates else None
+
+    exact = [it for it in pool if unused(it) and _match(it.get("category_key"), theme)
+            and _match(_item_merchant(it), merchant)]
+    if exact:
+        return best(exact), "exact"
+    by_theme = [it for it in pool if unused(it) and _match(it.get("category_key"), theme)]
+    if by_theme:
+        return best(by_theme), "theme"
+    by_merchant = [it for it in pool if unused(it) and _match(_item_merchant(it), merchant)]
+    if by_merchant:
+        return best(by_merchant), "merchant"
+    any_left = [it for it in pool if unused(it)]
+    if any_left:
+        return best(any_left), "any"
     return None, None
 
 
@@ -247,7 +396,7 @@ def _pick_fresh_multi(pool: list[dict], merchant: str | None, used: set[str],
     board is filled round-robin across the OTHER available merchants (still distinct
     categories), broadening to any merchant/category only if the board is still short."""
     def unused(it):
-        return it.get("original_url") not in used
+        return not any(k in used for k in _deal_keys(it))
 
     seen_cats: set[str] = set()
     picked: list[dict] = []
@@ -408,6 +557,14 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
     enricher = DealEnrichmentEngine(s)
     writer = Copywriter()
     used = recently_used_urls(s)
+    # fill-time diversity state (AC1/AC2) — read from the DB, not the loop, because
+    # jit_fill's own cron ticks are separate process invocations; running tallies below
+    # keep it current across multiple due slots filled within THIS tick too.
+    mix = _day_mix(s, day)
+    merchant_counts = dict(mix["merchant_counts"])
+    category_counts = dict(mix["category_counts"])
+    prev_merchant = mix["last_merchant"]
+    prev_category = mix["last_category"]
 
     filled = []
     # rotate the post STYLE per single deal and the banner FLAVOUR per loot board, so
@@ -469,11 +626,18 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
             deal_ids = [e.deal_id for e in enriched]
             rank_score = max((e.discount_percent or 0) for e in enriched)
             primary_merchant = enriched[0].merchant_key
-            used_urls = [r.get("original_url") for r in raws]
+            # a loot board spans several categories by design (that's the whole point of
+            # `_pick_fresh_multi`'s round-robin) — no single "actually filled" category to
+            # tally, so the planned theme is the closest honest label for this post.
+            primary_category = slot.get("theme")
+            used_urls = [k for r in raws for k in _deal_keys(r)]
             image_candidate = next((e.image for e in enriched if e.image), None)
         else:
             # DEAL: one specific product, AI-written copy (template fallback on failure).
-            raw, match = _pick_fresh(pool, slot.get("theme"), slot.get("merchant"), used)
+            raw, match = _pick_fresh(pool, slot.get("theme"), slot.get("merchant"), used,
+                                     merchant_counts=merchant_counts,
+                                     category_counts=category_counts,
+                                     prev_merchant=prev_merchant, prev_category=prev_category)
             if raw is None:
                 continue
             if match != "exact":
@@ -505,7 +669,11 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
             deal_ids = [deal.deal_id]
             rank_score = deal.discount_percent or 0
             primary_merchant = deal.merchant_key
-            used_urls = [raw.get("original_url")]
+            # S1-b: the category actually filled (the deal's own category), not the
+            # slot's planned theme — a broadened ('merchant'/'any' tier) fill must be
+            # tallied under the category it really is, or the tally lies to `rank`.
+            primary_category = deal.category
+            used_urls = _deal_keys(raw)
             image_candidate = deal.image
 
         key = f"{_SLOT_TAG}:{plan.id}:{si}:{sub}"
@@ -516,8 +684,13 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
             generated_at=now, post_type=slot.get("type") or "single", selection_bucket=key,
             deal_ids=deal_ids, rendered_text=text,
             format_meta={"source": source, "match": match, "affiliate": aff_meta,
-                         "primary_merchant": primary_merchant, "image_url": image_url,
-                         "slot": {"theme": slot.get("theme"), "merchant": slot.get("merchant")}},
+                         "primary_merchant": primary_merchant,
+                         "primary_category": primary_category, "image_url": image_url,
+                         # S2-b: the slot dict WHOLE — type/time_ist/theme/merchant/
+                         # max_price/min_price/why — not just theme+merchant, so a
+                         # plan-vs-actual query can be run on every dimension the plan
+                         # actually carries, not just the two this file used to keep.
+                         "slot": dict(slot)},
             rank_score=rank_score, status=PostStatus.DRAFT,
             strategy_rationale=slot.get("why") or "",
             publish_note="AI-planned slot, filled just-in-time with a fresh deal.")
@@ -538,11 +711,35 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
                 used.add(u)
         if channel:
             enqueue(s, gp.id, channel, fire)
+        # keep the running diversity tallies (AC1/AC2) current for any further due
+        # slots this same tick, mirroring what _day_mix would re-derive from the DB —
+        # keyed via _norm (S1-b) and against what was ACTUALLY filled, not planned.
+        if primary_merchant:
+            mk = _norm(primary_merchant)
+            merchant_counts[mk] = merchant_counts.get(mk, 0) + 1
+            prev_merchant = primary_merchant
+        if primary_category:
+            ck = _norm(primary_category)
+            category_counts[ck] = category_counts.get(ck, 0) + 1
+            prev_category = primary_category
         filled.append({"draft_id": gp.id, "slot": f"{si}:{sub}", "source": source,
-                       "at_utc": fire.isoformat(), "merchant": primary_merchant})
+                       "at_utc": fire.isoformat(), "merchant": primary_merchant,
+                       "theme": primary_category})
 
-    logger.info("[jit_fill] filled %d/%d due slots for %s", len(filled), len(due), day)
-    return {"ok": True, "filled": len(filled), "due": len(due), "scheduled": filled}
+    # AC4: report the merchant/theme spread of what THIS run filled, so "one merchant
+    # took the window" is visible in the run record without a DB query.
+    mix_merchant: dict[str, int] = {}
+    mix_theme: dict[str, int] = {}
+    for f in filled:
+        if f.get("merchant"):
+            mix_merchant[f["merchant"]] = mix_merchant.get(f["merchant"], 0) + 1
+        if f.get("theme"):
+            mix_theme[f["theme"]] = mix_theme.get(f["theme"], 0) + 1
+
+    logger.info("[jit_fill] filled %d/%d due slots for %s (mix merchant=%s theme=%s)",
+                len(filled), len(due), day, mix_merchant, mix_theme)
+    return {"ok": True, "filled": len(filled), "due": len(due), "scheduled": filled,
+            "mix": {"merchant": mix_merchant, "theme": mix_theme}}
 
 
 def _selfcheck() -> None:
@@ -554,20 +751,51 @@ def _selfcheck() -> None:
     assert len(exp) == 4, exp                       # 3 + skip + 1
     first = [e for e in exp if e[2] == 0]
     gaps = [(first[i + 1][0] - first[i][0]).total_seconds() / 60 for i in range(len(first) - 1)]
-    assert gaps == [SPACING_MIN, SPACING_MIN], gaps  # spaced 2 min apart
-    # 09:00 IST == 03:30 UTC
+    # Spread across the window's FULL 3h span (90min gaps), NOT stacked SPACING_MIN
+    # apart at the start — the bug that made a 3h window an 8-minute burst.
+    assert gaps == [90.0, 90.0], gaps
+    assert gaps[0] > SPACING_MIN, gaps
+    # 09:00 IST == 03:30 UTC; the last post lands on the window's end, not near its start
     assert first[0][0].hour == 3 and first[0][0].minute == 30, first[0][0]
+    assert first[-1][0].hour == 6 and first[-1][0].minute == 30, first[-1][0]
+    # per-post shape: time_ist wins, one post, at exactly that minute (14:05 IST = 08:35 UTC)
+    per_post = _expand_slots([{"time_ist": "14:05", "type": "single"}], _date(2026, 7, 13))
+    assert len(per_post) == 1, per_post
+    assert per_post[0][0].hour == 8 and per_post[0][0].minute == 35, per_post[0][0]
+    # a count too large for its span still never collides two posts on one minute
+    tight = _slot_fire_times({"window_ist": "09:00-09:03", "count": 9}, _date(2026, 7, 13))
+    assert len(set(tight)) == 9, tight
     pool = [{"category_key": "fashion", "merchant_key": "ajio", "original_url": "a"},
             {"category_key": "electronics", "merchant_key": "amazon_in", "original_url": "b"}]
     # vocabulary mismatch must still hit exact: "Electronics"/"Amazon" vs "electronics"/"amazon_in"
     it, tier = _pick_fresh(pool, "Electronics", "Amazon", set())
     assert it["original_url"] == "b" and tier == "exact", (it, tier)
+    # theme matches, merchant doesn't -> broadens to 'theme' tier (not straight to 'any')
     it, tier = _pick_fresh(pool, "electronics", "flipkart", set())
-    assert it["original_url"] == "b" and tier == "theme", (it, tier)   # merchant broaden -> tier tagged
-    it, tier = _pick_fresh(pool, "toys", None, set())
-    assert tier == "any", tier                                        # theme broaden -> tier tagged
+    assert it["original_url"] == "b" and tier == "theme", (it, tier)
+    # theme misses but merchant matches -> new 'merchant' tier, chosen before 'any'
+    it, tier = _pick_fresh(pool, "sports", "amazon", set())
+    assert it["original_url"] == "b" and tier == "merchant", (it, tier)
+    # neither theme nor merchant match anything in the pool -> 'any'
+    it, tier = _pick_fresh(pool, "toys", "swiggy", set())
+    assert tier == "any", tier
     it, tier = _pick_fresh(pool, "fashion", "ajio", {"a"})            # only fashion item is used
     assert it["original_url"] == "b" and tier == "any", (it, tier)   # -> broadens past used
+
+    # AC2: within a tier, least-used merchant/category wins over the pool's raw
+    # best-first order, and the previous post's merchant is a last resort, not excluded.
+    div_pool = [{"category_key": "electronics", "merchant_key": "flipkart", "original_url": "d1"},
+               {"category_key": "electronics", "merchant_key": "myntra", "original_url": "d2"}]
+    it, tier = _pick_fresh(div_pool, "electronics", None, set(),
+                           merchant_counts={"flipkart": 3, "myntra": 0}, category_counts={})
+    assert it["original_url"] == "d2" and tier == "theme", (it, tier)  # least-used merchant wins
+    it, tier = _pick_fresh(div_pool, "electronics", None, set(),
+                           merchant_counts={}, category_counts={}, prev_merchant="myntra")
+    assert it["original_url"] == "d1" and tier == "theme", (it, tier)  # avoid repeating prev merchant
+    single_pool = [{"category_key": "electronics", "merchant_key": "flipkart", "original_url": "s1"}]
+    it, tier = _pick_fresh(single_pool, "electronics", None, set(),
+                           merchant_counts={}, category_counts={}, prev_merchant="flipkart")
+    assert it["original_url"] == "s1" and tier == "theme", (it, tier)  # sole merchant still fills
 
     # price-tier band clamp (safety net over the source filter).
     assert _in_band({"discount_price": 400}, None, 500)        # under cap

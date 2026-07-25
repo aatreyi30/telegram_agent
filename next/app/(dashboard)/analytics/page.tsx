@@ -14,8 +14,19 @@ import { DateFilter } from "@/components/ui/date-range-picker";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useAnalytics, useDataRange } from "@/queries/queries";
 import { useQueryParams } from "@/lib/use-search-params";
-import { postTypeLabel, merchantLabel, isoSlash } from "@/lib/format";
+import { postTypeLabel, merchantLabel, categoryLabel, titleCase, isoSlash } from "@/lib/format";
 import { CHART_AXIS_COLOR as AXIS, CHART_GRID_COLOR as GRID } from "@/constants/charts";
+import type { SegmentRow } from "@/types/api";
+
+const DIMENSION_LABEL: Record<SegmentRow["dimension"], string> = {
+  category: "Category", discount_band: "Discount band", price_band: "Price band",
+};
+
+// "electronics-and-gadgets" for category, "under-299" / "70%+" for the bands —
+// only category uses the merchant-taxonomy label helper, everything else is a slug.
+function segmentLabel(dimension: SegmentRow["dimension"], label: string): string {
+  return dimension === "category" ? categoryLabel(label) : titleCase(label);
+}
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -27,6 +38,12 @@ function fmtNum(n: number | null | undefined): string {
 function fmtPct(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return `${n}%`;
+}
+// "covers 118 of 375 posts (31%)" — the honest-coverage label required next to every
+// segment breakdown. Division-by-zero guarded (an empty window has total === 0).
+function coverageLabel(categorized: number, total: number): string {
+  const pct = total > 0 ? Math.round((categorized / total) * 100) : 0;
+  return `covers ${fmtNum(categorized)} of ${fmtNum(total)} posts (${pct}%)`;
 }
 // "18:00" -> "6 PM", "09:00" -> "9 AM", "00:00" -> "12 AM"
 function to12h(hhmm: string): string {
@@ -137,6 +154,54 @@ export default function AnalyticsPage() {
                 <StatCard label="Eng. rate" value={fmtPct(a.engagement_rate)} sub={`n=${win.n}`} />
                 <StatCard label="CTA usage" value={fmtPct(a.cta_rate)} sub={`n=${win.n}`} />
                 <StatCard label="Deal rate" value={fmtPct(a.deal_rate)} sub={`n=${win.n}`} />
+              </div>
+
+              <Card>
+                <CardHeader>
+                  <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
+                  <CardTitle className="text-base font-semibold">Segment leaderboard</CardTitle>
+                  <p className="text-xs text-muted-foreground">
+                    Category / discount band / price band, ranked by engagement rate (reactions + forwards ÷ views).
+                    Only segments with at least {a.segments_min_n} posts are ranked, so this is self-auditing —
+                    small sample sizes never win.
+                  </p>
+                </CardHeader>
+                <CardContent>
+                  {(a.segments ?? []).length ? (
+                    <div className="space-y-1.5">
+                      {a.segments.map((seg, i) => (
+                        <div key={`${seg.dimension}:${seg.label}`} className="flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2">
+                          {i === 0 && <span className="text-xs">⭐</span>}
+                          <span className="text-xs text-muted-foreground">{DIMENSION_LABEL[seg.dimension]}</span>
+                          <span className="text-sm font-semibold text-foreground">{segmentLabel(seg.dimension, seg.label)}</span>
+                          <span className="ml-auto text-xs text-muted-foreground">
+                            {fmtPct(seg.engagement_rate)} eng. rate · {seg.n} posts ·{" "}
+                            {coverageLabel(a.dimension_coverage?.[seg.dimension]?.categorized ?? 0, a.dimension_coverage?.[seg.dimension]?.total ?? 0)} tagged {DIMENSION_LABEL[seg.dimension].toLowerCase()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      Not enough data yet — a segment needs at least {a.segments_min_n} posts to rank.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+
+              <div className="grid gap-4 lg:grid-cols-3">
+                <ChartCard title="Engagement rate by category"
+                  sub={`Which product categories actually earn engagement · hover for post count · ${coverageLabel(a.dimension_coverage?.category?.categorized ?? 0, a.dimension_coverage?.category?.total ?? 0)} · faded bars are under the sample gate`}>
+                  <BarsChart data={(a.by_category || []).map((r) => ({ ...r, label: categoryLabel(r.label) }))} unit="%" dataKey="engagement_rate" countKey="n" countLabel="Posts" mutedKey="below_min_n" />
+                </ChartCard>
+                <ChartCard title="Engagement rate by discount band"
+                  sub={`Does a deeper discount actually move engagement · hover for post count · ${coverageLabel(a.dimension_coverage?.discount_band?.categorized ?? 0, a.dimension_coverage?.discount_band?.total ?? 0)} · faded bars are under the sample gate`}>
+                  <BarsChart data={(a.by_discount_band || []).map((r) => ({ ...r, label: titleCase(r.label) }))} unit="%" dataKey="engagement_rate" countKey="n" countLabel="Posts" mutedKey="below_min_n" />
+                </ChartCard>
+                <ChartCard title="Engagement rate by price band"
+                  sub={`Which price range earns engagement · hover for post count · ${coverageLabel(a.dimension_coverage?.price_band?.categorized ?? 0, a.dimension_coverage?.price_band?.total ?? 0)} · faded bars are under the sample gate`}>
+                  <BarsChart data={(a.by_price_band || []).map((r) => ({ ...r, label: titleCase(r.label) }))} unit="%" dataKey="engagement_rate" countKey="n" countLabel="Posts" mutedKey="below_min_n" />
+                </ChartCard>
               </div>
 
               <ChartCard title="Views & engagement over time"

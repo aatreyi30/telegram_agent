@@ -18,7 +18,8 @@ import { cn } from "@/lib/utils";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { useQueryParams } from "@/lib/use-search-params";
-import { postTypeLabel, merchantLabel, istDate } from "@/lib/format";
+import { postTypeLabel, merchantLabel, categoryLabel, istDate } from "@/lib/format";
+import type { DealGapRow, DimensionCoverage } from "@/types/api";
 
 function minusDays(iso: string, days: number): string {
   const d = new Date(iso + "T00:00:00Z");
@@ -39,6 +40,86 @@ function fmtCompact(n: number | null | undefined): string {
   if (abs >= 1_000_000) return `${trim((n / 1_000_000).toFixed(1))}M`;
   if (abs >= 1_000) return `${trim((n / 1_000).toFixed(1))}K`;
   return n.toLocaleString();
+}
+
+// deal_gap shares/gap are fractions (0-1) from the backend, unlike the rest of this
+// page's already-percent fields — convert here, at the point of display.
+function fmtShare(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "—";
+  return `${Math.round(n * 1000) / 10}%`;
+}
+
+// "categorized 118 of 375 posts (31%)" — the two sides of a deal-gap comparison are
+// categorized at different rates (category is matched from each post's own text, and
+// competitor posts are often sparsely-captioned forwards, so fewer of them hit a category
+// keyword than owned posts' fuller copy), so the gap is not like-for-like unless both
+// coverages are stated. Guards total === 0.
+function coverageLabel(cov: DimensionCoverage | undefined): string {
+  const categorized = cov?.categorized ?? 0;
+  const total = cov?.total ?? 0;
+  const pct = total > 0 ? Math.round((categorized / total) * 100) : 0;
+  return `categorized ${categorized} of ${total} posts (${pct}%)`;
+}
+
+function DealGapCard({ rows, windowDays, minN, ownedCoverage, competitorCoverage }: {
+  rows: DealGapRow[]; windowDays: number; minN: number;
+  ownedCoverage?: DimensionCoverage; competitorCoverage?: DimensionCoverage;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" />
+        <CardTitle className="text-base">Deal-gap — what rivals win with that we're absent from</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Share of posts per category, us vs tracked competitors, over the last {windowDays} days.
+          Only categories with at least {minN} competitor posts are shown.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Us: {coverageLabel(ownedCoverage)} · Competitors: {coverageLabel(competitorCoverage)} —
+          the two sides are categorized at different rates, so this gap is not a clean like-for-like comparison.
+        </p>
+      </CardHeader>
+      <CardContent className="p-0">
+        {rows.length ? (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Category</TableHead>
+                  <TableHead>Our share</TableHead>
+                  <TableHead>Their share</TableHead>
+                  <TableHead>Gap</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((r) => (
+                  <TableRow key={r.category} className={cn("hover:bg-muted/50", r.over_indexed_by_competitors && "bg-amber-500/10")}>
+                    <TableCell className="font-medium">
+                      <div className="flex items-center gap-2">
+                        <span>{categoryLabel(r.category)}</span>
+                        {r.over_indexed_by_competitors && (
+                          <Badge variant="warning" className="text-[10px] font-normal">Competitors over-index</Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="tabular-nums text-xs text-muted-foreground">{fmtShare(r.owned_share)} ({r.owned_n})</TableCell>
+                    <TableCell className="tabular-nums text-xs text-muted-foreground">{fmtShare(r.competitor_share)} ({r.competitor_n})</TableCell>
+                    <TableCell className={cn("tabular-nums font-medium", r.gap > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
+                      {r.gap >= 0 ? "+" : ""}{fmtShare(r.gap)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ) : (
+          <p className="p-10 text-center text-sm text-muted-foreground">
+            Not enough data yet — a category needs at least {minN} competitor posts in this window to show a gap.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 /**
@@ -294,6 +375,9 @@ export default function CompetitorDashboardPage() {
                   <CompetitorsTable entities={entities} />
                 </CardContent>
               </Card>
+
+              <DealGapCard rows={d.deal_gap?.rows ?? []} windowDays={d.deal_gap?.window_days ?? 30} minN={d.deal_gap?.min_competitor_n ?? 0}
+                ownedCoverage={d.deal_gap?.owned_coverage} competitorCoverage={d.deal_gap?.competitor_coverage} />
 
               {dealTypes.length > 0 && entities.length >= 2 && (
                 <Card>

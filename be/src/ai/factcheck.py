@@ -9,6 +9,10 @@ import re
 _NUM_RE = re.compile(r"\d[\d,]*\.?\d*")
 # The hour(s) inside a "HH:MM-HH:MM" window string, e.g. "06:00-11:00" -> 6, 11.
 _WINDOW_HOUR_RE = re.compile(r"(\d{1,2}):\d{2}")
+# HH and MM of a single "HH:MM" instant (the per-post `time_ist` shape), e.g.
+# "09:05" -> (9, 5) — both parts, since a `why` restating the exact minute
+# ("posting at 09:05") must also be self-valid.
+_TIME_IST_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 
 
 def _numbers_in(text) -> list[float]:
@@ -54,6 +58,17 @@ def plan_structural_numbers(plan: dict) -> list[float]:
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 nums.append(float(v))
         nums.extend(float(h) for h in _WINDOW_HOUR_RE.findall(sl.get("window_ist") or ""))
+        # S2-a: `time_ist` (the new per-post shape, e.g. "09:05") replaced
+        # `window_ist`'s HH:MM-HH:MM span, but was never added to the
+        # structural whitelist. The prompt now requires each `why` to justify
+        # its own scheduled time, so "posting at 09:05" restates the slot's
+        # OWN hour AND minute — both must be self-valid, same as window_ist's
+        # hour already is, or a plan can be marked `failed` for citing its own
+        # schedule.
+        tm = _TIME_IST_RE.match(sl.get("time_ist") or "")
+        if tm:
+            nums.append(float(tm.group(1)))
+            nums.append(float(tm.group(2)))
     rec = plan.get("recommended_posts")
     if isinstance(rec, (int, float)) and not isinstance(rec, bool):
         nums.append(float(rec))

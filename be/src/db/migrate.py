@@ -51,7 +51,14 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
     "growth_strategies": [("channel_id", "INTEGER")],
     "growth_recommendations": [("channel_id", "INTEGER")],
     "reasoned_insights": [("channel_id", "INTEGER")],
-    "normalized_posts": [("channel_id", "INTEGER")],
+    "normalized_posts": [
+        ("channel_id", "INTEGER"),
+        # deal-dimension extraction (deal-dimension-intelligence spec)
+        ("category", "VARCHAR(32)"),
+        ("discount_pct", "FLOAT"),
+        ("discount_band", "VARCHAR(16)"),
+        ("price_band", "VARCHAR(16)"),
+    ],
     "competitors": [
         ("category", "VARCHAR(16)"),
         ("resolution_confidence", "FLOAT"),

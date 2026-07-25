@@ -256,6 +256,7 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
     ``window_days`` when set filters basic stats to the last N days (like comparison).
     """
     from src.services.analytics import comparison as cmp
+    from src.services.analytics import deal_gap
     from src.services.intelligence.competitor import latest_profiles
 
     with session_scope() as s:
@@ -308,6 +309,7 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
             "note": note,
             "metrics": metrics,
             "applied_window": window_days,
+            "deal_gap": deal_gap.compute(s, window_days=window_days or 30),
         }
 
 

@@ -84,9 +84,23 @@ export interface GoldenHour extends MetricBucket { hour: string; }
 
 export interface AnalyticsWindow { source: string; start: string | null; end: string | null; days: number; months: number; n: number; }
 
+export interface SegmentRow extends MetricBucket { dimension: "category" | "discount_band" | "price_band"; }
+
+// `by_category`/`by_discount_band`/`by_price_band` rows — same shape as MetricBucket plus
+// a sample-gate flag. Not added to MetricBucket itself since by_hour/by_weekday/by_merchant
+// don't carry this field.
+export interface SegmentBucket extends MetricBucket { below_min_n: boolean; }
+
+// categorized/total pair for a dimension — "how many of the window's posts carried this
+// dimension at all", independent of the sample-size gate above.
+export interface DimensionCoverage { categorized: number; total: number; }
+
 export interface AnalyticsResponse {
   window: AnalyticsWindow; timeline: MetricBucket[]; by_hour: MetricBucket[]; by_weekday: MetricBucket[];
   by_type: MetricBucket[]; by_merchant: MetricBucket[]; golden_hours: GoldenHour[]; growth: GrowthResponse;
+  by_category: SegmentBucket[]; by_discount_band: SegmentBucket[]; by_price_band: SegmentBucket[];
+  dimension_coverage: { category: DimensionCoverage; discount_band: DimensionCoverage; price_band: DimensionCoverage };
+  segments: SegmentRow[]; segments_min_n: number;
   total_posts: number; total_views: number; total_reactions: number; total_forwards: number;
   total_engagement: number; engagement_rate: number; cta_rate: number; deal_rate: number;
 }
@@ -185,10 +199,22 @@ export interface CompetitorRow {
 
 export interface CompetitorsResponse { competitors: CompetitorRow[]; }
 
+export interface DealGapRow {
+  category: string; owned_n: number; owned_share: number;
+  competitor_n: number; competitor_share: number; gap: number;
+  over_indexed_by_competitors: boolean;
+}
+
+export interface DealGap {
+  window_days: number; min_competitor_n: number; gap_threshold: number; rows: DealGapRow[];
+  owned_coverage: DimensionCoverage; competitor_coverage: DimensionCoverage;
+}
+
 export interface CompetitorDashboardResponse {
   summary: { total: number; platform: number; channel: number; };
   platform: CompetitorEntity[]; channel: CompetitorEntity[];
   unavailable: string[]; note: string; metrics: string[]; applied_window: number | null;
+  deal_gap: DealGap;
 }
 
 // GET /competitor-dashboard/trends — posts/day & views/day for every competitor at
@@ -299,7 +325,15 @@ export interface DailyTrajectory {
   lifetime_baseline: number | null;
 }
 
-export interface DailySlot { type: string; window_ist: string; count?: number | null; theme: string; merchant?: string | null; why: string; }
+// A slot is now ONE post at its own `time_ist`. `window_ist`/`count` are the legacy
+// shape — plans persisted before the per-post planner still carry them, so both are
+// optional and the UI renders whichever the row actually has.
+export interface DailySlot {
+  type: string; theme: string; merchant?: string | null; why: string;
+  time_ist?: string | null;
+  window_ist?: string | null; count?: number | null;
+  max_price?: number | null; min_price?: number | null;
+}
 
 export interface DailyPlanToday {
   recommended_posts: number;
