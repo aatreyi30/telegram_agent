@@ -510,7 +510,15 @@ def fill_due_slots(s: Session, lookahead_min: int = LOOKAHEAD_MIN,
         return {"ok": False, "reason": f"no AI daily plan for {day}"}
     # Cited numbers live only in the plan's rationale, never in the post, so 'warn' is
     # still actionable; only a hard 'failed' (substantial fabrication) blocks filling.
-    if (plan.factcheck_status or "") not in ("passed", "warn", "skipped", ""):
+    #
+    # DENY-list, not an allow-list. This was `not in ("passed","warn","skipped","")`,
+    # which silently blocked every status nobody thought to enumerate — including
+    # "fallback", the status the deterministic writer sets when the AI provider is
+    # DOWN (controllers/service.py:791). So an AI outage stopped the channel posting
+    # entirely, with no error anywhere: the exact failure the fallback writer exists to
+    # prevent. Naming only the status that must block means a new status can never
+    # take the channel dark by accident.
+    if (plan.factcheck_status or "").strip().lower() == "failed":
         return {"ok": False, "reason": f"plan not trusted (factcheck={plan.factcheck_status})"}
 
     slots = (plan.blueprint or {}).get("post_slots") or []

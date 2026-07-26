@@ -132,27 +132,57 @@ def _revalidate_one(deal: EnrichedDeal, max_staleness_min: int) -> dict:
     return {"ok": ok, "reason": reason}
 
 
-def revalidate_deals(deal_ids: list[str], *, max_staleness_min: int) -> dict:
-    """Revalidate every deal a post carries before it publishes.
+def revalidate_each(deal_ids: list[str], *, max_staleness_min: int) -> dict[str, dict]:
+    """Per-deal verdicts — ``{deal_id: {"ok": bool, "reason": str | None}}``.
 
-    ``deal_ids`` are ``EnrichedDeal.deal_id`` (content-hash) values, exactly what
-    ``GeneratedPost.deal_ids`` stores. Returns the first failing verdict, or
-    ``{"ok": True}`` once every deal has been confirmed fresh.
+    Never short-circuits. A caller holding a multi-deal loot board needs to know
+    exactly WHICH deals went bad so it can drop those and still publish the rest
+    (``publishing._trim_failed_deals``); "one of them failed" is not enough.
+
+    A deal that is checked and found bad is reported ``ok=False``. A deal whose CHECK
+    ITSELF crashes is reported ``ok=True`` with the reason recorded: a scraper or
+    network fault is not evidence the product is dead, and the old code let that
+    exception escape and abort the entire publish. Same principle as the timeout
+    branch in ``_http_ok`` — unproven is not the same as broken.
     """
     if not deal_ids:
-        return {"ok": True, "reason": None}
+        return {}
 
     with session_scope() as s:
         deals = s.scalars(select(EnrichedDeal).where(EnrichedDeal.deal_id.in_(deal_ids))).all()
         s.expunge_all()
+    by_id = {d.deal_id: d for d in deals}
 
-    found_ids = {d.deal_id for d in deals}
-    for missing in set(deal_ids) - found_ids:
-        return {"ok": False, "reason": f"deal {missing} no longer exists"}
+    out: dict[str, dict] = {}
+    for deal_id in deal_ids:
+        deal = by_id.get(deal_id)
+        if deal is None:
+            out[deal_id] = {"ok": False, "reason": f"deal {deal_id} no longer exists"}
+        else:
+            try:
+                out[deal_id] = _revalidate_one(deal, max_staleness_min)
+            except Exception as e:  # noqa: BLE001 - scrape/network faults are expected here
+                logger.exception("[prepublish_revalidate] deal %s check crashed — not blocking",
+                                 deal_id)
+                out[deal_id] = {"ok": True,
+                                "reason": f"check errored ({type(e).__name__}), treated as live"}
+        if not out[deal_id]["ok"]:
+            logger.info("[prepublish_revalidate] deal %s BLOCKED: %s",
+                        deal_id, out[deal_id]["reason"])
+    return out
 
-    for deal in deals:
-        verdict = _revalidate_one(deal, max_staleness_min)
-        if not verdict["ok"]:
-            logger.info("[prepublish_revalidate] deal %s BLOCKED: %s", deal.deal_id, verdict["reason"])
+
+def revalidate_deals(deal_ids: list[str], *, max_staleness_min: int) -> dict:
+    """All-or-nothing verdict: the first failing deal, or ``{"ok": True}``.
+
+    ``deal_ids`` are ``EnrichedDeal.deal_id`` values, exactly what
+    ``GeneratedPost.deal_ids`` stores. Kept for callers that carry a single deal and
+    genuinely have nothing to salvage — a board that can drop an item should call
+    ``revalidate_each`` instead.
+    """
+    verdicts = revalidate_each(deal_ids, max_staleness_min=max_staleness_min)
+    for deal_id in deal_ids:
+        verdict = verdicts.get(deal_id)
+        if verdict is not None and not verdict["ok"]:
             return verdict
     return {"ok": True, "reason": None}

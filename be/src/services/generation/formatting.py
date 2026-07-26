@@ -233,6 +233,7 @@ class PostFormatter:
         theme_text = theme or self._render("collection_theme_default", date=_today_str())
         header = f"{emoji} {theme_text}".strip()
         lines = [header, ""]
+        items: list[dict] = []
         shortened_any = False
         for i, d in enumerate(deals):
             cur = _fmt_price(d.current_price)
@@ -242,9 +243,11 @@ class PostFormatter:
             link = link or ""
             price = f" — {cur}" if cur else ""
             discount = f"{d.discount_percent:.0f}" if d.discount_percent is not None else ""
-            lines.append(self._render("collection_item", n=_rank_marker(i), title=title,
-                                      price=price, raw_price=cur or "", discount=discount,
-                                      link=link).rstrip())
+            item_line = self._render("collection_item", n=_rank_marker(i), title=title,
+                                     price=price, raw_price=cur or "", discount=discount,
+                                     link=link).rstrip()
+            lines.append(item_line)
+            items.append({"deal_id": d.deal_id, "line": item_line})
         # optional closing footer (e.g. "🔔 Notifications ON") — off by default
         footer = self._render("collection_footer")
         if footer.strip():
@@ -252,6 +255,7 @@ class PostFormatter:
             lines.append(footer)
         rendered = "\n".join(lines)
         meta = {"used_emojis": self.lead_emojis, "item_count": len(deals),
+                "items": items,
                 "affiliate_status": (f"{self.affiliate.name}_applied" if self.affiliate
                                      else "no_provider_clean_url"),
                 "affiliate_shortened_any": shortened_any}
@@ -295,6 +299,7 @@ class PostFormatter:
                                  emoji_end=e2).strip()
 
         lines = [theme, ""]
+        items: list[dict] = []
         shortened_any = False
         for d in deals:
             title = _short_title(d.title, fallback=self._render("fallback_title"))
@@ -307,8 +312,10 @@ class PostFormatter:
             for tag in (d.tags or []):
                 if isinstance(tag, str) and tag.startswith("coupon:"):
                     coupon = self._render("category_coupon_suffix", code=tag.split(':', 1)[1])
-            lines.append(self._render("category_item", title=title, price=price,
-                                      coupon=coupon, link=link))
+            item_line = self._render("category_item", title=title, price=price,
+                                     coupon=coupon, link=link)
+            lines.append(item_line)
+            items.append({"deal_id": d.deal_id, "line": item_line})
         lines.append("")
         if self.cta_line:
             lines.append(self.cta_line)
@@ -316,7 +323,7 @@ class PostFormatter:
             lines.append(self.footer_line)
         rendered = "\n".join(lines).rstrip()
         meta = {"kind": "category_collection", "category": category_key,
-                "price_tier": tier, "item_count": len(deals),
+                "price_tier": tier, "item_count": len(deals), "items": items,
                 "affiliate_status": (f"{self.affiliate.name}_applied" if self.affiliate
                                      else "no_provider_clean_url"),
                 "affiliate_shortened_any": shortened_any, "links_real_fresh": True}

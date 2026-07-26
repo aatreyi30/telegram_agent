@@ -118,9 +118,13 @@ def test_publisher_blocks_and_never_sends_on_failed_revalidation(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "telegram_api_id", 123)
     monkeypatch.setattr(settings, "telegram_api_hash", "hash")
+    # Publisher now asks for PER-DEAL verdicts so a multi-deal board can drop a dead
+    # item instead of dying whole. This post carries one deal — there is nothing to
+    # salvage, so it must still block exactly as before.
     monkeypatch.setattr(
-        "src.services.generation.revalidate.revalidate_deals",
-        lambda deal_ids, max_staleness_min: {"ok": False, "reason": "dead link (404)"},
+        "src.services.generation.revalidate.revalidate_each",
+        lambda deal_ids, max_staleness_min: {d: {"ok": False, "reason": "dead link (404)"}
+                                             for d in deal_ids},
     )
 
     result = Publisher().publish(post_id, "@testchannel", confirm=True)
@@ -131,3 +135,89 @@ def test_publisher_blocks_and_never_sends_on_failed_revalidation(monkeypatch):
     with session_scope() as s:
         refreshed = s.get(GeneratedPost, post_id)
         assert refreshed.status == PostStatus.BLOCKED
+
+
+def _make_board(s, n, prefix):
+    """A loot board of `n` deals rendered as one message, one line per deal."""
+    from src.db.models_generation import GeneratedPost, PostStatus
+
+    items = []
+    for i in range(n):
+        did, url = f"{prefix}-{i}", f"https://www.ajio.com/p/{prefix}{i}"
+        _make_deal(s, did, "ajio", url)
+        items.append({"deal_id": did, "line": f"Pick {i} - {url}"})
+    text = "Fashion Under 999\n\n" + "\n".join(i["line"] for i in items) + "\n\nShare it!"
+    post = GeneratedPost(generated_at=datetime.now(timezone.utc), post_type="collection",
+                         deal_ids=[i["deal_id"] for i in items], rendered_text=text,
+                         format_meta={"items": items}, status=PostStatus.DRAFT)
+    s.add(post)
+    s.flush()
+    return post.id
+
+
+def _publish_board(monkeypatch, post_id, dead_ids, sent):
+    from src.config.settings import get_settings
+    from src.services.generation.publishing import Publisher
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "telegram_api_id", 123)
+    monkeypatch.setattr(settings, "telegram_api_hash", "hash")
+    monkeypatch.setattr(
+        "src.services.generation.revalidate.revalidate_each",
+        lambda deal_ids, max_staleness_min: {
+            d: {"ok": d not in dead_ids, "reason": "dead link (404)"} for d in deal_ids},
+    )
+
+    async def fake_send(self, pid, channel_ref, confirm):
+        from src.db.session import session_scope as scope
+        with scope() as s:
+            from src.db.models_generation import GeneratedPost
+            sent.append(s.get(GeneratedPost, pid).rendered_text)
+        return True, "Sent (fake)."
+
+    monkeypatch.setattr(Publisher, "_check_and_publish", fake_send)
+    return Publisher().publish(post_id, "@testchannel", confirm=True)
+
+
+def test_one_dead_deal_does_not_kill_the_whole_board(monkeypatch):
+    """THE bug: a 10-deal board died because item #7 sold out, throwing away nine
+    live deals. It must now send the survivors, minus the dead line."""
+    from src.db.models_generation import GeneratedPost, PostStatus
+    from src.db.session import session_scope
+
+    with session_scope() as s:
+        post_id = _make_board(s, 6, "boardA")
+
+    sent: list[str] = []
+    result = _publish_board(monkeypatch, post_id, {"boardA-2"}, sent)
+
+    assert result["ok"] is True
+    assert result["status"] == PostStatus.PUBLISHED
+    assert len(sent) == 1
+    assert "boardA2" not in sent[0], "the dead deal's link still went out"
+    for keep in (0, 1, 3, 4, 5):
+        assert f"boardA{keep}" in sent[0]
+    assert "Fashion Under 999" in sent[0] and "Share it!" in sent[0]
+    assert "Dropped 1 of 6 deals" in result["note"]
+
+    with session_scope() as s:
+        refreshed = s.get(GeneratedPost, post_id)
+        assert refreshed.deal_ids == ["boardA-0", "boardA-1", "boardA-3", "boardA-4", "boardA-5"], \
+            "what we recorded must match what the channel received"
+
+
+def test_board_stripped_below_the_floor_is_blocked(monkeypatch):
+    """Trimming is not unconditional — a board down to two links is not worth posting."""
+    from src.db.models_generation import PostStatus
+    from src.db.session import session_scope
+
+    with session_scope() as s:
+        post_id = _make_board(s, 5, "boardB")
+
+    sent: list[str] = []
+    result = _publish_board(monkeypatch, post_id, {"boardB-0", "boardB-1", "boardB-2"}, sent)
+
+    assert result["ok"] is False
+    assert result["status"] == PostStatus.BLOCKED
+    assert "only 2 of 5 deals survived" in result["note"]
+    assert sent == [], "nothing may reach the channel when the board is blocked"
