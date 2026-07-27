@@ -994,8 +994,11 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
             # as in-range and report was_clamped=False). Also survives the cache-hit path.
             recommended_final = plan.get("recommended_posts")
             was_clamped = bool(plan.get("plan_clamped"))
-            ai_why = plan.get("cadence_why")
-            cadence_why = ai_why if (not was_clamped and ai_why) else det_why
+            # Always the deterministic, data-driven cadence line. The AI's own
+            # cadence_why drifts (it once said "19 posts/day" when the number was 38);
+            # det_why is computed from the real trajectory, so it stays accurate AND
+            # still adapts — the count and range update as your posting changes.
+            cadence_why = det_why
         else:
             recommended_final, was_clamped = recommended, False
             cadence_why = det_why

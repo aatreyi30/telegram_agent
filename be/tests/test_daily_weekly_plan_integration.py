@@ -89,7 +89,10 @@ def test_daily_brief_uses_ai_number_when_in_range(monkeypatch):
     r = service.daily_brief(date="2026-07-01")
     assert r["today"]["recommended_posts"] == 2
     assert r["today"]["plan_clamped"] is False
-    assert r["today"]["cadence_why"] == "AI says 2 is right"
+    # cadence_why is now ALWAYS the deterministic, data-driven line (not the AI's,
+    # which drifted) — the AI NUMBER is still honored when in range (asserted above).
+    assert "AI says" not in r["today"]["cadence_why"]
+    assert "matches that pace" in r["today"]["cadence_why"]
 
 
 def test_daily_brief_clamps_out_of_range_ai_number(monkeypatch):

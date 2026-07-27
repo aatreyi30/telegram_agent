@@ -52,6 +52,67 @@ def _target_type_counts(counts: dict[str, int], target_total: int) -> dict[str, 
     return out
 
 
+def _is_coverage_slot(sl: dict) -> bool:
+    """A deterministic coverage/clone slot (Python-generated), not one of the AI's
+    reasoned slots — identified by the coverage phrasing its `why` carries."""
+    w = sl.get("why") or ""
+    return ("spread across the day" in w or "widening reach" in w
+            or "additional post spread" in w)
+
+
+def _lock_type_split(slots: list[dict], target_loot_share: float | None) -> None:
+    """Lock the single/collection split (in place) to the LEARNED loot ratio rather
+    than the AI's per-run mix, so 'Target posts' stays stable and correct instead of
+    wandering (19/19 -> 21/17 -> 30/8). The ratio is data-driven (derived from
+    measured per-post views), so this STILL adapts — it only removes the random
+    run-to-run drift. Converts coverage/clone slots first (leaves the AI's reasoned
+    slots intact) and clamps to the same 30% variety floor. When converting to a
+    single, its loot price-bounds are cleared."""
+    if not slots or target_loot_share is None:
+        return
+    n = len(slots)
+    ls = min(max(float(target_loot_share), _MIN_TYPE_SHARE), 1 - _MIN_TYPE_SHARE)
+    target_loot = round(n * ls)
+    cur_loot = sum(1 for s in slots if (s.get("type") or "single") == "collection")
+    delta = target_loot - cur_loot
+    if delta == 0:
+        return
+    from_type = "single" if delta > 0 else "collection"
+    to_type = "collection" if delta > 0 else "single"
+    # Prefer converting coverage slots; among those the LATER ones, to disturb the
+    # front-loaded reasoned slots least. Stable sort keeps chronological order otherwise.
+    cands = [s for s in slots if (s.get("type") or "single") == from_type]
+    cands.sort(key=lambda s: (0 if _is_coverage_slot(s) else 1))
+    for s in cands[:abs(delta)]:
+        s["type"] = to_type
+        if to_type == "single":
+            s["max_price"] = None
+            s["min_price"] = None
+
+
+# Active posting window for padded plans (minutes since midnight). A sane default
+# — 06:00–23:59 — so coverage/padding posts never land in the dead of night.
+# ponytail: swap for the channel's own active-hour range once threaded through.
+_ACTIVE_START_MIN, _ACTIVE_END_MIN = 6 * 60, 24 * 60 - 1
+
+
+def _spread_across_active_hours(slots: list[dict]) -> None:
+    """Re-space ALL slots evenly across active hours (in place) so PADDED plans don't
+    scatter posts into 00:00–05:00 — the 38-slots-across-a-24h-clock bug. Only runs
+    when the plan actually contains coverage/clone slots; a fully-reasoned plan keeps
+    its exact AI-chosen times (so the 'fires at explicit time_ist' contract holds)."""
+    if not slots or not any(_is_coverage_slot(s) for s in slots):
+        return
+    ordered = sorted(slots, key=lambda s: (_slot_minute(s) is None, _slot_minute(s) or 0))
+    n = len(ordered)
+    if n < 2:
+        return
+    step = (_ACTIVE_END_MIN - _ACTIVE_START_MIN) / (n - 1)
+    for i, sl in enumerate(ordered):
+        m = round(_ACTIVE_START_MIN + step * i)
+        sl["time_ist"] = f"{m // 60:02d}:{m % 60:02d}"
+
+
 # S1-d — minutes between a duplicated slot and the slot it was copied from (and
 # every other duplicate). Well past jit_fill.py's SPACING_MIN (2min) collision
 # floor, so a reconciliation-created duplicate reads as its own scheduled post
@@ -336,6 +397,17 @@ def persist_ai_plan(
         # stated recommended_posts, and jit_fill executes the slot counts — so without
         # this the day would post the drifted total (e.g. 71) instead of the cadence.
         _rescale_slot_counts(plan, rec, result.get("feed_pairs"))
+        # Lock the single/loot split to the LEARNED weekly ratio so 'Target posts'
+        # stops wandering run-to-run. The ratio is derived from measured per-post
+        # views (see service._weekly_ai_generate), so this stays adaptive.
+        from src.ai.planner import _current_week_plan
+        _wk = _current_week_plan(s) or {}
+        _r = _wk.get("loot_deal_ratio") or {}
+        _lt, _dl = _r.get("loot"), _r.get("deal")
+        _loot_share = _lt / (_lt + _dl) if (_lt is not None and _dl is not None and (_lt + _dl)) else None
+        _lock_type_split(plan.get("post_slots") or [], _loot_share)
+        # Keep padded plans within active hours (no dead-of-night posts).
+        _spread_across_active_hours(plan.get("post_slots") or [])
     fc = result.get("factcheck", {"status": "skipped"})
     target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
