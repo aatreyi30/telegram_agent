@@ -829,30 +829,52 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
             "\n\nOPERATOR DIRECTIVE (highest priority — honor it in the direction/digest, "
             "or state plainly why the DATA can't support it; never invent a fact):\n" + directive
         )
-    try:
-        user = f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n{to_json(facts_ctx)}{directive_note}"
-        raw = ai.complete(user, system_extra=_WEEKLY_PLAN_SYSTEM, max_tokens=2000,
-                          trace_call="week_plan")
-    except AIUnavailable as e:
-        return {"available": False, "reason": str(e), "plan": None, "digest": "",
-                "facts": facts}
-    digest, plan_text = _split_digest_and_plan(raw)
-    try:
-        plan = _parse_week_plan(plan_text)
-    except ValueError:
-        return {"available": False, "reason": "unparseable weekly plan", "plan": None,
-                "digest": digest, "facts": facts}
-    plan.setdefault("week_start", week_start.isoformat())
     # FIX 1 (weekly) — same prose fact-check as the daily path: `cited_numbers` is
     # always empty (the model never fills it in), so what needs checking is the
     # PROSE (digest + direction + each day's why/theme text) against the facts it
     # was grounded on, with the plan's own decision numbers (loot_deal_ratio,
     # posts_planned, loot/single share) excluded as self-valid structural numbers.
     from src.ai.factcheck import check_cited_numbers, extract_prose_numbers, plan_structural_numbers
-    structural = plan_structural_numbers(plan)
-    facts_pool = [*facts, {f"s{i}": v for i, v in enumerate(structural)}]
-    fc = check_cited_numbers(extract_prose_numbers({**plan, "digest": digest}), facts_pool)
-    return {"available": True, "digest": digest, "plan": plan, "facts": facts, "factcheck": fc}
+    # The gate is all-or-nothing (one invented figure hides the whole narrative), and
+    # the small model drifts into a self-computed % / MoM figure ~half the time.
+    # Standing prompt guardrails don't stop it; NAMING the exact offending number and
+    # asking for a rewrite does. So: try once, and on a fail/warn retry ONCE with that
+    # corrective note. Keep the better attempt; downstream still has the grounded
+    # fallback for the rare double-miss. ponytail: 1 retry, raise the cap if it's still
+    # failing too often (each retry is one extra call, only on a miss, cached per week).
+    correction, best = "", None
+    for _attempt in range(2):
+        try:
+            user = (f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n"
+                    f"{to_json(facts_ctx)}{directive_note}{correction}")
+            raw = ai.complete(user, system_extra=_WEEKLY_PLAN_SYSTEM, max_tokens=2000,
+                              trace_call="week_plan")
+        except AIUnavailable as e:
+            return best or {"available": False, "reason": str(e), "plan": None,
+                            "digest": "", "facts": facts}
+        digest, plan_text = _split_digest_and_plan(raw)
+        try:
+            plan = _parse_week_plan(plan_text)
+        except ValueError:
+            return best or {"available": False, "reason": "unparseable weekly plan",
+                            "plan": None, "digest": digest, "facts": facts}
+        plan.setdefault("week_start", week_start.isoformat())
+        structural = plan_structural_numbers(plan)
+        facts_pool = [*facts, {f"s{i}": v for i, v in enumerate(structural)}]
+        fc = check_cited_numbers(extract_prose_numbers({**plan, "digest": digest}), facts_pool)
+        best = {"available": True, "digest": digest, "plan": plan, "facts": facts,
+                "factcheck": fc}
+        if fc["status"] == "passed":
+            break
+        bad = ", ".join(str(round(u, 2)) for u in (fc.get("unverified") or []))
+        correction = (
+            "\n\nREWRITE REQUIRED: your previous draft cited number(s) that are NOT in "
+            f"the DATA and cannot be verified: [{bad}]. Rewrite the digest and plan "
+            "citing ONLY raw numbers that appear verbatim in the DATA above. Remove "
+            "every percentage, week-over-week/month-over-month change, or ratio you "
+            "computed yourself, and do not restate the offending number(s)."
+        )
+    return best
 
 
 def _demo() -> None:
