@@ -1069,6 +1069,28 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
         }
 
 
+def _grounded_weekly_summary(s) -> str:
+    """Honest, deterministic weekly summary from REAL data only — used when the AI
+    narrative fails fact-check (it cited self-computed/unverifiable figures). No LLM,
+    no derived numbers: just the measured per-post views for each deal type, so the
+    operator sees a true statement instead of hallucinated prose (mirrors the retro's
+    plain-language honesty)."""
+    ptp = {p["post_type"]: p for p in ctx.post_type_performance(s)}
+    sv = (ptp.get("single_deal") or {}).get("avg_views")
+    lv = (ptp.get("loot_deal") or {}).get("avg_views")
+    if sv and lv:
+        if sv >= lv:
+            body = (f"single deals average {round(sv)} views per post vs {round(lv)} "
+                    "for loot boards, so the mix leans single while keeping loot for variety")
+        else:
+            body = (f"loot boards average {round(lv)} views per post vs {round(sv)} "
+                    "for single deals, so the mix leans loot while keeping singles for variety")
+    else:
+        body = "there isn't enough measured post data yet to summarise the week"
+    return ("The AI narrative was withheld because it cited figures that couldn't be "
+            f"verified against the data. Grounded facts: {body}.")
+
+
 def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = None):
     """The cache-miss generation path for the weekly AI narrative: (re)compute the
     deterministic blueprint fresh, call the briefing generator once (honoring
@@ -1123,9 +1145,13 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
             # (loot_deal_ratio/merchant_priorities/daily_themes) are structural and
             # still merged below — only the narrative prose is withheld.
             wk_fc_status = (res.get("factcheck") or {}).get("status")
-            if wk_fc_status == "failed":
-                ai_summary = ("This week's summary could not be verified against the "
-                              "data (some cited numbers are unsupported) — regenerate it.")
+            if wk_fc_status in ("failed", "warn"):
+                # ANY unverified number means the narrative contains a figure the model
+                # invented or self-computed (a % / MoM change / mislabelled velocity),
+                # which the operator shouldn't be shown as fact. Rather than the
+                # hallucinated prose or a bare "regenerate", show an HONEST grounded
+                # summary built only from real data — the retro's plain-language honesty.
+                ai_summary = _grounded_weekly_summary(s)
         except AIUnavailable:
             ai_summary = ""
     except Exception:
@@ -1292,7 +1318,12 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
                 "week_start": week_start.isoformat(),
                 "week_end": week_end.isoformat(),
                 "days": days, "totals": totals, "themes": themes,
-                "recommended_posts_per_day": traj["recent_cadence"],
+                # Match the blueprint / daily-themes / daily-plan count (the 14-day
+                # median) instead of a separate this-week trajectory, so the card's
+                # "Recommended/day" agrees with the 38 shown everywhere else.
+                "recommended_posts_per_day": (((wk.blueprint or {}).get("posts_per_day")
+                                               if wk is not None else None)
+                                              or traj["recent_cadence"]),
                 "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok,
                 "factcheck_status": (wk.factcheck_status if wk is not None else None),
                 "operator_directive": wk.operator_directive if wk is not None else None,
