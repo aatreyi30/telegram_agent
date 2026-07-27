@@ -113,6 +113,41 @@ def _spread_across_active_hours(slots: list[dict]) -> None:
         sl["time_ist"] = f"{m // 60:02d}:{m % 60:02d}"
 
 
+# Cap on posts in any single hour, so weighting toward strong hours emphasises them
+# without over-stuffing one hour (≈ one post per 15 min max).
+_MAX_PER_HOUR = 4
+
+
+def _spread_by_performance(slots: list[dict], hour_weights: dict[int, float]) -> None:
+    """Distribute a PADDED plan's slots across the day WEIGHTED by each hour's own
+    historical avg views (more posts in your proven-best hours, fewer in weak ones) —
+    using the hour-performance data the system already has, instead of a flat spread.
+    Proportional-fair allocation (weight ÷ posts-so-far), capped per hour. Only
+    re-times padded plans (a fully-reasoned plan keeps its AI-chosen times); falls
+    back to an even active-hours spread when there's no usable hour data yet."""
+    if not slots or not any(_is_coverage_slot(s) for s in slots):
+        return
+    if not hour_weights:
+        _spread_across_active_hours(slots)
+        return
+    n = len(slots)
+    hours = sorted(hour_weights)
+    alloc = {h: 0 for h in hours}
+    for _ in range(n):
+        cand = [h for h in hours if alloc[h] < _MAX_PER_HOUR] or hours
+        best = max(cand, key=lambda h: hour_weights[h] / (alloc[h] + 1))
+        alloc[best] += 1
+    minutes: list[int] = []
+    for h in hours:
+        k = alloc[h]
+        for i in range(k):
+            minutes.append(h * 60 + (round(i * 60 / k) if k > 1 else 30))
+    minutes.sort()
+    ordered = sorted(slots, key=lambda s: (_slot_minute(s) is None, _slot_minute(s) or 0))
+    for sl, m in zip(ordered, minutes):
+        sl["time_ist"] = f"{(m // 60) % 24:02d}:{m % 60:02d}"
+
+
 # S1-d — minutes between a duplicated slot and the slot it was copied from (and
 # every other duplicate). Well past jit_fill.py's SPACING_MIN (2min) collision
 # floor, so a reconciliation-created duplicate reads as its own scheduled post
@@ -406,8 +441,14 @@ def persist_ai_plan(
         _lt, _dl = _r.get("loot"), _r.get("deal")
         _loot_share = _lt / (_lt + _dl) if (_lt is not None and _dl is not None and (_lt + _dl)) else None
         _lock_type_split(plan.get("post_slots") or [], _loot_share)
-        # Keep padded plans within active hours (no dead-of-night posts).
-        _spread_across_active_hours(plan.get("post_slots") or [])
+        # Weight a padded plan's posts toward the channel's proven best HOURS (avg
+        # views per hour, sample-gated, active hours only) — recomputed every run, so
+        # it adapts as your best hours shift. Falls back to an even active-hours spread
+        # inside _spread_by_performance when there's no usable hour data yet.
+        from src.services.planning.campaign import CampaignPlanningEngine
+        _hourly = CampaignPlanningEngine()._recent_hourly_all(s, datetime.now(timezone.utc))
+        _hw = {int(h): a for h, a, _n in _hourly if _n >= 3 and a and 6 <= int(h) <= 23}
+        _spread_by_performance(plan.get("post_slots") or [], _hw)
     fc = result.get("factcheck", {"status": "skipped"})
     target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
