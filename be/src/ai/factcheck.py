@@ -69,10 +69,8 @@ def _numbers_in(text) -> list[float]:
     return out
 
 
-def extract_prose_numbers(plan: dict) -> list[float]:
-    """Numbers in the plan's free-text (digest/why/etc.) — the real fact-check
-    surface, since the model leaves its self-declared ``cited_numbers`` empty.
-    Caller merges ``digest`` into the parsed plan first (parse_plan drops it)."""
+def _prose_texts(plan: dict) -> list[str]:
+    """The plan's free-text surfaces (digest/why/direction/theme) as strings."""
     texts = [plan.get("digest"), plan.get("cadence_why"), plan.get("emphasis"),
              plan.get("watch"), plan.get("direction")]
     for sl in plan.get("post_slots") or []:
@@ -80,10 +78,65 @@ def extract_prose_numbers(plan: dict) -> list[float]:
     for t in plan.get("daily_themes") or []:
         texts.append(t.get("why"))
         texts.append(t.get("theme") or t.get("theme_focus"))
+    return [t for t in texts if isinstance(t, str)]
+
+
+def extract_prose_numbers(plan: dict) -> list[float]:
+    """Numbers in the plan's free-text (digest/why/etc.) — the real fact-check
+    surface, since the model leaves its self-declared ``cited_numbers`` empty.
+    Caller merges ``digest`` into the parsed plan first (parse_plan drops it)."""
     nums: list[float] = []
-    for t in texts:
+    for t in _prose_texts(plan):
         nums.extend(_numbers_in(t))
     return nums
+
+
+def scoped_mislabels(plan: dict, buckets: list[dict], *, tolerance: float = 0.02) -> list[float]:
+    """Numbers used under the WRONG label — the gap the flat-pool check can't see.
+
+    ``check_cited_numbers`` asks only 'is this digit somewhere in the data?', so a
+    REAL number attached to the wrong thing passes (single's 781 views cited as
+    loot's). This catches exactly that: a figure that sits NEAREST one bucket's
+    keyword but matches only a DIFFERENT bucket's values — a provable swap.
+
+    ``buckets`` = [{"keywords": ["loot","multi"], "values": [573.1, 30.7, ...]}, ...].
+    Deliberately conservative — flags a number ONLY when it (a) has a nearby bucket
+    keyword, (b) does not match its nearest bucket, AND (c) matches some OTHER
+    bucket. Numbers that match nothing are left to check_cited_numbers; numbers with
+    no nearby label, or correctly labelled, are untouched. So it can only ADD a catch
+    for a real mislabel, never false-flag an honest figure."""
+    if len(buckets) < 2:
+        return []
+    flagged: list[float] = []
+    for text in _prose_texts(plan):
+        low = text.lower()
+        kw_pos = [(i, bi) for bi, b in enumerate(buckets) for kw in b["keywords"]
+                  for i in _find_all(low, kw)]
+        if not kw_pos:
+            continue
+        for m in _NUM_RE.finditer(text):
+            cleaned = m.group().replace(",", "").strip(".")
+            if not cleaned:
+                continue
+            try:
+                num = float(cleaned)
+            except ValueError:
+                continue
+            near = min(kw_pos, key=lambda kp: abs(kp[0] - m.start()))[1]
+            if _matches(num, buckets[near]["values"], tolerance):
+                continue  # correctly labelled
+            if any(_matches(num, b["values"], tolerance)
+                   for j, b in enumerate(buckets) if j != near):
+                flagged.append(num)  # real number, wrong label => swap
+    return flagged
+
+
+def _find_all(hay: str, needle: str) -> list[int]:
+    out, start = [], 0
+    while (i := hay.find(needle, start)) != -1:
+        out.append(i)
+        start = i + len(needle)
+    return out
 
 
 def plan_structural_numbers(plan: dict) -> list[float]:
@@ -208,6 +261,18 @@ def _demo() -> None:
     assert set(bad) == {"conversion", "ctr", "revenue"}, bad
     assert unmeasurable_claims({"digest": "amazon drew 400 views; post loot at 8pm",
                                 "post_slots": [{"why": "high views, order early"}]}) == []
+
+    # scoped mislabel guard: loot's real avg is 573, single's is 781.
+    buckets = [{"keywords": ["loot", "multi"], "values": [573.0, 30.7]},
+               {"keywords": ["single"], "values": [781.0, 10.5]}]
+    # 781 cited under "loot" is single's number => a swap, flagged...
+    assert scoped_mislabels({"digest": "loot boards averaged 781 views"}, buckets) == [781.0]
+    # ...but correctly labelled numbers pass, even in a comparison sentence.
+    assert scoped_mislabels(
+        {"digest": "loot averaged 573 views vs 781 for single deals"}, buckets) == []
+    # a number matching NOTHing (pure fabrication) is left to check_cited_numbers,
+    # not this layer — no nearby bucket value matches, no OTHER bucket claims it.
+    assert scoped_mislabels({"digest": "loot boards averaged 999 views"}, buckets) == []
 
     print("ai/factcheck.py self-check OK")
 
