@@ -744,9 +744,25 @@ def _today_details(s, recommended_posts: int):
                     # number for WHY this window instead of generic "peak hours" filler.
                     "avg_views_per_day": p.get("avg_views_per_day")}
                    for i, p in enumerate(raw)]
-    perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
-            for p in ctx.post_type_performance(s)}
+    _ptp = ctx.post_type_performance(s)
+    perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0) for p in _ptp}
+    # Genuine, intuitive per-post figure (real average of real view counts, ~780/577
+    # here) as opposed to the age-confounded views/day velocity (~10/31), which
+    # divides lifetime views by post age and so understates older post types. This is
+    # what the Plan page displays; see AVG-VIEWS note.
+    views_per_post = {p["post_type"]: p.get("avg_views") for p in _ptp}
     allocation = eng._allocate_posts(bp, recommended_posts, recent, perf)
+    # Unify the displayed numbers to the canonical PostTypePerformance values (the
+    # learning engine's output the rest of the app uses) so the Plan page can't show
+    # a divergent GrowthEngine figure. Split (target_posts) is left exactly as
+    # _allocate_posts computed it — only the displayed metrics are set here.
+    for a in allocation:
+        canon = perf.get(a.get("post_type"))
+        if canon is not None:
+            a["avg_views_per_day"] = canon
+        vpp = views_per_post.get(a.get("post_type"))
+        if vpp is not None:
+            a["avg_views_per_post"] = vpp
     merchants = eng._merchant_allocation(s, recent, now)
     risks = eng._risks(recent, recommended_posts)
     return windows, allocation, merchants, (risks or None)
@@ -764,7 +780,8 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
     `regenerate_daily` (forced fresh generation after deleting the stale cache row)
     so the two paths can never drift apart."""
     from src.ai.planner import generate_day_plan
-    from src.ai.factcheck import check_cited_numbers, extract_prose_numbers, plan_structural_numbers
+    from src.ai.factcheck import (check_cited_numbers, extract_prose_numbers,
+                                   plan_structural_numbers, unmeasurable_claims)
     from src.services.generation.ai_execution import persist_ai_plan
 
     # Only pass `directive` through when set — keeps the call signature identical
@@ -800,6 +817,17 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
             fc = check_cited_numbers(extract_prose_numbers({**plan, "digest": digest}), facts_pool)
             fc_status = ("pass" if fc["status"] == "passed"
                         else "failed" if fc["status"] == "failed" else "warn")
+            # Qualitative guard the number-check can't do: prose asserting an outcome
+            # we don't track (conversion/CTR/revenue — no click/affiliate data exists)
+            # is ungrounded. Downgrade a clean plan to 'warn' and record the terms so
+            # it's visible rather than silently trusted.
+            bad_claims = unmeasurable_claims({**plan, "digest": digest})
+            if bad_claims:
+                # Record the offending terms and never let such a plan read as fully
+                # trusted — downgrade a clean 'pass' to 'warn' (a real 'failed' stays).
+                fc = {**fc, "unmeasurable": bad_claims}
+                if fc_status == "pass":
+                    fc_status = "warn"
         row = persist_ai_plan(s, {**ai_res, "factcheck": fc},
                               recent_median=recommended, recent_max_30d=recent_max_30d)
         if row is not None:
@@ -975,6 +1003,41 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
         emphasis = plan.get("emphasis") if ai_ok else None
         watch = plan.get("watch") if ai_ok else None
 
+        # The displayed deal-type allocation must reflect the plan ACTUALLY produced.
+        # The AI can deviate from the deterministic split (e.g. lean loot per the
+        # week direction), which showed the table as 30/8 while the schedule posted
+        # 23/15. Recompute target_posts from the real slots (the avg_views_per_post
+        # figure stays as the canonical metric). `allocation` was already handed to
+        # the generator above, so this only corrects the DISPLAY, not the AI input.
+        if slots and allocation:
+            _tk = {"single": "single_deal", "collection": "loot_deal"}
+            _actual: dict = {}
+            for _sl in slots:
+                _k = _tk.get(_sl.get("type"), _sl.get("type"))
+                _actual[_k] = _actual.get(_k, 0) + 1
+            for _a in allocation:
+                _a["target_posts"] = _actual.get(_a.get("post_type"), 0)
+            allocation = [_a for _a in allocation if (_a.get("target_posts") or 0) > 0]
+
+        # Same alignment for posting windows: they're built from the deterministic
+        # recent cadence, so when the AI plans fewer posts (e.g. 15) the windows still
+        # summed to the raw cadence (38 as 1/5/18/14). Rebucket the ACTUAL slots into
+        # the day-parts so the window counts always sum to the real plan.
+        if slots and windows:
+            def _part_of(hr: int) -> str:
+                return ("Late night" if hr < 6 else "Morning" if hr < 12
+                        else "Afternoon" if hr < 18 else "Evening")
+            _wc: dict = {}
+            for _sl in slots:
+                _h = (_sl.get("time_ist") or "").split(":")[0]
+                if not _h.isdigit():
+                    continue
+                _p = _part_of(int(_h) % 24)
+                _wc[_p] = _wc.get(_p, 0) + 1
+            for _w in windows:
+                _w["posts"] = _wc.get(_w.get("part"), 0)
+            windows = [_w for _w in windows if (_w.get("posts") or 0) > 0]
+
         return {
             "available": True,
             "date": day.isoformat(), "prev_date": prev.isoformat(),
@@ -1081,6 +1144,22 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
         blueprint["direction"] = ai_plan.get("direction")
         if ai_plan.get("daily_themes"):
             blueprint["daily_themes"] = ai_plan["daily_themes"]
+        # Deterministic loot/single split from per-post performance. gpt-5-mini does
+        # NOT reliably follow the "rank by avg_views_per_post" instruction — it kept
+        # returning a loot-heavy ratio off the confounded per-day velocity, which
+        # contradicts the daily plan (the weekly↔daily conflict). Compute the split
+        # from the honest per-post averages (proportional, clamped to a 30% floor so
+        # both types keep variety) and override the model's ratio AND the per-day
+        # shares, so the weekly direction and the daily plan agree and lean the
+        # correct way (single currently out-performs loot per post: 781 vs 573).
+        _pp = {p["post_type"]: (p.get("avg_views") or 0.0) for p in ctx.post_type_performance(s)}
+        _lv, _sv = _pp.get("loot_deal", 0.0), _pp.get("single_deal", 0.0)
+        if _lv or _sv:
+            _ls = min(max(_lv / (_lv + _sv), 0.3), 0.7) if (_lv + _sv) else 0.4
+            blueprint["loot_deal_ratio"] = {"loot": round(_ls * 100), "deal": round((1 - _ls) * 100)}
+            for _t in (blueprint.get("daily_themes") or []):
+                if isinstance(_t, dict):
+                    _t["loot_share"], _t["single_share"] = round(_ls, 3), round(1 - _ls, 3)
         themes = blueprint.get("daily_themes") or []
 
     if wk is not None:
