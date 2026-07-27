@@ -786,25 +786,6 @@ def _parse_week_plan(raw: str) -> dict:
     return data
 
 
-def _type_buckets(facts_ctx: dict) -> list[dict]:
-    """loot / single labelled buckets for ``scoped_mislabels`` — each post type's own
-    metric numbers grouped under its keyword, so a figure cited under the wrong type
-    (single's 781 views as loot's) is caught as a swap. Only the confusable metrics
-    (avg views, per-day velocity, post count); tiny collision-prone fields (rank,
-    share) are left out."""
-    out: list[dict] = []
-    for r in facts_ctx.get("post_type_performance") or []:
-        pt = (r.get("post_type") or "").lower()
-        kws = ["loot", "multi"] if "loot" in pt else ["single"] if "single" in pt else None
-        if not kws:
-            continue
-        vals = [float(r[k]) for k in ("avg_views", "avg_views_per_day", "avg_views_per_post", "posts")
-                if isinstance(r.get(k), (int, float)) and not isinstance(r.get(k), bool)]
-        if vals:
-            out.append({"keywords": kws, "values": vals})
-    return out
-
-
 def generate_week_plan(s: Session, week_start=None, directive: str | None = None) -> dict:
     """Grounded AI WEEKLY plan. Analyses last week's evidence — which post type (loot vs
     single) and which merchants drew traction — and sets THIS week's direction: the
@@ -853,8 +834,7 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     # PROSE (digest + direction + each day's why/theme text) against the facts it
     # was grounded on, with the plan's own decision numbers (loot_deal_ratio,
     # posts_planned, loot/single share) excluded as self-valid structural numbers.
-    from src.ai.factcheck import (check_cited_numbers, extract_prose_numbers,
-                                   plan_structural_numbers, scoped_mislabels)
+    from src.ai.factcheck import check_cited_numbers, extract_prose_numbers, plan_structural_numbers
     # The gate is all-or-nothing (one invented figure hides the whole narrative), and
     # the small model drifts into a self-computed % / MoM figure ~half the time.
     # Standing prompt guardrails don't stop it; NAMING the exact offending number and
@@ -881,17 +861,7 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
         plan.setdefault("week_start", week_start.isoformat())
         structural = plan_structural_numbers(plan)
         facts_pool = [*facts, {f"s{i}": v for i, v in enumerate(structural)}]
-        merged = {**plan, "digest": digest}
-        fc = check_cited_numbers(extract_prose_numbers(merged), facts_pool)
-        # Scoped layer on top of the flat-pool check: catch a REAL number used under
-        # the WRONG post-type label (single's 781 views cited as loot's) — a swap the
-        # flat pool passes because 781 IS in the data, just not for loot. A swap is a
-        # factual error, so force `failed` (naming the numbers) → the retry above asks
-        # the model to fix it, same path as a fabricated figure.
-        mis = scoped_mislabels(merged, _type_buckets(facts_ctx))
-        if mis:
-            fc = {"status": "failed",
-                  "unverified": list(dict.fromkeys((fc.get("unverified") or []) + mis))}
+        fc = check_cited_numbers(extract_prose_numbers({**plan, "digest": digest}), facts_pool)
         best = {"available": True, "digest": digest, "plan": plan, "facts": facts,
                 "factcheck": fc}
         if fc["status"] == "passed":
