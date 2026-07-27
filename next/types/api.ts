@@ -374,7 +374,7 @@ export interface WeeklyBriefDay {
   joined: number; left: number; net: number;
 }
 
-export interface WeeklyBriefTheme { day: string; date: string; theme_focus: string; posts_planned: number; }
+export interface WeeklyBriefTheme { day: string; date: string; theme_focus?: string; loot_share?: number | null; single_share?: number | null; posts_planned: number; }
 
 export interface WeeklyBriefTotals { posts: number; views_total: number; avg_posts_per_day: number; }
 

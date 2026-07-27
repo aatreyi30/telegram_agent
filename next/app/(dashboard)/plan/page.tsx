@@ -327,7 +327,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
                 <TableRow>
                   <TableHead>Time (IST)</TableHead><TableHead>Posts</TableHead>
                   <TableHead>Type</TableHead><TableHead>Theme</TableHead>
-                  <TableHead>Merchant</TableHead><TableHead>Price</TableHead>
+                  <TableHead>Merchant</TableHead>
                   <TableHead>Why</TableHead>
                 </TableRow>
               </TableHeader>
@@ -339,7 +339,6 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
                     <TableCell><Badge variant="secondary" className="font-medium">{postTypeLabel(s.type)}</Badge></TableCell>
                     <TableCell className="text-muted-foreground">{categoryLabel(s.theme) || "—"}</TableCell>
                     <TableCell className="text-muted-foreground">{merchantLabel(s.merchant)}</TableCell>
-                    <TableCell className="text-muted-foreground tabular-nums">{priceIntent(s)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{s.why || "—"}</TableCell>
                   </TableRow>
                 ))}
@@ -537,14 +536,19 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
             <p className="mb-1.5 text-xs font-medium text-muted-foreground">Daily themes</p>
             <Table>
               <TableHeader>
-                <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Theme focus</TableHead></TableRow>
+                <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Loot / Single</TableHead><TableHead>Posts</TableHead></TableRow>
               </TableHeader>
               <TableBody>
                 {w.themes.map((t, i) => (
                   <TableRow key={i}>
                     <TableCell className="font-medium">{t.day}</TableCell>
                     <TableCell className="text-muted-foreground">{isoSlash(t.date)}</TableCell>
-                    <TableCell>{t.theme_focus}</TableCell>
+                    <TableCell className="text-muted-foreground tabular-nums">
+                      {t.loot_share != null
+                        ? `${Math.round(t.loot_share * 100)}% loot / ${Math.round((t.single_share ?? (1 - t.loot_share)) * 100)}% single`
+                        : (t.theme_focus || "—")}
+                    </TableCell>
+                    <TableCell className="tabular-nums">{t.posts_planned ?? "—"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
