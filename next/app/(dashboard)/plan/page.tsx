@@ -342,7 +342,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
                     <TableCell>{postTypeLabel(a.deal_type)}</TableCell>
                     <TableCell>
                       <Tooltip>
-                        <TooltipTrigger className="cursor-help underline decoration-dotted underline-offset-2">{a.target_posts}</TooltipTrigger>
+                        <TooltipTrigger className="cursor-default underline decoration-dotted underline-offset-2">{a.target_posts}</TooltipTrigger>
                         <TooltipContent>
                           {a.target_posts} of {totalPosts} posts{totalPosts > 0 ? ` (${Math.round((a.target_posts / totalPosts) * 100)}%)` : ""} — this type&apos;s share of today&apos;s plan
                         </TooltipContent>
@@ -351,7 +351,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
                     <TableCell>
                       {a.avg_views_per_post != null ? (
                         <Tooltip>
-                          <TooltipTrigger className="cursor-help underline decoration-dotted underline-offset-2">{Math.round(a.avg_views_per_post)}</TooltipTrigger>
+                          <TooltipTrigger className="cursor-default underline decoration-dotted underline-offset-2">{Math.round(a.avg_views_per_post)}</TooltipTrigger>
                           <TooltipContent>
                             Measured average{a.views_sample != null ? ` across ${a.views_sample.toLocaleString()} ${postTypeLabel(a.deal_type).toLowerCase()} posts` : ""}
                           </TooltipContent>
