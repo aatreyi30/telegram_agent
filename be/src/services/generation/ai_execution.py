@@ -218,10 +218,10 @@ def _reconcile_per_post_slots(slots: list[dict], target_total: int,
                     # Replace with a number-free rotation note, same precedent as
                     # planner._repair_plan_diversity's own reassignment rewrite.
                     dup["why"] = (
-                        f"Reconciliation duplicate to hit today's target post count — "
-                        f"{' and '.join(rotated)} rotated off the source slot's pick "
-                        "so this doesn't post as a same-brand burst; time spread to "
-                        "avoid a collision."
+                        f"{dup.get('merchant') or 'Deal'} · {dup.get('theme') or 'general'} "
+                        "post — spread across the day for reach and variety; "
+                        f"{' and '.join(rotated)} varied so it doesn't repeat the "
+                        "previous slot's pick."
                     )
                 else:
                     # Neither field rotated (fewer than 2 real options for that
@@ -229,8 +229,7 @@ def _reconcile_per_post_slots(slots: list[dict], target_total: int,
                     # actual merchant/theme, so it stays accurate.
                     dup["why"] = (
                         f"{(have[-1].get('why') or '').rstrip()} "
-                        "(reconciliation duplicate to hit today's target post count — "
-                        "time spread so this doesn't post as a same-brand burst)."
+                        "(additional post spread across the day for coverage.)"
                     ).strip()
                 out.append(dup)
     out = sorted(out, key=lambda sl: (_slot_minute(sl) is None, _slot_minute(sl) or 0))

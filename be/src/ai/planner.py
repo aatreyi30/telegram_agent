@@ -230,10 +230,9 @@ def _repair_plan_diversity(slots: list[dict], available_merchants: list[str] | N
         keys = changed.get(id(sl))
         if keys:
             sl["why"] = (
-                f"Auto-balanced for diversity — reassigned {' and '.join(keys)} so "
-                "this slot doesn't repeat the chronologically previous slot's pick; "
-                "rotated off it rather than the model's original stat-based "
-                "reasoning."
+                f"{sl.get('merchant') or 'Deal'} · {sl.get('theme') or 'general'} post — "
+                f"{' and '.join(keys)} varied so the day doesn't repeat the same "
+                "merchant/category back-to-back, widening reach across the audience."
             )
 
 
@@ -808,6 +807,13 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     # cited style/follower/competitor numbers verify (nested lists inside facts_ctx are
     # otherwise invisible to check_cited_numbers, which flattens only one level).
     facts = [facts_ctx]
+    # Flatten the nested LISTS in the briefing into their own top-level fact items —
+    # check_cited_numbers only descends one level, so per-type/merchant numbers the
+    # digest legitimately cites (e.g. a type's avg_views_per_day / a merchant's views)
+    # were invisible to the pool and wrongly flagged as unverified, suppressing the
+    # whole weekly narrative. Same flattening the daily plan already does.
+    facts.extend(facts_ctx.get("post_type_performance") or [])
+    facts.extend(facts_ctx.get("merchant_opportunities") or [])
     sfc = facts_ctx.get("style_follower_correlation") or {}
     facts.extend(sfc.get("days") or [])
     facts.extend(sfc.get("comparisons") or [])
