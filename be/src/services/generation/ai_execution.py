@@ -3,6 +3,7 @@ The AI decides strategy (slots); the deterministic planner fills them from real
 inventory. Numbers are fact-checked before the plan is trusted."""
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from datetime import date, datetime, timezone
 
@@ -169,6 +170,35 @@ def _next_spread_minute(base: int, used: set[int]) -> int:
             return minute
         minute = (minute + _DUP_SPREAD_MIN) % (24 * 60)
     return minute
+
+
+def _humanize_fire_times(slots: list[dict]) -> list[dict]:
+    """Nudge round :00/:15/:30 fire times a few minutes off-grid so the schedule reads
+    like a person posting, not a cron bot firing on the quarter-hour (the biggest
+    "this is automated" tell). The offset is a deterministic hash of each slot's OWN
+    content (type/merchant/theme/minute), so it's stable across reopens and
+    regenerations - never random, so the schedule doesn't churn on refresh. Only
+    round-grid times are touched (an already-organic time is left alone); the upstream
+    hour-spread and ordering are preserved, and a final dedupe clears any collision the
+    nudge introduces. ponytail: +/-9-min jitter - widen the modulus if it still looks
+    too regular, but keep it under the inter-slot gap so order holds."""
+    for sl in slots:
+        m = _slot_minute(sl)
+        if m is None or m % 5 != 0:  # leave already-organic times as-is
+            continue
+        h = int.from_bytes(hashlib.md5(
+            f"{sl.get('type')}|{sl.get('merchant')}|{sl.get('theme')}|{m}".encode()
+        ).digest()[:4], "big")
+        m2 = min(max(m + (h % 19) - 9, _ACTIVE_START_MIN), _ACTIVE_END_MIN)  # -9..+9
+        if m2 % 5 == 0:  # keep it off the round grid even after clamping
+            m2 = m2 + 1 if m2 < _ACTIVE_END_MIN else m2 - 1
+        sl["time_ist"] = f"{m2 // 60:02d}:{m2 % 60:02d}"
+    # Return CHRONOLOGICAL order too: dedupe keeps the list's original order, which
+    # leaves duplicated coverage slots stranded at the end (a schedule that jumps
+    # 23:40 -> 07:30 reads as broken/bot). Slots fire by their own time_ist, not list
+    # position, so sorting the display order is safe.
+    deduped = _dedupe_fire_times(slots)
+    return sorted(deduped, key=lambda s: (_slot_minute(s) is None, _slot_minute(s) or 0))
 
 
 def _dedupe_fire_times(slots: list[dict]) -> list[dict]:
@@ -461,6 +491,9 @@ def persist_ai_plan(
         _hourly = CampaignPlanningEngine()._recent_hourly_all(s, datetime.now(timezone.utc))
         _hw = {int(h): a for h, a, _n in _hourly if _n >= 3 and a and 6 <= int(h) <= 23}
         _spread_by_performance(plan.get("post_slots") or [], _hw)
+        # Finally, break the round :00/:30 grid so the schedule reads as a human
+        # posting, not a cron bot — deterministic per-slot nudge, stable across reopens.
+        plan["post_slots"] = _humanize_fire_times(plan.get("post_slots") or [])
     fc = result.get("factcheck", {"status": "skipped"})
     target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
@@ -609,6 +642,20 @@ def _demo() -> None:
     zeroed = {"post_slots": [{"type": "single", "time_ist": "09:00", "merchant": "amazon"}]}
     _rescale_slot_counts(zeroed, 0)
     assert len(zeroed["post_slots"]) >= 1  # never an empty day
+
+    # _humanize_fire_times: round-grid times come out off-grid, unique, order-preserved,
+    # count-preserved, and DETERMINISTIC (same input -> same times, no churn on reopen).
+    def _mk():
+        return [{"type": "single", "merchant": "amazon", "theme": "fashion",
+                 "time_ist": f"{h:02d}:{m:02d}"} for h in range(6, 23) for m in (0, 30)]
+    hz = _humanize_fire_times(_mk())
+    mins = [int(s["time_ist"][3:]) for s in hz]
+    assert len(hz) == 34, len(hz)                       # count preserved
+    assert not any(x % 5 == 0 for x in mins), mins       # off the round grid
+    assert len(set(s["time_ist"] for s in hz)) == 34     # unique fire times
+    ordered_times = [s["time_ist"] for s in hz]
+    assert ordered_times == sorted(ordered_times)         # chronological order
+    assert ordered_times == [s["time_ist"] for s in _humanize_fire_times(_mk())]  # stable
 
     print("services/generation/ai_execution.py self-check OK")
 
