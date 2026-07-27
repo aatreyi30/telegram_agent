@@ -132,16 +132,10 @@ class OwnedChannelCollector(BaseCollector):
 
     # ------------------------------------------------------------------ #
     async def _run_async(self, job_id: int) -> CollectorResult:
-        from telethon import TelegramClient
         from telethon.tl.functions.channels import GetFullChannelRequest
+        from src.shared.telegram import telegram_session
 
-        client = TelegramClient(
-            self.settings.telegram_session_name,
-            self.settings.telegram_api_id,
-            self.settings.telegram_api_hash,
-        )
-        await client.connect()
-        try:
+        async with telegram_session(self.settings) as client:
             if not await client.is_user_authorized():
                 return CollectorResult(
                     skipped_reason=(
@@ -158,8 +152,6 @@ class OwnedChannelCollector(BaseCollector):
                     client, entity, full, channel_row_id, job_id
                 )
             return await self._collect_messages(client, entity, channel_row_id, job_id)
-        finally:
-            await client.disconnect()
 
     # ------------------------------------------------------------------ #
     async def _collect_messages(self, client, entity, channel_row_id, job_id) -> CollectorResult:

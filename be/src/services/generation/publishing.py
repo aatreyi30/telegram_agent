@@ -173,8 +173,8 @@ class Publisher:
         return text.strip(), survivors
 
     async def _check_and_publish(self, post_id: int, channel_ref: str, confirm: bool):
-        from telethon import TelegramClient
         from telethon.tl.functions.channels import GetParticipantRequest
+        from src.shared.telegram import telegram_session
 
         # Gate 1 — auto-send goes to the ONE explicitly configured PUBLISH_CHANNEL and
         # nowhere else. Unset => hold everything. This is what stops a channel from
@@ -196,10 +196,7 @@ class Publisher:
         if not (text or "").strip():
             return False, f"Post #{post_id} has no rendered text — nothing to send."
 
-        client = TelegramClient(self.settings.telegram_session_name,
-                                self.settings.telegram_api_id, self.settings.telegram_api_hash)
-        await client.connect()
-        try:
+        async with telegram_session(self.settings) as client:
             if not await client.is_user_authorized():
                 return False, "Telegram session not authorised (run telegram-login)."
             entity = await resolve_entity(client, channel_ref)
@@ -220,8 +217,6 @@ class Publisher:
             # auto-preview card for it is bulky/unwanted (dev_send.py does the same).
             msg = await client.send_message(entity, text, link_preview=False)
             return True, f"Sent to {channel_ref} (message id={msg.id})."
-        finally:
-            await client.disconnect()
 
     @staticmethod
     def _set(post_id: int, status: str, note: str, channel_ref: str | None = None) -> None:
