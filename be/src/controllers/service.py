@@ -751,6 +751,10 @@ def _today_details(s, recommended_posts: int):
     # divides lifetime views by post age and so understates older post types. This is
     # what the Plan page displays; see AVG-VIEWS note.
     views_per_post = {p["post_type"]: p.get("avg_views") for p in _ptp}
+    # Sample size behind each avg — surfaced beside the number so the Plan page can
+    # show "measured across N posts", making the figure self-evidently real (not an
+    # estimate). Deterministic provenance, not a new signal.
+    views_sample = {p["post_type"]: p.get("posts") for p in _ptp}
     allocation = eng._allocate_posts(bp, recommended_posts, recent, perf)
     # Unify the displayed numbers to the canonical PostTypePerformance values (the
     # learning engine's output the rest of the app uses) so the Plan page can't show
@@ -763,6 +767,9 @@ def _today_details(s, recommended_posts: int):
         vpp = views_per_post.get(a.get("post_type"))
         if vpp is not None:
             a["avg_views_per_post"] = vpp
+        n = views_sample.get(a.get("post_type"))
+        if n is not None:
+            a["views_sample"] = n
     merchants = eng._merchant_allocation(s, recent, now)
     risks = eng._risks(recent, recommended_posts)
     return windows, allocation, merchants, (risks or None)

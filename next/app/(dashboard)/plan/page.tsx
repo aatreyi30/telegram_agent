@@ -6,7 +6,9 @@ import {
   Alert01Icon,
   Calendar03Icon,
   Clock01Icon,
+  InformationCircleIcon,
 } from "@hugeicons/core-free-icons";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Async, Empty } from "@/components/Async";
 import { AiBadge } from "@/components/AiBadge";
 import { Badge } from "@/components/ui/badge";
@@ -297,25 +299,72 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
           </div>
         )}
 
-        {t.deal_type_allocation?.length > 0 && (
+        {t.deal_type_allocation?.length > 0 && (() => {
+          const totalPosts = t.deal_type_allocation.reduce((sum, a) => sum + (a.target_posts || 0), 0);
+          return (
           <div>
             <p className="mb-1.5 text-xs font-medium text-muted-foreground">Deal-type allocation</p>
             <Table>
               <TableHeader>
-                <TableRow><TableHead>Deal type</TableHead><TableHead>Target posts</TableHead><TableHead>Avg views/post</TableHead></TableRow>
+                <TableRow>
+                  <TableHead>Deal type</TableHead>
+                  <TableHead>
+                    <span className="inline-flex items-center gap-1">
+                      Target posts
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <HugeiconsIcon icon={InformationCircleIcon} className="h-3.5 w-3.5 cursor-help text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          Today&apos;s {totalPosts} recommended posts, split across deal types by each type&apos;s measured performance — with a 30% floor so neither type ever drops out.
+                        </TooltipContent>
+                      </Tooltip>
+                    </span>
+                  </TableHead>
+                  <TableHead>
+                    <span className="inline-flex items-center gap-1">
+                      Avg views/post
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <HugeiconsIcon icon={InformationCircleIcon} className="h-3.5 w-3.5 cursor-help text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          The real average of actual view counts across every post of this type — measured from your history, not an estimate.
+                        </TooltipContent>
+                      </Tooltip>
+                    </span>
+                  </TableHead>
+                </TableRow>
               </TableHeader>
               <TableBody>
                 {t.deal_type_allocation.map((a, i) => (
                   <TableRow key={i}>
                     <TableCell>{postTypeLabel(a.deal_type)}</TableCell>
-                    <TableCell>{a.target_posts}</TableCell>
-                    <TableCell>{a.avg_views_per_post != null ? Math.round(a.avg_views_per_post) : "—"}</TableCell>
+                    <TableCell>
+                      <Tooltip>
+                        <TooltipTrigger className="cursor-help underline decoration-dotted underline-offset-2">{a.target_posts}</TooltipTrigger>
+                        <TooltipContent>
+                          {a.target_posts} of {totalPosts} posts{totalPosts > 0 ? ` (${Math.round((a.target_posts / totalPosts) * 100)}%)` : ""} — this type&apos;s share of today&apos;s plan
+                        </TooltipContent>
+                      </Tooltip>
+                    </TableCell>
+                    <TableCell>
+                      {a.avg_views_per_post != null ? (
+                        <Tooltip>
+                          <TooltipTrigger className="cursor-help underline decoration-dotted underline-offset-2">{Math.round(a.avg_views_per_post)}</TooltipTrigger>
+                          <TooltipContent>
+                            Measured average{a.views_sample != null ? ` across ${a.views_sample.toLocaleString()} ${postTypeLabel(a.deal_type).toLowerCase()} posts` : ""}
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : "—"}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </div>
-        )}
+          );
+        })()}
 
         {t.slots?.length > 0 && (
           <div>
