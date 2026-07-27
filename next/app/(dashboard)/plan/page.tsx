@@ -517,7 +517,6 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
 }
 
 function WeekCard({ w }: { w: WeeklyBrief }) {
-  const regenerate = useRegenerateWeeklyPlan();
   return (
     <Card>
       <CardHeader><CardTitle className="text-base">This week — {w.week_start} to {w.week_end}</CardTitle></CardHeader>
@@ -541,14 +540,6 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
           </div>
         )}
 
-        <SteerPanel
-          operatorDirective={w.operator_directive}
-          canRegenerate={w.can_regenerate}
-          isPending={regenerate.isPending}
-          onRegenerate={(directive) =>
-            regenerate.mutate({ end: w.week_start, directive: directive || undefined })
-          }
-        />
       </CardContent>
     </Card>
   );
@@ -556,6 +547,7 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
 
 function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
   const retroQ = useLatestRetro();
+  const regenerate = useRegenerateWeeklyPlan();
   return (
     <Async q={q} rows={3}>
       {(w: WeeklyBrief) =>
@@ -590,6 +582,19 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
             ) : !w.ai_available ? (
               <p className="text-xs text-muted-foreground">AI narrative unavailable — relying on the numbers above.</p>
             ) : null}
+
+            <Card>
+              <CardContent className="pt-6">
+                <SteerPanel
+                  operatorDirective={w.operator_directive}
+                  canRegenerate={w.can_regenerate}
+                  isPending={regenerate.isPending}
+                  onRegenerate={(directive) =>
+                    regenerate.mutate({ end: w.week_start, directive: directive || undefined })
+                  }
+                />
+              </CardContent>
+            </Card>
           </div>
         )
       }
