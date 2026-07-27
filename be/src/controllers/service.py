@@ -829,7 +829,8 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                 if fc_status == "pass":
                     fc_status = "warn"
         row = persist_ai_plan(s, {**ai_res, "factcheck": fc},
-                              recent_median=recommended, recent_max_30d=recent_max_30d)
+                              recent_median=recommended, recent_max_30d=recent_max_30d,
+                              steered=bool(directive))
         if row is not None:
             # Pin the cache key to the day we actually planned for — the AI's
             # self-reported "date" inside the plan JSON isn't reliable enough

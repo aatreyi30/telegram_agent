@@ -396,6 +396,7 @@ def _rescale_slot_counts(plan: dict, target_total: int,
 def persist_ai_plan(
     s: Session, result: dict,
     recent_median: int | None = None, recent_max_30d: int | None = None,
+    steered: bool = False,
 ) -> CampaignPlan | None:
     """``recent_median``/``recent_max_30d`` are the same clamp bounds
     ``daily_brief`` uses for DISPLAY (``ctx.clamp_recommended_posts``) — passing
@@ -433,14 +434,25 @@ def persist_ai_plan(
         # this the day would post the drifted total (e.g. 71) instead of the cadence.
         _rescale_slot_counts(plan, rec, result.get("feed_pairs"))
         # Lock the single/loot split to the LEARNED weekly ratio so 'Target posts'
-        # stops wandering run-to-run. The ratio is derived from measured per-post
-        # views (see service._weekly_ai_generate), so this stays adaptive.
-        from src.ai.planner import _current_week_plan
-        _wk = _current_week_plan(s) or {}
-        _r = _wk.get("loot_deal_ratio") or {}
-        _lt, _dl = _r.get("loot"), _r.get("deal")
-        _loot_share = _lt / (_lt + _dl) if (_lt is not None and _dl is not None and (_lt + _dl)) else None
-        _lock_type_split(plan.get("post_slots") or [], _loot_share)
+        # stops wandering run-to-run — BUT skip it when the operator STEERED the plan,
+        # so a directive like "post more loot boards" is actually honored (the lock
+        # would otherwise force the split straight back to the learned ratio, silently
+        # overriding the operator and contradicting the narrative).
+        if not steered:
+            from src.ai.planner import _current_week_plan
+            _wk = _current_week_plan(s) or {}
+            _r = _wk.get("loot_deal_ratio") or {}
+            _lt, _dl = _r.get("loot"), _r.get("deal")
+            _loot_share = _lt / (_lt + _dl) if (_lt is not None and _dl is not None and (_lt + _dl)) else None
+            if _loot_share is None:
+                # Weekly ratio not available this run — derive it straight from measured
+                # per-post views (the same formula the weekly plan uses), so the lock
+                # ALWAYS applies and an unsteered split can't slip to the model's raw mix.
+                from src.ai import context as _ctx
+                _pp = {p["post_type"]: (p.get("avg_views") or 0.0) for p in _ctx.post_type_performance(s)}
+                _lv, _sv = _pp.get("loot_deal", 0.0), _pp.get("single_deal", 0.0)
+                _loot_share = min(max(_lv / (_lv + _sv), 0.3), 0.7) if (_lv + _sv) else None
+            _lock_type_split(plan.get("post_slots") or [], _loot_share)
         # Weight a padded plan's posts toward the channel's proven best HOURS (avg
         # views per hour, sample-gated, active hours only) — recomputed every run, so
         # it adapts as your best hours shift. Falls back to an even active-hours spread
