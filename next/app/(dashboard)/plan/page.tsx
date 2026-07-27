@@ -531,31 +531,6 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
 
         {w.days?.length > 0 && <WeekDaysTable days={w.days} />}
 
-        {w.themes?.length > 0 && (
-          <div>
-            <p className="mb-1.5 text-xs font-medium text-muted-foreground">Daily themes</p>
-            <Table>
-              <TableHeader>
-                <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Loot / Single</TableHead><TableHead>Posts</TableHead></TableRow>
-              </TableHeader>
-              <TableBody>
-                {w.themes.map((t, i) => (
-                  <TableRow key={i}>
-                    <TableCell className="font-medium">{t.day}</TableCell>
-                    <TableCell className="text-muted-foreground">{isoSlash(t.date)}</TableCell>
-                    <TableCell className="text-muted-foreground tabular-nums">
-                      {t.loot_share != null
-                        ? `${Math.round(t.loot_share * 100)}% loot / ${Math.round((t.single_share ?? (1 - t.loot_share)) * 100)}% single`
-                        : (t.theme_focus || "—")}
-                    </TableCell>
-                    <TableCell className="tabular-nums">{t.posts_planned ?? "—"}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-
         {!!w.upcoming_events?.length && (
           <div className="flex flex-wrap items-center gap-1.5">
             <HugeiconsIcon icon={Calendar03Icon} size={14} className="text-muted-foreground" />
