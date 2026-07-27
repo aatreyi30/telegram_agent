@@ -15,6 +15,45 @@ _WINDOW_HOUR_RE = re.compile(r"(\d{1,2}):\d{2}")
 _TIME_IST_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 
 
+# Terms that imply an outcome we do NOT measure. Telegram gives views / reactions /
+# forwards only; there is no click, conversion, CTR, or revenue data anywhere
+# (`affiliate_links` carries none). Any such claim in the plan prose is ungrounded
+# by construction, and the number-only fact-check can't catch it (no figure to
+# verify). Word-boundary, case-insensitive; kept tight to unambiguous metric words
+# so festival "sale"/"order"/"purchase" reasoning isn't false-flagged.
+_UNMEASURABLE_RE = re.compile(
+    r"\b(conversions?|convert(?:s|ing|ed)?|click[\s-]?throughs?|clickthroughs?|ctr|"
+    r"revenue|roas|roi)\b",
+    re.IGNORECASE,
+)
+
+
+def unmeasurable_claims(plan: dict) -> list[str]:
+    """Distinct terms in the plan's prose that assert an outcome we don't track
+    (conversion / click-through / CTR / revenue / ROI / ROAS). Empty when clean.
+    Used to downgrade a plan's factcheck status to 'warn' — the guard the
+    number-only ``check_cited_numbers`` cannot provide, since these claims carry no
+    verifiable number (see the '22:00 fashion conversion rates' hallucination)."""
+    texts = [plan.get("digest"), plan.get("cadence_why"), plan.get("emphasis"),
+             plan.get("watch"), plan.get("direction")]
+    for sl in plan.get("post_slots") or []:
+        texts.append(sl.get("why"))
+    for t in plan.get("daily_themes") or []:
+        texts.append(t.get("why"))
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in texts:
+        if not isinstance(t, str):
+            continue
+        for m in _UNMEASURABLE_RE.finditer(t):
+            term = m.group(0).lower()
+            key = term.replace(" ", "").replace("-", "")
+            if key not in seen:
+                seen.add(key)
+                out.append(term)
+    return out
+
+
 def _numbers_in(text) -> list[float]:
     if not text or not isinstance(text, str):
         return []
@@ -161,6 +200,14 @@ def _demo() -> None:
     assert 60.0 in wprose and 33.3 in wprose, wprose
     wstruct = plan_structural_numbers(weekly)
     assert set(wstruct) >= {5.0, 0.6, 0.4}, wstruct
+
+    # unmeasurable-claim guard: flags outcomes we don't track, ignores clean prose
+    bad = unmeasurable_claims({"post_slots": [
+        {"why": "fashion has good conversion rates late evening"},
+        {"why": "great CTR and revenue potential here"}]})
+    assert set(bad) == {"conversion", "ctr", "revenue"}, bad
+    assert unmeasurable_claims({"digest": "amazon drew 400 views; post loot at 8pm",
+                                "post_slots": [{"why": "high views, order early"}]}) == []
 
     print("ai/factcheck.py self-check OK")
 
