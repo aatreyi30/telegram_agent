@@ -373,6 +373,19 @@ def j_daily_plan() -> dict:
     from src.controllers.service import ensure_daily_ai_plan
     from src.services.analytics.periods import ist_today
     from src.db.session import session_scope
+    # Producer-before-consumer: the plan grounds on deal-dimension data
+    # (category / discount-band / price-band) that lives on normalized_posts, so
+    # normalization MUST be current first. Nothing else guarantees this ordering —
+    # a startup catch-up or an early fire can otherwise run the plan before
+    # normalization has (re)tagged posts, leaving segment_performance empty and the
+    # plan silently falling back to channel-average views with zero dimension
+    # citations (observed: a plan generated ~3 min before a NORMALIZATION_VERSION
+    # re-tag finished cited no category/discount numbers). Best-effort: a normalize
+    # failure must not take the plan dark, so swallow and plan off what exists.
+    try:
+        j_normalize_posts()
+    except Exception:
+        logger.exception("[daily_plan] pre-plan normalize failed — planning off existing data")
     with session_scope() as s:
         row = ensure_daily_ai_plan(s, ist_today())
         n = len((row.blueprint or {}).get("post_slots") or []) if row else 0
