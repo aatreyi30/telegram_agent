@@ -371,8 +371,15 @@ class CampaignPlanningEngine(BaseCollector):
         # stale baseline third number). Falls back to the baseline only without a session.
         if s is not None:
             from src.ai.context import posting_trajectory
-            end_day = today + timedelta(days=6)
-            posts = (posting_trajectory(s, days=7, end_day=end_day)["recent_cadence"]
+            from src.services.analytics.day import latest_owned_date
+            # Use the EXACT same window as the daily plan — the 14-day active-day
+            # median ending the day BEFORE the latest owned day (build_plan_context
+            # uses prev = latest-1) — so the weekly and daily post counts are identical.
+            # The old 7-day window ending today+6 only captured today's posts, so
+            # weekly showed ~22 vs daily ~38 for the same channel.
+            _latest = latest_owned_date(s)
+            _end = (_latest - timedelta(days=1)) if _latest else None
+            posts = (posting_trajectory(s, days=14, end_day=_end)["recent_cadence"]
                     or int(round(blueprint.get("posting_frequency_baseline") or 8)))
         else:
             posts = int(round(blueprint.get("posting_frequency_baseline") or 8))
