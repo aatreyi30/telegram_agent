@@ -112,7 +112,7 @@ export default function AnalyticsPage() {
       <div className="mb-4">
         <h1 className="text-xl font-bold tracking-tight">Analytics</h1>
         <p className="text-sm text-muted-foreground">
-          Views, reactions, forwards, engagement, CTA, and growth — all from the data we collect.
+          Views, reactions, forwards, engagement, and growth — all from the data we collect.
         </p>
       </div>
 
@@ -152,8 +152,6 @@ export default function AnalyticsPage() {
                 <StatCard label="Total forwards" value={fmtNum(a.total_forwards)}
                   sub="sparsely captured — not a reliable signal" />
                 <StatCard label="Eng. rate" value={fmtPct(a.engagement_rate)} sub={`n=${win.n}`} />
-                <StatCard label="CTA usage" value={fmtPct(a.cta_rate)} sub={`n=${win.n}`} />
-                <StatCard label="Deal rate" value={fmtPct(a.deal_rate)} sub={`n=${win.n}`} />
               </div>
 
               <Card>
@@ -345,14 +343,6 @@ export default function AnalyticsPage() {
                     <CardTitle className="text-base font-semibold">Content signals</CardTitle>
                   </CardHeader>
                   <CardContent className="flex-1 flex flex-col gap-3">
-                    <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
-                      <span className="text-sm text-muted-foreground">CTA usage <span className="text-[10px] uppercase tracking-wide opacity-60">(% of posts)</span></span>
-                      <span className="text-sm font-semibold">{fmtPct(a.cta_rate)}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
-                      <span className="text-sm text-muted-foreground">Deal rate</span>
-                      <span className="text-sm font-semibold">{fmtPct(a.deal_rate)}</span>
-                    </div>
                     <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
                       <span className="text-sm text-muted-foreground">Engagement rate</span>
                       <span className="text-sm font-semibold">{fmtPct(a.engagement_rate)}</span>
