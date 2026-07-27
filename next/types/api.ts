@@ -339,7 +339,7 @@ export interface DailyPlanToday {
   recommended_posts: number;
   cadence_why: string;
   posting_windows: PostingWindowRow[];
-  deal_type_allocation: { deal_type: string; target_posts: number; avg_views_per_day: number | null }[];
+  deal_type_allocation: { deal_type: string; target_posts: number; avg_views_per_day: number | null; avg_views_per_post?: number | null }[];
   merchant_allocation: MerchantAllocation[];
   slots: DailySlot[];
   emphasis: string | null; watch: string | null;

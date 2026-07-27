@@ -302,14 +302,14 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             <p className="mb-1.5 text-xs font-medium text-muted-foreground">Deal-type allocation</p>
             <Table>
               <TableHeader>
-                <TableRow><TableHead>Deal type</TableHead><TableHead>Target posts</TableHead><TableHead>Views/day</TableHead></TableRow>
+                <TableRow><TableHead>Deal type</TableHead><TableHead>Target posts</TableHead><TableHead>Avg views/post</TableHead></TableRow>
               </TableHeader>
               <TableBody>
                 {t.deal_type_allocation.map((a, i) => (
                   <TableRow key={i}>
                     <TableCell>{postTypeLabel(a.deal_type)}</TableCell>
                     <TableCell>{a.target_posts}</TableCell>
-                    <TableCell>{a.avg_views_per_day != null ? Math.round(a.avg_views_per_day) : "—"}</TableCell>
+                    <TableCell>{a.avg_views_per_post != null ? Math.round(a.avg_views_per_post) : "—"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
