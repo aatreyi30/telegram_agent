@@ -1149,12 +1149,16 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
             # (loot_deal_ratio/merchant_priorities/daily_themes) are structural and
             # still merged below — only the narrative prose is withheld.
             wk_fc_status = (res.get("factcheck") or {}).get("status")
-            if wk_fc_status in ("failed", "warn"):
-                # ANY unverified number means the narrative contains a figure the model
-                # invented or self-computed (a % / MoM change / mislabelled velocity),
-                # which the operator shouldn't be shown as fact. Rather than the
-                # hallucinated prose or a bare "regenerate", show an HONEST grounded
-                # summary built only from real data — the retro's plain-language honesty.
+            if wk_fc_status == "failed":
+                # Only a `failed` check (a SUBSTANTIAL fraction unverified => likely a
+                # fabricated %/MoM/mislabelled-velocity figure) withholds the narrative
+                # in favour of the honest grounded summary. A `warn` is a small minority
+                # unverified — per check_cited_numbers' own contract, "a mostly-grounded
+                # plan is safe to act on" (usually a rounding artifact or clock-hour
+                # token) — so we SHOW the AI narrative, with the FE's amber "some numbers
+                # couldn't be verified" caveat. This matches the daily path (which also
+                # only falls back on `failed`); withholding on `warn` too meant the
+                # operator effectively never saw a weekly narrative.
                 ai_summary = _grounded_weekly_summary(s)
         except AIUnavailable:
             ai_summary = ""
