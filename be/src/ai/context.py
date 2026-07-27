@@ -75,7 +75,8 @@ def growth_blueprint(s: Session) -> dict:
 
 def post_type_performance(s: Session) -> list[dict]:
     return [{"post_type": p.post_type, "posts": p.post_count, "share": p.share,
-             "avg_views_per_day": p.avg_views_per_day, "rank": p.rank_by_views_per_day}
+             "avg_views_per_day": p.avg_views_per_day, "avg_views": p.avg_views,
+             "avg_views_per_post": p.avg_views, "rank": p.rank_by_views_per_day}
             for p in s.scalars(select(PostTypePerformance)
                 .where(PostTypePerformance.learning_version == LEARNING_VERSION)
                 .order_by(PostTypePerformance.rank_by_views_per_day))]
