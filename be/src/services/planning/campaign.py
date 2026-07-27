@@ -287,9 +287,13 @@ class CampaignPlanningEngine(BaseCollector):
             if low_sample:
                 score *= _LOW_SAMPLE_DISCOUNT
 
+            avg_vpp = w.get("avg_views")  # per POST (45-day window) — the honest,
+            # correctly-labelled performance number; avg_views_per_day below is a
+            # per-DAY velocity kept only for the allocator's age-normalised blend.
             out.append({
                 "merchant": m,
                 "recent_share": recent_share,
+                "avg_views_per_post": round(avg_vpp) if avg_vpp is not None else None,
                 "avg_views_per_day": round(avg_vpd, 1) if avg_vpd is not None else None,
                 "performance_index": performance_index,
                 "sample_size": sample_size,
