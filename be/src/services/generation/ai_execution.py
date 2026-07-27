@@ -75,6 +75,28 @@ def _next_spread_minute(base: int, used: set[int]) -> int:
     return minute
 
 
+def _dedupe_fire_times(slots: list[dict]) -> list[dict]:
+    """Guarantee no two per-post slots fire on the same minute. The model — or the
+    upstream adjacency repair — can leave two slots at the same ``time_ist``; only
+    the duplicate-INSERTION path below spread times, so an exact-count plan (the
+    early return in ``_reconcile_per_post_slots``) kept collisions live (two posts
+    at 22:00 seen in a real plan). Walk chronologically, keep the first occupant of
+    each minute, bump any later collision to the next free spread minute. Only
+    touches slots that carry a ``time_ist`` (the per-post shape)."""
+    used: set[int] = set()
+    for sl in sorted(slots, key=lambda s: (_slot_minute(s) is None, _slot_minute(s) or 0)):
+        if not sl.get("time_ist"):
+            continue
+        m = _slot_minute(sl)
+        if m is None:
+            continue
+        if m in used:
+            m = _next_spread_minute(m, used)
+            sl["time_ist"] = f"{m // 60:02d}:{m % 60:02d}"
+        used.add(m)
+    return slots
+
+
 def _rotation_pool(slots: list[dict], key: str) -> list[str]:
     """Distinct, order-preserving values already present for ``key`` across
     the WHOLE plan (every type) — these are already known-real (validated
@@ -120,7 +142,7 @@ def _reconcile_per_post_slots(slots: list[dict], target_total: int,
     old independent-pool rotation unchanged."""
     ordered = sorted(slots, key=lambda sl: (_slot_minute(sl) is None, _slot_minute(sl) or 0))
     if len(ordered) == target_total:
-        return ordered
+        return _dedupe_fire_times(ordered)
     counts = Counter(sl.get("type") or "single" for sl in ordered)
     desired = _target_type_counts(dict(counts), target_total)
     merchants = _rotation_pool(ordered, "merchant")
@@ -232,7 +254,7 @@ def _reconcile_per_post_slots(slots: list[dict], target_total: int,
         available_pairs=feed_pairs or (
             {(sl.get("merchant"), sl.get("theme")) for sl in out
              if sl.get("merchant") and sl.get("theme")} or None))
-    return out
+    return _dedupe_fire_times(out)
 
 
 def _rescale_slot_counts(plan: dict, target_total: int,
