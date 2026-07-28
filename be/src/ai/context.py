@@ -316,8 +316,11 @@ def available_deals(s: Session, limit: int = 15) -> list[dict]:
              "discount_percent": d.discount_percent, "url": d.clean_url or d.url} for d in picked]
 
 
-def full_briefing_context(s: Session, weekly: bool = False) -> dict:
-    """Everything the briefing generator needs, as one grounded bundle."""
+def full_briefing_context(s: Session, weekly: bool = False, end_day=None) -> dict:
+    """Everything the briefing generator needs, as one grounded bundle. ``end_day``
+    anchors the weekly 7-day window (defaults to the latest owned day) so the AI
+    narrative describes the SAME trailing week the UI table shows — passing it keeps
+    the digest, the table, and the WEEK_START label from drifting apart."""
     out = {
         "channel": channel_overview(s),
         "what_changed_and_why": reasoning_insights(s),
@@ -332,7 +335,7 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
 
         from src.services.analytics.daily_report import _owned_channel
 
-        traj = posting_trajectory(s, days=7)
+        traj = posting_trajectory(s, days=7, end_day=end_day)
         week_start = _date.fromisoformat(traj["days"][0]["date"]) if traj["days"] else None
         end_day = _date.fromisoformat(traj["days"][-1]["date"]) if traj["days"] else None
         # The real 7-day per-day series (posts + views) — the SAME numbers the weekly UI

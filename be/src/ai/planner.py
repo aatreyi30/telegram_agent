@@ -869,7 +869,8 @@ def _parse_week_plan(raw: str) -> dict:
     return data
 
 
-def generate_week_plan(s: Session, week_start=None, directive: str | None = None) -> dict:
+def generate_week_plan(s: Session, week_start=None, directive: str | None = None,
+                       end_day=None) -> dict:
     """Grounded AI WEEKLY plan. Analyses last week's evidence — which post type (loot vs
     single) and which merchants drew traction — and sets THIS week's direction: the
     loot:deal ratio to aim for, merchant priorities, and a per-day theme_focus. The
@@ -885,7 +886,7 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
         today = ist_today()
         week_start = today - timedelta(days=today.weekday())  # IST Monday
 
-    facts_ctx = full_briefing_context(s, weekly=True)
+    facts_ctx = full_briefing_context(s, weekly=True, end_day=end_day)
     # --- Sanitize the weekly grounding before the model (and the fact-check pool built
     # from it) ever see it, so the narrative can't repeat three known distortions: ---
     # a) Integer views — no "573.087 views" in the prose.
@@ -903,6 +904,9 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     _by = {p["post_type"]: (p.get("avg_views") or 0) for p in facts_ctx.get("post_type_performance") or []}
     for _p in facts_ctx.get("post_type_performance") or []:
         _p.pop("avg_views_per_day", None)
+        # `rank` encodes the per-day (loot-favoring) ordering — drop it too so nothing in
+        # the post-type rows contradicts the per-post framing the weekly read must use.
+        _p.pop("rank", None)
     # d) Pre-state the per-post winner DETERMINISTICALLY. gpt-4o-mini keeps reversing the
     #    comparison ("loot 569 beat single 779"); handing it the correct sentence to copy
     #    is far more reliable than a guardrail asking it to do the arithmetic right.

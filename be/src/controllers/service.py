@@ -953,13 +953,21 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
 
         active = [d["posts"] for d in traj["days"] if d["posts"] > 0]
         lo, hi = (min(active), max(active)) if active else (0, 0)
-        det_why = (
-            f"Your last {len(active)} active days ran ~{recommended} posts/day "
-            f"(range {lo}–{hi}); holding ~{recommended} matches that pace."
-            + (f" The old {traj['lifetime_baseline']}/day baseline is a lifetime average "
-               "dragged down by early low-activity days — don't plan against it."
-               if traj.get("lifetime_baseline") else "")
-        )
+
+        def _det_why(n: int) -> str:
+            """The cadence explanation, keyed to the ACTUAL displayed count ``n`` so the
+            headline number and this sentence can never name different figures. Only
+            claims "matches that pace" when ``n`` sits inside the observed active-day
+            range; otherwise it states the plan plainly (the historical ~median is still
+            shown as the descriptive baseline, which is a true, separate fact)."""
+            ran = (f"Your last {len(active)} active days ran ~{recommended} posts/day "
+                   f"(range {lo}–{hi})")
+            pace = (f"; holding ~{n} matches that pace." if lo <= n <= hi
+                    else f"; planning ~{n} today.")
+            tail = (f" The old {traj['lifetime_baseline']}/day baseline is a lifetime average "
+                    "dragged down by early low-activity days — don't plan against it."
+                    if traj.get("lifetime_baseline") else "")
+            return ran + pace + tail
 
         from sqlalchemy import or_
         cached = s.scalars(
@@ -1011,14 +1019,14 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
             # as in-range and report was_clamped=False). Also survives the cache-hit path.
             recommended_final = plan.get("recommended_posts")
             was_clamped = bool(plan.get("plan_clamped"))
-            # Always the deterministic, data-driven cadence line. The AI's own
-            # cadence_why drifts (it once said "19 posts/day" when the number was 38);
-            # det_why is computed from the real trajectory, so it stays accurate AND
-            # still adapts — the count and range update as your posting changes.
-            cadence_why = det_why
+            # Always the deterministic, data-driven cadence line, keyed to the DISPLAYED
+            # count so headline and explanation can't disagree. The AI's own cadence_why
+            # drifts (it once said "19 posts/day" when the number was 38); _det_why is
+            # computed from the real trajectory, so it stays accurate AND adapts.
+            cadence_why = _det_why(recommended_final)
         else:
             recommended_final, was_clamped = recommended, False
-            cadence_why = det_why
+            cadence_why = _det_why(recommended_final)
         slots = plan.get("post_slots", []) if ai_ok else []
         emphasis = plan.get("emphasis") if ai_ok else None
         watch = plan.get("watch") if ai_ok else None
@@ -1092,14 +1100,14 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
         }
 
 
-def _grounded_weekly_summary(s) -> str:
+def _grounded_weekly_summary(s, end_day=None) -> str:
     """Honest, deterministic weekly retro from REAL data only — used when the AI
     narrative fails fact-check (it cited self-computed/unverifiable figures). No LLM,
     no derived numbers: the week's actual posts/views, its strongest day, and the
     measured per-post views per deal type, so the operator gets a genuinely useful
     grounded read instead of an apology. Ends with a stable 'Grounded summary' marker
     the Plan page keys on to suppress the redundant 'failed — regenerate' warning."""
-    traj = ctx.posting_trajectory(s, days=7)
+    traj = ctx.posting_trajectory(s, days=7, end_day=end_day)
     days = traj.get("days") or []
     total_posts = sum(d["posts"] for d in days)
     total_views = sum((d.get("views") or 0) for d in days)
@@ -1170,7 +1178,7 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
         from src.ai.client import AIUnavailable
         from src.ai.planner import generate_week_plan
         try:
-            res = generate_week_plan(s, week_start, directive=directive)
+            res = generate_week_plan(s, week_start, directive=directive, end_day=week_end)
             ai_summary = res.get("digest") or "" if res.get("available") else ""
             ai_ok = bool(ai_summary)
             if res.get("available"):
@@ -1192,7 +1200,7 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
                 # couldn't be verified" caveat. This matches the daily path (which also
                 # only falls back on `failed`); withholding on `warn` too meant the
                 # operator effectively never saw a weekly narrative.
-                ai_summary = _grounded_weekly_summary(s)
+                ai_summary = _grounded_weekly_summary(s, end_day=week_end)
         except AIUnavailable:
             ai_summary = ""
     except Exception:

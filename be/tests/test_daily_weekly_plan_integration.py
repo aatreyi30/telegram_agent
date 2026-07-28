@@ -89,10 +89,14 @@ def test_daily_brief_uses_ai_number_when_in_range(monkeypatch):
     r = service.daily_brief(date="2026-07-01")
     assert r["today"]["recommended_posts"] == 2
     assert r["today"]["plan_clamped"] is False
-    # cadence_why is now ALWAYS the deterministic, data-driven line (not the AI's,
-    # which drifted) — the AI NUMBER is still honored when in range (asserted above).
-    assert "AI says" not in r["today"]["cadence_why"]
-    assert "matches that pace" in r["today"]["cadence_why"]
+    # cadence_why is the deterministic line, now keyed to the DISPLAYED count (2) so the
+    # headline and the sentence can never name different numbers. The seeded history is a
+    # steady 1/day (range 1–1), so the AI's 2 sits OUTSIDE that range — the honest line is
+    # "planning ~2 today", NOT a false "~2 matches that pace" (that claim is reserved for
+    # counts inside the observed range). Never the AI's own drifting prose.
+    cw = r["today"]["cadence_why"]
+    assert "AI says" not in cw
+    assert "planning ~2 today" in cw and "matches that pace" not in cw
 
 
 def test_daily_brief_clamps_out_of_range_ai_number(monkeypatch):
@@ -130,7 +134,7 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
 
     monkeypatch.setattr(
         "src.ai.planner.generate_week_plan",
-        lambda s, week_start=None, directive=None: {"available": True, "digest": "Weekly digest text."},
+        lambda s, week_start=None, directive=None, end_day=None: {"available": True, "digest": "Weekly digest text."},
     )
 
     r = service.weekly_brief(end="2026-07-08")
@@ -169,7 +173,7 @@ def test_weekly_brief_reuses_cached_digest_on_second_call(monkeypatch):
 
     calls = {"n": 0}
 
-    def _fake_generate(s, week_start=None, directive=None):
+    def _fake_generate(s, week_start=None, directive=None, end_day=None):
         calls["n"] += 1
         return {"available": True, "digest": f"Digest attempt #{calls['n']}"}
 

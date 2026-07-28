@@ -154,7 +154,7 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
 
     calls = []
 
-    def fake_generate(s, week_start=None, directive=None):
+    def fake_generate(s, week_start=None, directive=None, end_day=None):
         calls.append(directive)
         return {"available": True, "digest": f"weekly digest #{len(calls)}"}
 
