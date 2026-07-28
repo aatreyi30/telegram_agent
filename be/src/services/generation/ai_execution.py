@@ -4,6 +4,7 @@ inventory. Numbers are fact-checked before the plan is trusted."""
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
 from datetime import date, datetime, timezone
 
@@ -199,6 +200,64 @@ def _humanize_fire_times(slots: list[dict]) -> list[dict]:
     # position, so sorting the display order is safe.
     deduped = _dedupe_fire_times(slots)
     return sorted(deduped, key=lambda s: (_slot_minute(s) is None, _slot_minute(s) or 0))
+
+
+def _daypart(minute: int) -> str:
+    h = (minute // 60) % 24
+    return ("late night" if h < 6 else "morning" if h < 12
+            else "afternoon" if h < 18 else "evening")
+
+
+# A time claim a slot's `why` might make about ITS OWN firing: a clock instant
+# ("1 pm", "13:00"), a day-part word, or "lunch". The engine sets the final time
+# deterministically (performance-weighted + humanised), so any such claim the model
+# wrote against a time it originally guessed can end up contradicting where the slot
+# actually lands (e.g. a why saying "post at 1 pm" on a slot re-timed to 18:01).
+_TIME_CLAIM_RE = re.compile(
+    r"\b(\d{1,2}\s*(?:am|pm)|\d{1,2}:\d{2}|lunch(?:\s*hour)?|morning|afternoon|"
+    r"evening|midnight|late\s*night)\b", re.IGNORECASE)
+
+
+def _claim_daypart(claim: str) -> str | None:
+    """The day-part a why's time claim implies, or None if it isn't time-anchored."""
+    c = claim.lower().strip()
+    if c in ("morning", "afternoon", "evening") or c.replace(" ", "") == "latenight":
+        return "late night" if "night" in c else c
+    if c.startswith("lunch"):
+        return "afternoon"          # ~13:00
+    if c == "midnight":
+        return "late night"
+    m = re.match(r"(\d{1,2})\s*(am|pm)", c)
+    if m:
+        h = int(m.group(1)) % 12 + (12 if m.group(2) == "pm" else 0)
+        return _daypart(h * 60)
+    m = re.match(r"(\d{1,2}):(\d{2})", c)
+    if m:
+        return _daypart(int(m.group(1)) * 60 + int(m.group(2)))
+    return None
+
+
+def _reconcile_why_times(slots: list[dict]) -> None:
+    """Drop any SENTENCE in a slot's `why` that names a firing time contradicting where
+    the slot ACTUALLY lands after deterministic re-timing (in place). The final time is
+    shown by `time_ist`; a why must never claim a different one. Only removes sentences
+    with a genuinely mismatched time claim — the rest of the reasoning (type/merchant/
+    expected views) is untouched, and a why is never blanked entirely."""
+    for sl in slots:
+        why = sl.get("why") or ""
+        m = _slot_minute(sl)
+        if not why or m is None:
+            continue
+        here = _daypart(m)
+        kept = []
+        for sent in re.split(r"(?<=[.!?])\s+", why):
+            dps = [dp for dp in (_claim_daypart(c) for c in _TIME_CLAIM_RE.findall(sent)) if dp]
+            if dps and all(dp != here for dp in dps):
+                continue  # every time claim in this sentence is wrong → drop it
+            kept.append(sent)
+        new = " ".join(kept).strip()
+        if new:
+            sl["why"] = new
 
 
 def _place_in_window(slots: list[dict], lo: int, hi: int) -> list[dict]:
@@ -541,6 +600,10 @@ def persist_ai_plan(
             # Break the round :00/:30 grid so the schedule reads as a human posting, not
             # a cron bot — deterministic per-slot nudge, stable across reopens.
             plan["post_slots"] = _humanize_fire_times(_slots)
+        # Final re-timing above can move a reasoned slot away from the time its `why`
+        # named (the "post at 1 pm" on an 18:01 slot bug) — reconcile the prose to the
+        # slot's ACTUAL landing time so the schedule never contradicts itself.
+        _reconcile_why_times(plan["post_slots"])
     fc = result.get("factcheck", {"status": "skipped"})
     target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
