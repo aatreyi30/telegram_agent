@@ -694,7 +694,7 @@ def _fallback_day_plan(day, plan_ctx: dict) -> dict:
 
 
 def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
-                       directive: str | None = None) -> dict:
+                       directive: str | None = None, steer_intent: dict | None = None) -> dict:
     """Grounded AI day plan for ``day`` (default: latest owned day). Returns the raw
     digest + parsed plan and the facts it was given (so callers can fact-check).
     ``inputs`` supplies the deterministic targets the AI expands into a slot schedule.
@@ -803,8 +803,10 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         _n_slots = max(int(plan_ctx.get("recommended_posts") or 0),
                        int(plan_ctx.get("recent_cadence") or 0), 12)
         _budget = min(max(3200, _n_slots * 180 + 1500), 16000)
+        # Plan generation runs on Groq (llama-3.3-70b) — chosen over the OpenAI default;
+        # openai still serves as failover when its key is set.
         raw = ai.complete(user, system_extra=_DAILY_PLAN_SYSTEM, max_tokens=_budget,
-                          trace_call="day_plan")
+                          trace_call="day_plan", provider="groq")
     except AIUnavailable as e:
         # G6 — never go silent: the channel still needs slots even when the AI is
         # down, so fall back to a real deterministic plan instead of an empty one.
@@ -848,7 +850,10 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     # only against real feed values, so nothing is invented.
     if directive:
         from src.services.generation.directives import parse_directive_constraints
-        _cons = parse_directive_constraints(
+        # Prefer the AI-interpreted intent (universal steer) when the caller extracted one;
+        # else fall back to the regex parse. Both yield the same constraint keys the
+        # persist-time enforcers read, so downstream is identical.
+        _cons = steer_intent if steer_intent is not None else parse_directive_constraints(
             directive, plan_ctx.get("available_merchants"), plan_ctx.get("available_categories"))
         if any(_cons.get(k) is not None for k in ("merchants", "categories",
                "exclude_merchants", "exclude_categories", "after_min", "before_min",
@@ -994,7 +999,7 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
             user = (f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n"
                     f"{to_json(facts_ctx)}{directive_note}{correction}")
             raw = ai.complete(user, system_extra=_WEEKLY_PLAN_SYSTEM, max_tokens=2000,
-                              trace_call="week_plan")
+                              trace_call="week_plan", provider="groq")
         except AIUnavailable as e:
             return best or {"available": False, "reason": str(e), "plan": None,
                             "digest": "", "facts": facts}

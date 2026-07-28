@@ -238,6 +238,127 @@ def parse_directive_constraints(directive: str | None,
     return out
 
 
+# ── Universal steer: AI-interpret ANY free-text into a structured, validated intent ──
+
+_STEER_INTENT_SYSTEM = (
+    "You convert a deals-channel operator's free-text steering instruction into a STRICT "
+    "JSON intent that a deterministic engine then ENFORCES. You are given the ONLY merchants "
+    "and categories in today's live feed — every merchant/category you output MUST be copied "
+    "EXACTLY (same spelling) from those lists; NEVER invent one. Extract only what the "
+    "operator actually asked; leave everything else null/empty.\n"
+    "Output EXACTLY this JSON object and nothing else:\n"
+    "{\n"
+    '  "target_posts": <int|null>,             // desired POST COUNT. For a correction like\n'
+    '                                           //   "not 39, make it 10" use the NEW value (10).\n'
+    '  "merchants_only": [<feed merchant slugs>],    // restrict to ONLY these merchants\n'
+    '  "merchants_exclude": [<feed merchant slugs>], // avoid these merchants\n'
+    '  "categories_only": [<feed category slugs>],\n'
+    '  "categories_exclude": [<feed category slugs>],\n'
+    '  "price_min": <int|null>, "price_max": <int|null>,   // rupees\n'
+    '  "after_time": "HH:MM"|null,   // earliest a post may fire (24h IST)\n'
+    '  "before_time": "HH:MM"|null,  // latest a post may fire\n'
+    '  "type_lean": "single"|"loot"|null,   // lean the single/loot mix\n'
+    '  "pause": <bool>,              // true ONLY to STOP/pause posting entirely\n'
+    '  "interpretation": "<ONE plain sentence of what you understood>",\n'
+    '  "unsupported": ["<any ask that maps to NO field above, with a short why>"]\n'
+    "}\n"
+    "Rules: only set merchants_only/categories_only when the operator clearly wants ONLY "
+    "those; a bare mention ('push electronics') is a soft lean, not a hard filter — put a "
+    "soft lean in interpretation, not in the *_only fields. 'pause' is ONLY for stopping "
+    "posting, NEVER for 'don't post <category>' (that is categories_exclude). Caption "
+    "tone/wording, conversion/sales/CTR, or anything with no field above goes in 'unsupported'.")
+
+
+def _hhmm_to_min(s) -> int | None:
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", s or "") if isinstance(s, str) else None
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    return min(h, 24) * 60 + mi if 0 <= h <= 24 and 0 <= mi < 60 else None
+
+
+def _regex_intent(directive: str | None, available_merchants, available_categories) -> dict:
+    """Deterministic fallback intent from the regex parsers — used when the AI intent call
+    fails, so steering never breaks. Same shape as ``extract_steer_intent``."""
+    cons = parse_directive_constraints(directive, available_merchants, available_categories)
+    return {**cons,
+            "target_posts": parse_target_posts(directive),
+            "pause": parse_pause(directive),
+            "type_lean": None,
+            "interpretation": "", "unsupported": [], "source": "regex"}
+
+
+def extract_steer_intent(directive: str | None,
+                         available_merchants: list[str] | None = None,
+                         available_categories: list[str] | None = None,
+                         *, provider: str = "groq") -> dict:
+    """AI-interpret ANY free-text steer into a validated, structured intent — the universal
+    replacement for the regex parsers, so any phrasing / compound ask works. Merchants and
+    categories are validated against the REAL feed (invalid ones dropped, never invented);
+    count is clamped; times/prices sanitised. On AI failure or an unparseable reply it FALLS
+    BACK to the regex parsers so steering never breaks.
+
+    Returns the dict the existing enforcers consume — merchants / categories /
+    exclude_merchants / exclude_categories / after_min / before_min / price_min / price_max
+    — PLUS target_posts, pause, type_lean, interpretation, unsupported, source."""
+    if not directive or not directive.strip():
+        return {"merchants": None, "categories": None, "exclude_merchants": None,
+                "exclude_categories": None, "after_min": None, "before_min": None,
+                "price_min": None, "price_max": None, "target_posts": None, "pause": False,
+                "type_lean": None, "interpretation": "", "unsupported": [], "source": "empty"}
+
+    from src.ai.client import AIClient, AIUnavailable
+    from src.ai.planner import _extract_json_object, _loads_lenient
+
+    avail_m = {m.lower(): m for m in (available_merchants or [])}
+    avail_c = {c.lower(): c for c in (available_categories or [])}
+    user = ("MERCHANTS (feed): " + (", ".join(sorted(avail_m.values())) or "none") + "\n"
+            "CATEGORIES (feed): " + (", ".join(sorted(avail_c.values())) or "none") + "\n\n"
+            "OPERATOR STEER:\n" + directive)
+    try:
+        raw = AIClient().complete(user, system_extra=_STEER_INTENT_SYSTEM, max_tokens=600,
+                                  trace_call="steer_intent", provider=provider)
+        obj = _extract_json_object(raw)
+        parsed = _loads_lenient(obj) if obj else None
+        if not isinstance(parsed, dict):
+            raise ValueError("no JSON intent")
+    except (AIUnavailable, ValueError, Exception):
+        return _regex_intent(directive, available_merchants, available_categories)
+
+    def _valid(lst, pool):  # keep only real feed slugs (case-insensitive), exact spelling
+        out = {pool[x.lower()] for x in (lst or []) if isinstance(x, str) and x.lower() in pool}
+        return out or None
+
+    tp = parsed.get("target_posts")
+    try:
+        tp = int(tp) if tp is not None else None
+    except (TypeError, ValueError):
+        tp = None
+    if tp is not None and not (1 <= tp <= 200):
+        tp = None
+    pmin, pmax = parsed.get("price_min"), parsed.get("price_max")
+    pmin = int(pmin) if isinstance(pmin, (int, float)) else None
+    pmax = int(pmax) if isinstance(pmax, (int, float)) else None
+    if pmin is not None and pmax is not None and pmin > pmax:
+        pmin, pmax = pmax, pmin
+    lean = parsed.get("type_lean")
+    lean = lean if lean in ("single", "loot") else None
+    unsupported = [u for u in (parsed.get("unsupported") or []) if isinstance(u, str) and u.strip()]
+    return {
+        "merchants": _valid(parsed.get("merchants_only"), avail_m),
+        "exclude_merchants": _valid(parsed.get("merchants_exclude"), avail_m),
+        "categories": _valid(parsed.get("categories_only"), avail_c),
+        "exclude_categories": _valid(parsed.get("categories_exclude"), avail_c),
+        "after_min": _hhmm_to_min(parsed.get("after_time")),
+        "before_min": _hhmm_to_min(parsed.get("before_time")),
+        "price_min": pmin, "price_max": pmax,
+        "target_posts": tp, "pause": bool(parsed.get("pause")),
+        "type_lean": lean,
+        "interpretation": (parsed.get("interpretation") or "").strip(),
+        "unsupported": unsupported, "source": "ai",
+    }
+
+
 def _cats_by_merchant(feed_pairs: dict | None) -> dict[str, set]:
     out: dict[str, set] = {}
     for (m, c) in (feed_pairs or {}):

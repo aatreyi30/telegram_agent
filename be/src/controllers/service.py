@@ -856,7 +856,7 @@ def _llm_allocation_reasoning(allocation: list[dict]) -> dict:
         '{"single_deal":"...","loot_deal":"..."} — no text outside the JSON.')
     try:
         raw = AIClient().complete("DATA:\n" + _json.dumps(rows), system_extra=system,
-                                  max_tokens=400, trace_call="alloc_reason")
+                                  max_tokens=400, trace_call="alloc_reason", provider="groq")
     except AIUnavailable:
         return {}
     obj = _extract_json_object(raw)
@@ -884,7 +884,8 @@ def _llm_allocation_reasoning(allocation: list[dict]) -> dict:
 
 
 def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
-                        directive: str | None = None, recent_max_30d: int | None = None) -> dict:
+                        directive: str | None = None, recent_max_30d: int | None = None,
+                        steer_intent: dict | None = None) -> dict:
     """The cache-miss generation path for the daily AI plan: call the planner
     (honoring ``directive`` if given), fact-check its cited numbers against the same
     facts it was grounded on, and persist a `CampaignPlan` row pinned to ``day``.
@@ -904,6 +905,8 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
     # generate_day_plan with a fixed `(s, day=None, inputs=None)` signature) on the
     # normal, non-regenerate path.
     directive_kwargs = {"directive": directive} if directive is not None else {}
+    if steer_intent is not None:
+        directive_kwargs["steer_intent"] = steer_intent
     ai_res = generate_day_plan(s, day, inputs={
         "recommended_posts": recommended,
         "posting_windows": windows,
@@ -1019,7 +1022,7 @@ def ensure_daily_ai_plan(s, day):
 
 
 def daily_brief(date: str | None = None, directive: str | None = None,
-                target_posts: int | None = None) -> dict:
+                target_posts: int | None = None, steer_intent: dict | None = None) -> dict:
     """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
     recommendation grounded in the recent posting trajectory (not the stale lifetime
     baseline). AI writes the narrative + slots best-effort; the numbers are
@@ -1131,7 +1134,8 @@ def daily_brief(date: str | None = None, directive: str | None = None,
             plan_row = cached
         else:
             gen = _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
-                                      directive=directive, recent_max_30d=recent_max_30d)
+                                      directive=directive, recent_max_30d=recent_max_30d,
+                                      steer_intent=steer_intent)
             ai_ok, plan, digest, fc_status, plan_row = (
                 gen["ai_ok"], gen["plan"], gen["digest"], gen["fc_status"], gen["row"])
 
@@ -1607,20 +1611,9 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
     from src.services.ai_outputs import record_ai_output
     from src.services.analytics.day import latest_owned_date
     from src.services.analytics.periods import ist_today
-    from src.services.generation.directives import parse_pause
+    from src.services.generation.directives import extract_steer_intent
 
-    # A PAUSE request is not a content steer — steering reshapes the plan but cannot stop
-    # the live queue, and auto-cancelling queued posts from free-text would be destructive
-    # on a misparse. So recognize it and answer honestly, leaving the existing plan intact.
-    if directive and parse_pause(directive):
-        return {"available": False, "paused_intent": True,
-                "reason": "This reads as a request to PAUSE posting. Steering reshapes the "
-                          "plan but doesn't stop the queue, so I left your current plan "
-                          "unchanged rather than regenerating it. To actually pause, clear "
-                          "today's queued posts or turn off the scheduler. If you meant a "
-                          "posting change (merchants, timing, mix, price), tell me that and "
-                          "I'll steer it."}
-
+    intent = None
     with session_scope() as s:
         day = None
         if date:
@@ -1635,6 +1628,26 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         if day < ist_today():
             return {"available": False,
                     "reason": "This day has already elapsed — regenerating it has no effect."}
+
+        # UNIVERSAL STEER: interpret the free-text ONCE (AI on Groq, regex fallback) into a
+        # validated structured intent, against today's real feed vocabulary. This drives the
+        # whole regeneration — count, pause, and the hard merchant/category/price/time
+        # constraints — so any phrasing works and each steer is independent.
+        if directive:
+            _feed = ctx.available_deals(s, limit=40)
+            _feed_m = sorted({d.get("merchant_key") for d in _feed if d.get("merchant_key")})
+            _feed_c = sorted({d.get("category") for d in _feed if d.get("category")})
+            intent = extract_steer_intent(directive, _feed_m, _feed_c)
+            # A PAUSE request isn't a content steer — steering can't stop the live queue,
+            # and auto-cancelling from free text would be destructive on a misparse. Answer
+            # honestly and leave the plan intact (before deleting anything).
+            if intent.get("pause"):
+                return {"available": False, "paused_intent": True,
+                        "reason": "This reads as a request to PAUSE posting. Steering reshapes "
+                                  "the plan but doesn't stop the queue, so I left your current "
+                                  "plan unchanged. To actually pause, clear today's queued posts "
+                                  "or turn off the scheduler. For a posting change (merchants, "
+                                  "timing, mix, price, count), tell me that and I'll steer it."}
 
         # Load the current plan (for the pre-steer snapshot + mid-day freeze below). Each
         # steer is independent now, so we do NOT accumulate a steering history.
@@ -1681,10 +1694,18 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
     # prompt AND the hard-constraint parsing now see ONLY the latest directive; to combine
     # asks the operator writes one combined directive.
     composed = directive
-    # The desired post count from the RAW latest ask (not the composed blob below, which
-    # carries "N posts already live"). Threaded as the target cadence + used for the note.
-    from src.services.generation.directives import parse_target_posts
-    _target = parse_target_posts(directive)
+    # The desired post count comes from the AI-interpreted intent (or its regex fallback).
+    _target = intent.get("target_posts") if intent else None
+    # Surface what the AI understood + any ask it can't enforce, appended to the prompt so
+    # the narrative addresses them honestly (also returned to the FE below).
+    _intent_note = ""
+    if intent and intent.get("source") == "ai":
+        if intent.get("interpretation"):
+            _intent_note += f"\n\nHOW I READ YOUR STEER: {intent['interpretation']}"
+        if intent.get("unsupported"):
+            _intent_note += ("\n\nPARTS I CANNOT ENFORCE IN THE PLAN (say so plainly in the "
+                             "narrative, don't pretend): " + "; ".join(intent["unsupported"]))
+    composed = (composed or "") + _intent_note
     # Mid-day you can't un-send what already went out, so a request to REDUCE below the
     # already-posted count can't be honored today — say so plainly instead of showing a
     # lower headline over a higher real count.
@@ -1706,7 +1727,8 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             "already went out and can't be changed. If my request only affects times/windows that "
             "have ALREADY passed today (e.g. asking to change the morning when it's afternoon), say "
             "so plainly — there's nothing left to reschedule for that window today.")
-    result = daily_brief(date=day.isoformat(), directive=composed, target_posts=_target)
+    result = daily_brief(date=day.isoformat(), directive=composed, target_posts=_target,
+                         steer_intent=intent)
     # Success is measured by an actual AI plan being PERSISTED — not result["available"]
     # (daily_brief still returns available=True with the deterministic fallback when the
     # AI is down). If no AI row landed, the regeneration failed: restore the old plan.
@@ -1751,6 +1773,11 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             # Surface the RAW operator ask, not the composed blob (history + the
             # already-posted context) that daily_brief persisted as it generated.
             result["operator_directive"] = directive
+            # Surface what the AI understood + anything it couldn't enforce, so the FE can
+            # show it (the plan is honest about the parts of a free-text ask it can't apply).
+            if intent and intent.get("source") == "ai":
+                result["steer_interpretation"] = intent.get("interpretation") or None
+                result["steer_unsupported"] = intent.get("unsupported") or None
         elif old_snap is not None:
             # regeneration produced no AI plan (AI unavailable) — restore the previous one
             # so the day is never left plan-less with an orphaned queue.

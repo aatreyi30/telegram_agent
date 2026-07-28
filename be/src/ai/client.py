@@ -144,27 +144,34 @@ class AIClient:
             return {"max_completion_tokens": max_tokens, "reasoning_effort": effort}
         return {"max_tokens": max_tokens, "temperature": 0.3}
 
+    def _model_for(self, provider: str) -> str:
+        """The model to use on ``provider``: the configured ai_model when it IS the
+        active provider, else that provider's sane default (``_FALLBACK_MODEL``)."""
+        return self.model if provider == self.provider else _FALLBACK_MODEL[provider]
+
     def complete(self, user: str, *, system_extra: str = "", max_tokens: int = 4000,
                  effort: str = "medium", trace_call: str | None = None,
-                 channel_id: int | None = None) -> str:
+                 channel_id: int | None = None, provider: str | None = None) -> str:
         """One-shot grounded completion. Returns the text response and records a trace.
 
         OpenAI reasoning models go through the Responses API so we capture the diarized
         reasoning summary; ``effort`` maps to ``reasoning.effort`` (no-op on Groq).
-        ``trace_call``/``channel_id`` label the persisted trace row.
-        """
-        ok, reason = self.available()
-        if not ok:
-            raise AIUnavailable(reason)
+        ``trace_call``/``channel_id`` label the persisted trace row. ``provider`` forces
+        a specific provider for THIS call (e.g. 'groq' for plan generation) regardless of
+        the configured default; the OTHER provider still serves as failover when its key
+        is set."""
         system = GROUNDING_SYSTEM + (("\n\n" + system_extra) if system_extra else "")
 
-        # Try the primary provider, then FAIL OVER to the other one (e.g. groq when a
-        # transient OpenAI network error blanks the plan). Each attempt records its own
-        # trace, so a failover is visible as a failed-then-succeeded pair.
-        attempts = [(self.provider, self.model)]
-        fb = self._fallback_provider()
-        if fb:
-            attempts.append((fb, _FALLBACK_MODEL[fb]))
+        # Resolve the primary provider (optionally overridden per-call) + a failover to
+        # the other provider when its key is set. Only providers with a key are tried, so
+        # forcing 'groq' with no GROQ_API_KEY cleanly falls through to openai.
+        primary = provider or self.provider
+        other = "groq" if primary == "openai" else "openai"
+        attempts = [(p, self._model_for(p)) for p in (primary, other) if self._api_key_for(p)]
+        if not attempts:
+            key = "GROQ_API_KEY" if primary == "groq" else "OPENAI_API_KEY"
+            raise AIUnavailable(f"AI layer not configured. Set {key} in .env to enable "
+                                "plans, AI post copy, and insights.")
 
         last_exc: Exception | None = None
         for provider, model in attempts:

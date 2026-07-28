@@ -91,7 +91,7 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
 
     calls = []
 
-    def fake_generate_day_plan(s, day=None, inputs=None, directive=None):
+    def fake_generate_day_plan(s, day=None, inputs=None, directive=None, steer_intent=None):
         calls.append(directive)
         return _fake_ai_result(day.isoformat(), digest=f"digest #{len(calls)}")
 
@@ -217,7 +217,7 @@ def test_generate_day_plan_injects_operator_directive_into_prompt(monkeypatch):
 
     class _FakeAIClient:
         def complete(self, user, *, system_extra="", max_tokens=2400, effort="medium",
-                     trace_call=None, channel_id=None):
+                     trace_call=None, channel_id=None, provider=None):
             captured["user"] = user
             return (
                 "Fake digest.\n===PLAN===\n"
@@ -250,7 +250,7 @@ def test_generate_day_plan_omits_operator_directive_block_when_absent(monkeypatc
 
     class _FakeAIClient:
         def complete(self, user, *, system_extra="", max_tokens=2400, effort="medium",
-                     trace_call=None, channel_id=None):
+                     trace_call=None, channel_id=None, provider=None):
             captured["user"] = user
             return (
                 "Fake digest.\n===PLAN===\n"
