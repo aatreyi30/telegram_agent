@@ -1456,12 +1456,30 @@ def _past_future_split(slots, now_min):
     return past, future
 
 
-def _splice_past_over(past, fresh, now_min):
+def _splice_past_over(past, fresh, now_min, recommended=None):
     """Keep the already-posted PAST slots and take the FRESH plan's FUTURE slots, in
     chronological order — so a mid-day steer rewrites only the remaining day and never
-    posts that already went out (they are immutable — already live in ScheduledPost)."""
+    posts that already went out (they are immutable — already live in ScheduledPost).
+
+    CAPPED to ``recommended``: a mid-day regen's fresh plan carries a FULL day's slots,
+    all timed after "now" (the AI was told to plan the remaining day). Without a cap the
+    splice ADDS those onto the already-posted past slots — e.g. 26 posted + 41 fresh = 67
+    slots crammed into the evening (a real bug). Keep the past (immutable) and only as
+    many fresh future slots as the recommended total leaves room for, re-spread evenly
+    across [now, end-of-day] so they never stack one-per-minute. ``recommended=None``
+    keeps the old uncapped behaviour (callers that don't know the target)."""
     from src.ai.planner import _slot_minute
     _, fresh_future = _past_future_split(fresh, now_min)
+    fresh_future = sorted(fresh_future, key=lambda x: (_slot_minute(x) is None, _slot_minute(x) or 0))
+    if recommended is not None:
+        room = max(int(recommended) - len(past), 0)
+        fresh_future = fresh_future[:room]
+        if fresh_future and now_min is not None:
+            # Even, off-grid spread across the remaining window (reuses the same placement
+            # the hard-time-window steer uses) so the kept slots don't collide into a
+            # 1/min pile. Only on the capped path — recommended=None keeps AI-chosen times.
+            from src.services.generation.ai_execution import _ACTIVE_END_MIN, _place_in_window
+            _place_in_window(fresh_future, now_min, _ACTIVE_END_MIN)
     return sorted(list(past) + fresh_future,
                   key=lambda x: (_slot_minute(x) is None, _slot_minute(x) or 0))
 
@@ -1604,7 +1622,8 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             # steer only rewrites the remaining day; posts that already went out stay
             # exactly as they were. Also reflect it in the response the UI renders now.
             if past_slots:
-                _spliced = _splice_past_over(past_slots, _bp.get("post_slots") or [], now_min)
+                _spliced = _splice_past_over(past_slots, _bp.get("post_slots") or [], now_min,
+                                             recommended=_bp.get("recommended_posts"))
                 _bp["post_slots"] = _spliced
                 # Honesty: if the steer produced NO new future slots (e.g. it targeted a
                 # window that's already elapsed today), the spliced plan is just what

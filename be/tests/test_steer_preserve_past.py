@@ -38,3 +38,20 @@ def test_splice_chronological():
     fresh = [_s("21:00"), _s("13:00"), _s("15:30")]
     out = _splice_past_over(past, fresh, NOON)
     assert [x["time_ist"] for x in out] == ["10:00", "13:00", "15:30", "21:00"]
+
+
+def test_splice_caps_to_recommended_and_never_piles_up():
+    """A mid-day regen's fresh plan can carry a full day's slots all timed after 'now';
+    with a recommended cap the day must stay at recommended (not past+fresh), and the kept
+    future slots must be spread (no one-per-minute pile) — the 67-slot evening bug."""
+    past = [_s(f"{6 + i // 6:02d}:{(i % 6) * 10:02d}", "OLD") for i in range(26)]  # 26 posted
+    # 41 fresh slots ALL clustered right after noon (what blew the count to 67)
+    fresh = [_s(f"12:{i:02d}", "NEW") for i in range(41)]
+    out = _splice_past_over(past, fresh, NOON, recommended=39)
+    assert len(out) == 39, len(out)                       # capped, not 26 + 41 = 67
+    fut = [x for x in out if x["merchant"] == "NEW"]
+    assert len(fut) == 13                                 # room = 39 - 26
+    mins = [int(x["time_ist"][:2]) * 60 + int(x["time_ist"][3:]) for x in fut]
+    assert len(set(mins)) == len(mins)                    # no collisions
+    assert max(mins) - min(mins) > 13                     # spread across the window, not a 1/min pile
+    assert all(m >= NOON for m in mins)                   # all in the remaining window
