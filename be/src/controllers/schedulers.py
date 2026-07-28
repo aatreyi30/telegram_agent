@@ -153,6 +153,20 @@ def j_stats_refresh() -> dict:
     return {"processed": n, "detail": f"views refreshed (reactions/forwards need admin/bot)"}
 
 
+def j_subscriber_snapshot() -> dict:
+    """First-class DAILY capture of the owned channel's subscriber count -> a clean
+    ParticipantSnapshot + DailySubscriberStat roll. Decoupled from the heavy ANALYTICS
+    job so the follower time-series (weekly Joined/Left/Net) gets a real daily point
+    instead of riding on an interval collector that only fires when the process is up.
+    As a cron job it also gets boot catch-up if a day was missed."""
+    from src.services.collection.telegram_owned import snapshot_subscriber_counts
+    r = snapshot_subscriber_counts()
+    if r.get("status") == "limited":
+        return {"processed": 0, "status": "limited", "detail": f"limited: {r.get('reason')}"}
+    n = r.get("captured", 0)
+    return {"processed": n, "detail": f"captured subscriber count for {n} owned channel(s)"}
+
+
 def j_link_resolution() -> dict:
     from src.services.collection.link_resolution import LinkResolutionEngine
     n = _run_engine(LinkResolutionEngine(), "link_resolution")
@@ -459,6 +473,7 @@ JOBS: list[Job] = [
     Job("competitor_sync", "Competitor Channel Sync", *_every_min(C.COMPETITOR_SYNC_MIN), "high", j_competitor_sync),
     Job("normalize_posts", "Post Normalizer", *_every_min(C.NORMALIZE_POSTS_MIN), "high", j_normalize_posts),
     Job("stats_refresh", "Message Statistics Refresh", *_every_min(C.STATS_REFRESH_MIN), "high", j_stats_refresh),
+    Job("subscriber_snapshot", "Subscriber Count Snapshot", *_daily(C.SUBSCRIBER_SNAPSHOT_TIME), "high", j_subscriber_snapshot),
     # Defer reading runtime settings until SchedulerRegistry.start() to avoid
     # calling get_settings() at module import time (startup/circular import issues).
     # Use the default cadence constant here; the real cadence/trigger will be applied at start().

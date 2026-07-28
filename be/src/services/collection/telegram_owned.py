@@ -105,6 +105,50 @@ def _upsert_daily_subscriber_stat(s, channel_id: int, day, count: int, updated_a
     row.updated_at = updated_at
 
 
+async def _snapshot_counts_async(settings) -> dict:
+    from telethon.tl.functions.channels import GetFullChannelRequest
+
+    from src.services.collection.channels import owned_handles
+    from src.shared.telegram import telegram_session
+
+    async with telegram_session(settings) as client:
+        if not await client.is_user_authorized():
+            return {"captured": 0, "status": "limited",
+                    "reason": "telegram session not authorised (run `tgagent telegram-login`)"}
+        captured = 0
+        for handle in owned_handles():
+            try:
+                entity = await client.get_entity(handle.lstrip("@"))
+                full = await client(GetFullChannelRequest(channel=entity))
+                pc = getattr(full.full_chat, "participants_count", None)
+                if pc is None:
+                    continue
+                now = datetime.now(timezone.utc)
+                with session_scope() as s:
+                    row = s.scalar(select(Channel).where(Channel.tg_channel_id == entity.id))
+                    if row is None:
+                        continue
+                    row.participants_count = pc
+                    s.add(ParticipantSnapshot(channel_id=row.id, captured_at=now, count=pc))
+                    _upsert_daily_subscriber_stat(s, row.id, now.astimezone(IST).date(), pc, now)
+                captured += 1
+            except Exception:
+                logger.exception("[subscriber_snapshot] capture failed for %s", handle)
+        return {"captured": captured}
+
+
+def snapshot_subscriber_counts() -> dict:
+    """Lightweight DAILY capture of each owned channel's subscriber count -> one clean
+    ParticipantSnapshot + DailySubscriberStat roll. Deliberately decoupled from the heavy
+    ANALYTICS run: the follower time-series should be a FIRST-CLASS daily data point, not
+    a side-effect of an interval collector that only fires when the process happens to be
+    up. Registered as a daily CRON job so it also benefits from the scheduler's boot
+    catch-up — a missed day is captured on the next start (for that day's count; Telegram
+    gives no history, so a day the process was fully down can't be backfilled)."""
+    from src.config.settings import get_settings
+    return asyncio.run(_snapshot_counts_async(get_settings()))
+
+
 class OwnedChannelCollector(BaseCollector):
     name = "telegram_owned"
 

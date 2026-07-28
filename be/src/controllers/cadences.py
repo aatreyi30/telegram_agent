@@ -31,6 +31,11 @@ LEARNING_TIME = (2, 0)
 # is refreshed daily instead of only when someone clicks the manual pipeline.
 REASONING_TIME = (2, 30)
 DB_CLEANUP_TIME = (3, 0)
+# One first-class daily capture of the owned channel's subscriber count, early in the
+# IST day. A CRON job (not an interval side-effect of the collectors) so a missed day is
+# caught up on the scheduler's next boot — the follower time-series stops depending on
+# the heavy ANALYTICS run happening to fire.
+SUBSCRIBER_SNAPSHOT_TIME = (0, 10)
 DAILY_REPORT_TIME = (5, 15)
 # Growth detection must run BEFORE the daily plan so the plan grounds on a fresh
 # blueprint built from yesterday's posting/growth (was the reverse — plan at 5:30
