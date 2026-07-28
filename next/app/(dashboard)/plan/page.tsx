@@ -472,6 +472,11 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
       {(r: RetroLatest) => {
         if (!r.available) return null;
         const { prediction, plan_adherence, engagement, churn_vs_frequency, adjustments, top_over, top_under } = r.metrics;
+        // The retro reviews prediction accuracy + plan adherence. Until the predict->
+        // outcome->score loop has produced data, all of that is empty — so hide the card
+        // rather than show a stale, all-"—" panel (it reappears once there's real data).
+        if (prediction.n_posts === 0 && plan_adherence.planned === 0 && plan_adherence.published === 0)
+          return null;
         const pct = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${Math.round(v * 100)}%`);
         return (
           <Card>
