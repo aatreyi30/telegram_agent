@@ -651,7 +651,7 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                   {/* When the honest grounded fallback is already shown, it explains
                       itself — don't also show the contradictory "failed, regenerate"
                       warning (regenerating usually just fails again). */}
-                  {w.digest?.startsWith("The AI narrative was withheld") ? null
+                  {w.digest?.includes("Grounded summary") ? null
                     : w.factcheck_status === "failed" ? (
                     <p className="mt-1.5 text-xs font-medium text-red-600 dark:text-red-400">
                       ⚠ This plan failed verification — the numbers aren't grounded in the data. Regenerate it.

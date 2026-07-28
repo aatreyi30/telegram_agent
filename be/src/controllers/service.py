@@ -1093,25 +1093,39 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
 
 
 def _grounded_weekly_summary(s) -> str:
-    """Honest, deterministic weekly summary from REAL data only — used when the AI
+    """Honest, deterministic weekly retro from REAL data only — used when the AI
     narrative fails fact-check (it cited self-computed/unverifiable figures). No LLM,
-    no derived numbers: just the measured per-post views for each deal type, so the
-    operator sees a true statement instead of hallucinated prose (mirrors the retro's
-    plain-language honesty)."""
+    no derived numbers: the week's actual posts/views, its strongest day, and the
+    measured per-post views per deal type, so the operator gets a genuinely useful
+    grounded read instead of an apology. Ends with a stable 'Grounded summary' marker
+    the Plan page keys on to suppress the redundant 'failed — regenerate' warning."""
+    traj = ctx.posting_trajectory(s, days=7)
+    days = traj.get("days") or []
+    total_posts = sum(d["posts"] for d in days)
+    total_views = sum((d.get("views") or 0) for d in days)
+    active = [d for d in days if d["posts"]]
     ptp = {p["post_type"]: p for p in ctx.post_type_performance(s)}
     sv = (ptp.get("single_deal") or {}).get("avg_views")
     lv = (ptp.get("loot_deal") or {}).get("avg_views")
+
+    parts: list[str] = []
+    if total_posts:
+        line = f"Last 7 days: {total_posts} posts drawing {total_views:,} views"
+        if active:
+            best = max(active, key=lambda d: d.get("views_avg") or 0)
+            line += (f", strongest on {best['date']} at {round(best.get('views_avg') or 0)} "
+                     "avg views/post")
+        parts.append(line)
     if sv and lv:
         if sv >= lv:
-            body = (f"single deals average {round(sv)} views per post vs {round(lv)} "
-                    "for loot boards, so the mix leans single while keeping loot for variety")
+            parts.append(f"per post, single deals ({round(sv)} views) out-perform loot boards "
+                         f"({round(lv)}), so the mix leans single while keeping loot for variety")
         else:
-            body = (f"loot boards average {round(lv)} views per post vs {round(sv)} "
-                    "for single deals, so the mix leans loot while keeping singles for variety")
-    else:
-        body = "there isn't enough measured post data yet to summarise the week"
-    return ("The AI narrative was withheld because it cited figures that couldn't be "
-            f"verified against the data. Grounded facts: {body}.")
+            parts.append(f"per post, loot boards ({round(lv)} views) out-perform single deals "
+                         f"({round(sv)}), so the mix leans loot while keeping singles for variety")
+    body = ". ".join(parts) if parts else "there isn't enough measured post data yet to summarise the week"
+    return (f"{body}. (Grounded summary — the AI's own weekly narrative was withheld "
+            "because some figures it cited couldn't be verified against the data.)")
 
 
 def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = None):

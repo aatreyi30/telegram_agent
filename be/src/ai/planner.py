@@ -886,6 +886,22 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
         week_start = today - timedelta(days=today.weekday())  # IST Monday
 
     facts_ctx = full_briefing_context(s, weekly=True)
+    # --- Sanitize the weekly grounding before the model (and the fact-check pool built
+    # from it) ever see it, so the narrative can't repeat three known distortions: ---
+    # a) Integer views — no "573.087 views" in the prose.
+    _round_view_fields(facts_ctx)
+    # b) Drop follower deltas that span a capture GAP (spans_days > 1): a 14-day catch-up
+    #    net (e.g. +1964) is NOT a single day's gain, and was being cited as a one-day
+    #    win. Only genuine single-day measurements remain.
+    _fd = facts_ctx.get("follower_deltas") or {}
+    facts_ctx["follower_deltas"] = {d: v for d, v in _fd.items()
+                                    if (v or {}).get("spans_days", 1) <= 1}
+    # c) Strip avg_views_per_day from post-type performance: it's an age-confounded
+    #    per-day VELOCITY that misranks the types (loot 39/day > single 13/day, yet
+    #    single wins 779 > 569 per POST). Leaving only avg_views/_per_post forces the
+    #    weekly read onto the honest metric — and stops it contradicting the daily plan.
+    for _p in facts_ctx.get("post_type_performance") or []:
+        _p.pop("avg_views_per_day", None)
     # Flatten the new grounded signals into the fact-check pool as their own items so
     # cited style/follower/competitor numbers verify (nested lists inside facts_ctx are
     # otherwise invisible to check_cited_numbers, which flattens only one level).

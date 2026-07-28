@@ -140,8 +140,10 @@ def test_follower_deltas_rows_present():
         deltas = follower_deltas_by_day(s, _state["channel_id"], date(2026, 7, 6), date(2026, 7, 8))
         # Only measured days carry values, exactly as captured (no invented per-day
         # spread — followers are sampled sparsely and we never fabricate the gaps).
-        assert deltas["2026-07-06"] == {"joined": 15, "left": 5, "net": 10}
-        assert deltas["2026-07-08"] == {"joined": 3, "left": 8, "net": -5}
+        # spans_days flags a gap-spanning capture (>1) so the weekly briefing can drop it;
+        # a normally-captured day is 1.
+        assert deltas["2026-07-06"] == {"joined": 15, "left": 5, "net": 10, "spans_days": 1}
+        assert deltas["2026-07-08"] == {"joined": 3, "left": 8, "net": -5, "spans_days": 1}
 
 
 def test_follower_deltas_uncaptured_day_absent():

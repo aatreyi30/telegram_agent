@@ -586,7 +586,13 @@ def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_da
     ).all()
     return {r.stat_date.isoformat(): {"joined": r.subs_joined or 0,
                                        "left": r.subs_left or 0,
-                                       "net": r.subs_net or 0}
+                                       "net": r.subs_net or 0,
+                                       # How many days this captured delta actually
+                                       # covers: >1 means it's the net since the previous
+                                       # snapshot (a gap), NOT a single day's gain. The
+                                       # weekly briefing drops these so a 14-day catch-up
+                                       # (e.g. +1964) can't be cited as a one-day spike.
+                                       "spans_days": getattr(r, "spans_days", None) or 1}
             for r in rows}
 
 
@@ -713,10 +719,15 @@ def style_follower_correlation(s: Session, days: int = 14, end_day=None) -> dict
     rows = []
     for d in style_days:
         fd = deltas.get(d["date"]) or {}
+        # A gap-spanning capture (spans_days > 1) is the net SINCE the last snapshot, not
+        # one day's change — attributing a multi-day catch-up (e.g. +1964 over 14 days) to
+        # a single day both corrupts this day-level correlation and lets the narrative cite
+        # it as a one-day win. Treat such a day as unmeasured for followers.
+        reliable = (fd.get("spans_days") or 1) <= 1
         rows.append({**d,
-                     "followers_joined": fd.get("joined"),
-                     "followers_left": fd.get("left"),
-                     "followers_net": fd.get("net")})
+                     "followers_joined": fd.get("joined") if reliable else None,
+                     "followers_left": fd.get("left") if reliable else None,
+                     "followers_net": fd.get("net") if reliable else None})
 
     paired = [r for r in rows if r.get("posts") and r.get("followers_net") is not None]
     comparisons = [c for c in (_style_follower_split(paired, f)
