@@ -291,11 +291,22 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             </p>
           )}
           {(() => {
+            // A fully-posted day is HISTORY — the forward-looking "planned / short-of-target"
+            // numbers are meaningless (and can contradict the actual posted count when a late
+            // steer rewrote the plan record). Show only what actually happened.
+            if (fullyPosted) {
+              return (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <Badge variant="outline">{t.scheduled_count} posted today</Badge>
+                  <span className="text-xs text-muted-foreground">this day is done — see tomorrow to plan ahead</span>
+                </div>
+              );
+            }
             // Under just-in-time filling the plan's SLOTS are the schedule — each is
             // rendered into a real post only ~3 min before it fires. So "planned" is the
             // sum of slot counts, NOT how many rows have materialised yet (that would
             // always read as a deficit all day). Only a genuine plan shortfall is a gap.
-            const planned = (t.slots || []).reduce((a, s) => a + (s.count ?? 1), 0);
+            const planned = plannedCount;
             const short = Math.max(t.recommended_posts - planned, 0);
             const over = Math.max(planned - t.recommended_posts, 0);
             return (
