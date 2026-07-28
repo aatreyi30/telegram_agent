@@ -1276,9 +1276,11 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
         if anchor is None:
             return {"available": False, "reason": "No owned posts yet."}
 
-        # Monday->Sunday IST calendar week containing `anchor`.
-        week_start = anchor - timedelta(days=anchor.weekday())
-        week_end = week_start + timedelta(days=6)
+        # TRAILING 7-day window ENDING at `anchor` (the latest day with data / today) —
+        # "the last week up to today", so the card shows real recent activity instead of
+        # a Mon->Sun calendar week that runs into empty future days early in the week.
+        week_end = anchor
+        week_start = anchor - timedelta(days=6)
 
         traj = ctx.posting_trajectory(s, days=7, end_day=week_end)
         ch = _owned_channel(s)
@@ -1328,7 +1330,6 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
             ai_summary, ai_ok, themes, wk = _weekly_ai_generate(
                 s, week_start, week_end, wk, directive=directive)
 
-        current_week_start = ist_today() - timedelta(days=ist_today().weekday())
         return {"available": True,
                 "week_start": week_start.isoformat(),
                 "week_end": week_end.isoformat(),
@@ -1342,7 +1343,9 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
                 "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok,
                 "factcheck_status": (wk.factcheck_status if wk is not None else None),
                 "operator_directive": wk.operator_directive if wk is not None else None,
-                "can_regenerate": week_start >= current_week_start}
+                # Regenerable only while this is the CURRENT trailing window (its end is
+                # within the last 7 days) — matches regenerate_weekly's guard.
+                "can_regenerate": week_end >= ist_today() - timedelta(days=6)}
 
 
 def _past_future_split(slots, now_min):
@@ -1517,12 +1520,13 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
         if anchor is None:
             return {"available": False, "reason": "No owned posts yet."}
 
-        week_start = anchor - timedelta(days=anchor.weekday())
-        today = ist_today()
-        current_week_start = today - timedelta(days=today.weekday())
-        if week_start < current_week_start:
+        # Trailing 7-day window ending at the anchor. Only the CURRENT window (anchor
+        # within the last 7 days) is regenerable — an old historical anchor is elapsed.
+        if anchor < ist_today() - timedelta(days=6):
             return {"available": False,
-                    "reason": "This day has already elapsed — regenerating it has no effect."}
+                    "reason": "This week has already elapsed — regenerating it has no effect."}
+        week_end = anchor
+        week_start = anchor - timedelta(days=6)
 
         s.execute(delete(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
@@ -1530,7 +1534,8 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
             CampaignPlan.target_date == week_start,
         ))
 
-    result = weekly_brief(end=week_start.isoformat(), directive=directive)
+    # Pass the anchor (window END) so weekly_brief re-derives the SAME trailing window.
+    result = weekly_brief(end=week_end.isoformat(), directive=directive)
     if result.get("available"):
         note = f"weekly {week_start.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
         record_ai_output("plan_regenerated", note, get_settings().ai_model)

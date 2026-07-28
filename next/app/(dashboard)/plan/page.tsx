@@ -568,7 +568,7 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
 function WeekCard({ w }: { w: WeeklyBrief }) {
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">This week — {w.week_start} to {w.week_end}</CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base">Last 7 days — {w.week_start} to {w.week_end}</CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Stat label="Posts" value={String(w.totals.posts)} />
@@ -643,7 +643,7 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                   canRegenerate={w.can_regenerate}
                   isPending={regenerate.isPending}
                   onRegenerate={(directive) =>
-                    regenerate.mutate({ end: w.week_start, directive: directive || undefined })
+                    regenerate.mutate({ end: w.week_end, directive: directive || undefined })
                   }
                 />
               </CardContent>

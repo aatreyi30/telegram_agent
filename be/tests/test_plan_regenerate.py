@@ -74,7 +74,7 @@ def test_regenerate_weekly_refuses_an_elapsed_week():
 
     r = service.regenerate_weekly(end="2020-01-06")
     assert r["available"] is False
-    assert r["reason"] == "This day has already elapsed — regenerating it has no effect."
+    assert r["reason"] == "This week has already elapsed — regenerating it has no effect."
 
 
 # --- regenerate today replaces the cached row + stores the directive ----------
@@ -149,7 +149,8 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
     from datetime import timedelta
 
     today = ist_today()
-    week_start = today - timedelta(days=today.weekday())
+    anchor = today                                   # window END (trailing 7 days)
+    trailing_start = anchor - timedelta(days=6)      # window START = cache key
 
     calls = []
 
@@ -159,7 +160,7 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
 
     monkeypatch.setattr("src.ai.planner.generate_week_plan", fake_generate)
 
-    first = service.weekly_brief(end=week_start.isoformat())
+    first = service.weekly_brief(end=anchor.isoformat())
     assert first["available"] is True
     assert first["operator_directive"] is None
     assert first["can_regenerate"] is True
@@ -167,7 +168,7 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
     assert calls[0] is None
 
     directive = "Lean into the festival theme this week."
-    second = service.regenerate_weekly(end=week_start.isoformat(), directive=directive)
+    second = service.regenerate_weekly(end=anchor.isoformat(), directive=directive)
     assert second["available"] is True
     assert second["operator_directive"] == directive
     assert len(calls) == 2
@@ -177,7 +178,7 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
         rows = s.scalars(select(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.WEEKLY,
-            CampaignPlan.target_date == week_start)).all()
+            CampaignPlan.target_date == trailing_start)).all()
         assert len(rows) == 1, "regenerate must not leave duplicate cached rows behind"
         assert rows[0].operator_directive == directive
 
