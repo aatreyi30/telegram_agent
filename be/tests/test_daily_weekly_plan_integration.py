@@ -145,11 +145,11 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
     assert by_date["2026-07-06"]["joined"] == 10   # a stat day inside the window
     assert by_date["2026-07-06"]["left"] == 2
     assert by_date["2026-07-06"]["net"] == 8
-    # A day with no DailySubscriberStat row gap-fills to zero, not a KeyError/None.
+    # A day with no DailySubscriberStat row is "not measured" — null, not a misleading 0.
     assert by_date["2026-07-07"] == {"date": "2026-07-07", "weekday": "Tue",
                                       "posts": by_date["2026-07-07"]["posts"],
                                       "views_avg": by_date["2026-07-07"]["views_avg"],
-                                      "joined": 0, "left": 0, "net": 0}
+                                      "joined": None, "left": None, "net": None}
     # The window ends AT the anchor — no future days past it.
     assert "2026-07-09" not in by_date and "2026-07-08" in by_date
 

@@ -1285,10 +1285,12 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
         traj = ctx.posting_trajectory(s, days=7, end_day=week_end)
         ch = _owned_channel(s)
         deltas = ctx.follower_deltas_by_day(s, ch.id if ch else None, week_start, week_end)
+        # Follower counts are captured sparsely — a day with no snapshot is NOT measured,
+        # so its joined/left/net are null ("—" in the UI), never a misleading 0.
         days = [{"date": d["date"],
                  "weekday": date_cls.fromisoformat(d["date"]).strftime("%a"),
                  "posts": d["posts"], "views_avg": d["views_avg"],
-                 **(deltas.get(d["date"]) or {"joined": 0, "left": 0, "net": 0})}
+                 **(deltas.get(d["date"]) or {"joined": None, "left": None, "net": None})}
                 for d in traj["days"]]
         posts_total = sum(d["posts"] for d in traj["days"])
         # true sum of daily view totals (not posts x rounded-avg, which drifts)

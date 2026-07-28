@@ -138,22 +138,20 @@ def test_follower_deltas_rows_present():
     from src.db.session import session_scope
     with session_scope() as s:
         deltas = follower_deltas_by_day(s, _state["channel_id"], date(2026, 7, 6), date(2026, 7, 8))
-        # 07-06 is the first snapshot -> placed as-is.
+        # Only measured days carry values, exactly as captured (no invented per-day
+        # spread — followers are sampled sparsely and we never fabricate the gaps).
         assert deltas["2026-07-06"] == {"joined": 15, "left": 5, "net": 10}
-        # 07-08 follows a 2-day gap (07-07 not captured), so its delta is SPREAD across
-        # 07-07 + 07-08 rather than dumped on 07-08 (a sparse capture isn't a 1-day event).
-        assert deltas["2026-07-08"] == {"joined": 2, "left": 4, "net": -2}
-        assert deltas["2026-07-07"] == deltas["2026-07-08"]  # the gap day now carries its share
+        assert deltas["2026-07-08"] == {"joined": 3, "left": 8, "net": -5}
 
 
-def test_follower_deltas_trailing_no_data_day_absent():
+def test_follower_deltas_uncaptured_day_absent():
     from src.ai.context import follower_deltas_by_day
     from src.db.session import session_scope
     with session_scope() as s:
-        # Days AFTER the last snapshot (07-08) carry no delta and no spread -> absent,
-        # so the caller gap-fills them to zero (not a KeyError).
-        deltas = follower_deltas_by_day(s, _state["channel_id"], date(2026, 7, 6), date(2026, 7, 10))
-        assert "2026-07-09" not in deltas and "2026-07-10" not in deltas
+        # A day with no snapshot is absent from the result — the caller renders it as
+        # "not measured" (null), never a misleading zero.
+        deltas = follower_deltas_by_day(s, _state["channel_id"], date(2026, 7, 6), date(2026, 7, 8))
+        assert "2026-07-07" not in deltas
 
 
 def test_follower_deltas_empty_range_returns_empty_dict():

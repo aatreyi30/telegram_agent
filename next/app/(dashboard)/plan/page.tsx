@@ -454,11 +454,19 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
             <TableCell className="text-muted-foreground tabular-nums">{isoSlash(d.date)}</TableCell>
             <TableCell className="tabular-nums">{d.posts}</TableCell>
             <TableCell className="tabular-nums">{Math.round(d.views_avg).toLocaleString()}</TableCell>
-            <TableCell className="text-emerald-600 tabular-nums dark:text-emerald-400">+{d.joined}</TableCell>
-            <TableCell className="text-red-600 tabular-nums dark:text-red-400">-{d.left}</TableCell>
-            <TableCell className={cn("tabular-nums", d.net < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
-              {d.net > 0 ? "+" : ""}{d.net}
-            </TableCell>
+            {/* Followers are captured only on some days; an uncaptured day is "—"
+                (not measured), never a misleading 0. */}
+            {d.net == null ? (
+              <TableCell className="tabular-nums text-muted-foreground" colSpan={3} title="No subscriber snapshot was captured this day">— not measured</TableCell>
+            ) : (
+              <>
+                <TableCell className="text-emerald-600 tabular-nums dark:text-emerald-400">+{d.joined}</TableCell>
+                <TableCell className="text-red-600 tabular-nums dark:text-red-400">-{d.left}</TableCell>
+                <TableCell className={cn("tabular-nums", d.net < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
+                  {d.net > 0 ? "+" : ""}{d.net}
+                </TableCell>
+              </>
+            )}
           </TableRow>
         ))}
       </TableBody>
