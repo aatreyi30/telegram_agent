@@ -61,16 +61,15 @@ function growthStory(g: Extract<GrowthResponse, { available: true }>): { icon: s
   const endSubs = g.current ?? firstSubs;
   const icon = g.net > 0 ? "📈" : g.net < 0 ? "📉" : "➖";
   const dir = g.net > 0 ? "Growing" : g.net < 0 ? "Shrinking" : "Holding steady";
-  const churnPct = g.joined > 0 ? Math.round((g.left / g.joined) * 100) : 0;
-  const gap = g.has_collection_gap ? " (totals span a multi-day tracking gap, not one day)" : "";
-  const churn = g.joined > 0
-    ? ` For every 100 who joined, ~${churnPct} left${churnPct <= 20 ? " — healthy retention" : ""}.`
-    : "";
+  const gap = g.has_collection_gap ? " (spanning a multi-day tracking gap, not one day)" : "";
+  // The TOTAL is Telegram's real count; joined/left are DERIVED from how that count moved
+  // between captures (Telegram's API gives no per-person join/leave events), so they're net
+  // movement — NOT true gross churn. State that honestly; never claim a retention rate off it.
   return {
     icon,
-    text: `${dir}: ${fmtNum(firstSubs)} → ${fmtNum(endSubs)} subscribers `
-      + `(${g.net >= 0 ? "+" : ""}${fmtNum(g.net)} net; ${fmtNum(g.joined)} joined, ${fmtNum(g.left)} left).`
-      + `${churn}${gap}`,
+    text: `${dir}: ${fmtNum(firstSubs)} → ${fmtNum(endSubs)} subscribers, a net `
+      + `${g.net >= 0 ? "+" : ""}${fmtNum(g.net)} over this window${gap}. `
+      + `Joined/left are inferred from the count's ups and downs between captures, not Telegram per-person events.`,
   };
 }
 
