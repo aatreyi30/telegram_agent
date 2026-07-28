@@ -266,7 +266,11 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
     : regenerate.isSuccess && regenerate.data
       ? (regenerate.data.available === false
           ? { kind: "refused" as const, message: regenerate.data.reason || "That steer couldn't be applied." }
-          : { kind: "success" as const, message: "Plan updated — your steer was applied. See the schedule above." })
+          : { kind: "success" as const, message:
+                "Plan updated — " + (regenerate.data.steer_interpretation || "your steer was applied.")
+                + (regenerate.data.steer_unsupported?.length
+                    ? "  ·  Couldn't apply in the plan: " + regenerate.data.steer_unsupported.join("; ")
+                    : "") })
     : null;
   // A day whose slots have ALL already posted can't be re-steered (you can't un-send) —
   // flag it prominently so steering here isn't mistaken for "nothing happened".

@@ -371,6 +371,10 @@ export interface DailyBrief {
   operator_directive?: string | null;
   can_regenerate?: boolean;
   can_revert?: boolean;
+  // Universal steer: what the AI understood from a free-text steer, and any asks it
+  // could not enforce in the plan (shown so the steer is never a silent partial no-op).
+  steer_interpretation?: string | null;
+  steer_unsupported?: string[] | null;
 }
 
 export interface WeeklyBriefDay {
