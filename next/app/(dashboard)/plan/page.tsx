@@ -268,6 +268,10 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
           ? { kind: "refused" as const, message: regenerate.data.reason || "That steer couldn't be applied." }
           : { kind: "success" as const, message: "Plan updated — your steer was applied. See the schedule above." })
     : null;
+  // A day whose slots have ALL already posted can't be re-steered (you can't un-send) —
+  // flag it prominently so steering here isn't mistaken for "nothing happened".
+  const plannedCount = (t.slots || []).reduce((a, s) => a + (s.count ?? 1), 0);
+  const fullyPosted = plannedCount > 0 && (t.scheduled_count ?? 0) >= plannedCount;
   return (
     <Card>
       <CardHeader><CardTitle className="text-base">Today — {isoSlash(brief.date)}</CardTitle></CardHeader>
@@ -436,6 +440,14 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
         )}
 
         <RiskList risks={t.risks} />
+
+        {fullyPosted && (
+          <div className="rounded-md border border-amber-400/40 bg-amber-500/10 px-3 py-2.5 text-xs leading-snug text-amber-800 dark:text-amber-200">
+            ⚠ This day is fully posted — all {plannedCount} posts already went out and can&apos;t be changed.
+            Steering can only rewrite <em>unposted</em> slots, so it won&apos;t change today.
+            {" "}<strong>Pick a future date</strong> (top-right) to plan and steer a fresh day.
+          </div>
+        )}
 
         <SteerPanel
           operatorDirective={brief.operator_directive}
