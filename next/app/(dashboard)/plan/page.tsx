@@ -510,9 +510,9 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
               {(churn_vs_frequency.high_leave_days_posts_per_day != null || churn_vs_frequency.low_leave_days_posts_per_day != null) && (
                 <p className="text-xs text-muted-foreground">
                   Posts/day on high-churn days:{" "}
-                  <span className="font-medium text-foreground">{churn_vs_frequency.high_leave_days_posts_per_day ?? "—"}</span>
+                  <span className="font-medium text-foreground">{churn_vs_frequency.high_leave_days_posts_per_day != null ? Math.round(churn_vs_frequency.high_leave_days_posts_per_day) : "—"}</span>
                   {" "}vs low-churn days:{" "}
-                  <span className="font-medium text-foreground">{churn_vs_frequency.low_leave_days_posts_per_day ?? "—"}</span>
+                  <span className="font-medium text-foreground">{churn_vs_frequency.low_leave_days_posts_per_day != null ? Math.round(churn_vs_frequency.low_leave_days_posts_per_day) : "—"}</span>
                 </p>
               )}
 

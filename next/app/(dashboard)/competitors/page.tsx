@@ -138,7 +138,7 @@ function ProcessingBadge({ e }: { e: CompetitorEntity }) {
 }
 
 /**
- * "You 2.1/day · Them 5.3/day (+3.2)" — the diff is a plain subtraction (their posts_per_day
+ * "You 2/day · Them 5/day (+3)" — the diff is a plain subtraction (their posts_per_day
  * minus ours), never a ratio of the delta over our own (often small) value. That ratio pattern
  * was removed because dividing by a small "owned" denominator produces misleadingly huge %s.
  */
@@ -150,8 +150,8 @@ function PostsPerDayCell({ e }: { e: CompetitorEntity }) {
   const delta = bench?.delta;
   return (
     <span className="text-xs whitespace-nowrap">
-      {yours != null && <span className="text-muted-foreground">You {yours.toFixed(1)}/day · </span>}
-      <span>Them {theirs.toFixed(1)}/day</span>
+      {yours != null && <span className="text-muted-foreground">You {Math.round(yours)}/day · </span>}
+      <span>Them {Math.round(theirs)}/day</span>
       {e.window_mismatch && (
         <span
           className="ml-1 text-amber-600 dark:text-amber-400"
@@ -167,7 +167,7 @@ function PostsPerDayCell({ e }: { e: CompetitorEntity }) {
             delta > 0 ? "text-emerald-600" : delta < 0 ? "text-red-600" : "text-muted-foreground",
           )}
         >
-          ({delta >= 0 ? "+" : ""}{delta.toFixed(1)})
+          ({delta >= 0 ? "+" : ""}{Math.round(delta)})
         </span>
       )}
     </span>
@@ -335,7 +335,7 @@ export default function CompetitorDashboardPage() {
 
           const rankingData = [...entities]
             .sort((a: any, b: any) => (b.posts_per_day ?? 0) - (a.posts_per_day ?? 0))
-            .map((e: any) => ({ label: e.name, posts_per_day: e.posts_per_day ?? 0 }));
+            .map((e: any) => ({ label: e.name, posts_per_day: Math.round(e.posts_per_day ?? 0) }));
 
           const coverageData = entities.map((e: any) => ({
             label: e.name, coverage: Math.round((e.merchant_coverage ?? 0) * 1000) / 10,
