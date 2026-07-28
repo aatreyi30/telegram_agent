@@ -54,9 +54,16 @@ def unmeasurable_claims(plan: dict) -> list[str]:
     return out
 
 
+# A line-leading enumeration marker ("1. ", "2) ") — the digest's numbered plan points.
+# These are list ordinals, not cited data, so they must NOT be fact-checked as claims
+# (else "1."/"2." read as unverified numbers and can fail an otherwise-grounded plan).
+_LIST_MARKER_RE = re.compile(r"(?m)^\s*\d+[.)]\s+")
+
+
 def _numbers_in(text) -> list[float]:
     if not text or not isinstance(text, str):
         return []
+    text = _LIST_MARKER_RE.sub("", text)
     out = []
     for m in _NUM_RE.findall(text):
         cleaned = m.replace(",", "").strip(".")
@@ -208,6 +215,14 @@ def _demo() -> None:
     assert set(bad) == {"conversion", "ctr", "revenue"}, bad
     assert unmeasurable_claims({"digest": "amazon drew 400 views; post loot at 8pm",
                                 "post_slots": [{"why": "high views, order early"}]}) == []
+
+    # numbered plan-point markers ("1.", "2.") are ordinals, not cited data — they must
+    # NOT appear as prose numbers (the real cited figure on the line still does).
+    numbered_digest = {"digest": "Yesterday: hit 233 views/post.\n"
+                       "1. Push Amazon (48 views/day).\n2. Add loot in the evening."}
+    pn = extract_prose_numbers(numbered_digest)
+    assert 1.0 not in pn and 2.0 not in pn, pn
+    assert 233.0 in pn and 48.0 in pn, pn
 
     print("ai/factcheck.py self-check OK")
 
