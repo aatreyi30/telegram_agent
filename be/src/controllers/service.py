@@ -1817,9 +1817,13 @@ def revert_daily(date: str | None = None) -> dict:
             factcheck_status=snap.get("factcheck_status"),
             report_ids=snap.get("report_ids") or [],
             operator_directive=snap.get("operator_directive")))
-        record_ai_output("plan_reverted",
-                         f"daily {day.isoformat()} — reverted to pre-steer plan",
-                         get_settings().ai_model)
+    # AUDIT LOG *after* the restore session commits — record_ai_output opens its OWN
+    # session, so calling it inside the block above self-locks (the outer write lock
+    # blocks the inner write) and rolls back the whole restore. That deadlock is exactly
+    # why revert silently "did nothing" before.
+    record_ai_output("plan_reverted",
+                     f"daily {day.isoformat()} — reverted to pre-steer plan",
+                     get_settings().ai_model)
     return daily_brief(date=day.isoformat())
 
 
