@@ -1329,10 +1329,18 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
             ai_summary, ai_ok, themes, wk = _weekly_ai_generate(
                 s, week_start, week_end, wk, directive=directive)
 
+        _bp = (wk.blueprint or {}) if wk is not None else {}
         return {"available": True,
                 "week_start": week_start.isoformat(),
                 "week_end": week_end.isoformat(),
                 "days": days, "totals": totals, "themes": themes,
+                # The weekly PLAN's strategic recommendations (what guides the daily
+                # plans): this week's one-line direction, the loot/single target, and
+                # which merchants to feature. Surfaced so the weekly page shows the
+                # strategy, not just the retro + data.
+                "direction": _bp.get("direction"),
+                "loot_deal_ratio": _bp.get("loot_deal_ratio"),
+                "merchant_priorities": _bp.get("merchant_priorities") or [],
                 # Match the blueprint / daily-themes / daily-plan count (the 14-day
                 # median) instead of a separate this-week trajectory, so the card's
                 # "Recommended/day" agrees with the 38 shown everywhere else.

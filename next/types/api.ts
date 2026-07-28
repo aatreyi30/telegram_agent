@@ -388,6 +388,10 @@ export interface WeeklyBrief {
   recommended_posts_per_day: number;
   upcoming_events: UpcomingEventRow[];
   digest: string;
+  // The weekly plan's strategic recommendations (guide the daily plans).
+  direction?: string | null;
+  loot_deal_ratio?: { loot: number; deal: number } | null;
+  merchant_priorities?: { merchant: string; why?: string }[];
   factcheck_status: "pass" | "warn" | "failed" | "fallback" | "skipped" | null;
   ai_available: boolean;
   operator_directive?: string | null;

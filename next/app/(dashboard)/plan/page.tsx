@@ -578,6 +578,38 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
           <Stat label="Recommended/day" value={String(w.recommended_posts_per_day)} />
         </div>
 
+        {/* The weekly PLAN's strategy — the recommendations that steer the daily plans. */}
+        {(w.direction || w.loot_deal_ratio || (w.merchant_priorities?.length ?? 0) > 0) && (
+          <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+            <p className="text-xs font-medium text-muted-foreground">This week&apos;s direction</p>
+            {w.direction && <p className="text-sm font-medium text-foreground">{w.direction}</p>}
+            {w.loot_deal_ratio && (() => {
+              const { loot, deal } = w.loot_deal_ratio!;
+              const lootPct = Math.round((loot / ((loot || 0) + (deal || 0) || 1)) * 100);
+              return (
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-muted-foreground">Target mix:</span>
+                  <Badge variant="outline">Single {100 - lootPct}%</Badge>
+                  <Badge variant="outline">Loot {lootPct}%</Badge>
+                </div>
+              );
+            })()}
+            {(w.merchant_priorities?.length ?? 0) > 0 && (
+              <div>
+                <p className="mb-1 text-xs text-muted-foreground">Feature these merchants:</p>
+                <ul className="space-y-1">
+                  {w.merchant_priorities!.map((m, i) => (
+                    <li key={i} className="text-xs">
+                      <span className="font-medium text-foreground">{merchantLabel(m.merchant)}</span>
+                      {m.why && <span className="text-muted-foreground"> — {m.why}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
         {w.days?.length > 0 && <WeekDaysTable days={w.days} />}
 
         {!!w.upcoming_events?.length && (
