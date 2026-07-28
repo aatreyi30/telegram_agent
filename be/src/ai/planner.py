@@ -794,10 +794,14 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     try:
         user = f"DATA:\n{to_json(plan_ctx)}{recon_note}{directive_note}"
         # The prompt requires ONE JSON object PER POST, each with a 3-4 sentence `why`
-        # (~180 output tokens/slot). A fixed 3200-token cap truncated the JSON array for
-        # high-cadence days (e.g. 39 posts -> unparseable / too-few-slots -> fallback
-        # EVERY time). Fund the budget from the actual slot count so any cadence fits.
-        _n_slots = plan_ctx.get("recommended_posts") or 10
+        # (~180 output tokens/slot). A budget sized only to a SMALL target truncates the
+        # JSON when the model emits MORE slots than asked (it often reads the recent
+        # cadence and over-produces), so a low steer like "make it 10" would truncate ->
+        # unparseable -> fallback every time. Size to the LARGER of the target and the
+        # recent cadence so the array always fits; persist rescales the slot count to the
+        # target afterwards. Cached once/day, so a generous cap is cheap.
+        _n_slots = max(int(plan_ctx.get("recommended_posts") or 0),
+                       int(plan_ctx.get("recent_cadence") or 0), 12)
         _budget = min(max(3200, _n_slots * 180 + 1500), 16000)
         raw = ai.complete(user, system_extra=_DAILY_PLAN_SYSTEM, max_tokens=_budget,
                           trace_call="day_plan")
@@ -811,19 +815,26 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
                 f"({e}) — a deterministic fallback plan is active (covers every "
                 "posting window with a loot/single mix); regenerate once the AI "
                 "is back for a grounded plan.", "plan": fallback, "facts": facts,
-                "is_fallback": True,
+                "is_fallback": True, "fallback_reason": f"AI service unavailable: {e}",
                 "feed_pairs": _feed_pairs(plan_ctx.get("available_deals"))}
     digest, plan_text = _split_digest_and_plan(raw)
     try:
         plan = parse_plan(plan_text, plan_ctx.get("available_merchants"))
-    except ValueError:
-        logger.warning("[ai.planner] unparseable day plan output — using "
-                       "deterministic fallback")
+    except ValueError as _pe:
+        # Surface the ACTUAL reason (truncated/invalid JSON, type-mix collapse, invented
+        # merchant, …) — not a generic "AI unavailable" — so a persistent fallback is
+        # diagnosable instead of a mystery. A likely truncation is flagged explicitly.
+        _reason = str(_pe)
+        _truncated = _extract_json_object(plan_text) is None or "Expecting" in _reason or "delimiter" in _reason
+        logger.warning("[ai.planner] day plan rejected (%s) — using deterministic fallback "
+                       "(likely_truncation=%s, plan_text_len=%d)", _reason, _truncated, len(plan_text or ""))
         fallback = _fallback_day_plan(day, plan_ctx)
         return {"available": True, "digest": digest or (
-                "AI planner returned an unparseable plan — a deterministic "
-                "fallback plan is active; regenerate once the AI is back for a "
-                "grounded plan."), "plan": fallback, "facts": facts, "is_fallback": True,
+                "AI planner returned an unusable plan — a deterministic "
+                "fallback plan is active; regenerate for a grounded plan."),
+                "plan": fallback, "facts": facts, "is_fallback": True,
+                "fallback_reason": (f"plan JSON truncated/invalid ({_reason})" if _truncated
+                                    else f"plan rejected ({_reason})"),
                 "feed_pairs": _feed_pairs(plan_ctx.get("available_deals"))}
     _feed_pair_counts = _feed_pairs(plan_ctx.get("available_deals"))
     _repair_plan_diversity(plan.get("post_slots") or [], plan_ctx.get("available_merchants"),
