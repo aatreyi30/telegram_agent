@@ -4,7 +4,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert01Icon,
-  Calendar03Icon,
   Clock01Icon,
   InformationCircleIcon,
 } from "@hugeicons/core-free-icons";
@@ -452,7 +451,14 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
             <TableCell className="font-medium">{d.weekday}</TableCell>
             <TableCell className="text-muted-foreground tabular-nums">{isoSlash(d.date)}</TableCell>
             <TableCell className="tabular-nums">{d.posts}</TableCell>
-            <TableCell className="tabular-nums">{Math.round(d.views_avg).toLocaleString()}</TableCell>
+            <TableCell className="tabular-nums">
+              {Math.round(d.views_avg).toLocaleString()}
+              {d.views_maturing && (
+                <span className="ml-1 text-xs text-muted-foreground" title="Posts from today/yesterday are still accumulating views — this average will rise and isn't a dip.">
+                  · still rising
+                </span>
+              )}
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -572,7 +578,7 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Stat label="Posts" value={String(w.totals.posts)} />
           <Stat label="Total views" value={w.totals.views_total.toLocaleString()} />
-          <Stat label="Posts/day so far (actual)" value={w.totals.avg_posts_per_day.toFixed(1)} />
+          <Stat label="Posts/day so far (actual)" value={String(Math.round(w.totals.avg_posts_per_day))} />
           <Stat label="Recommended/day" value={String(w.recommended_posts_per_day)} />
         </div>
 
@@ -609,16 +615,6 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
         )}
 
         {w.days?.length > 0 && <WeekDaysTable days={w.days} />}
-
-        {!!w.upcoming_events?.length && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <HugeiconsIcon icon={Calendar03Icon} size={14} className="text-muted-foreground" />
-            <span className="text-xs text-muted-foreground">Upcoming events:</span>
-            {w.upcoming_events.map((e) => (
-              <Badge key={e.name} variant="outline">{e.name} ({e.days_away}d, {e.date_confidence})</Badge>
-            ))}
-          </div>
-        )}
 
       </CardContent>
     </Card>

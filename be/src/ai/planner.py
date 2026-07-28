@@ -900,8 +900,21 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     #    per-day VELOCITY that misranks the types (loot 39/day > single 13/day, yet
     #    single wins 779 > 569 per POST). Leaving only avg_views/_per_post forces the
     #    weekly read onto the honest metric — and stops it contradicting the daily plan.
+    _by = {p["post_type"]: (p.get("avg_views") or 0) for p in facts_ctx.get("post_type_performance") or []}
     for _p in facts_ctx.get("post_type_performance") or []:
         _p.pop("avg_views_per_day", None)
+    # d) Pre-state the per-post winner DETERMINISTICALLY. gpt-4o-mini keeps reversing the
+    #    comparison ("loot 569 beat single 779"); handing it the correct sentence to copy
+    #    is far more reliable than a guardrail asking it to do the arithmetic right.
+    _sv, _lv = _by.get("single_deal", 0), _by.get("loot_deal", 0)
+    if _sv or _lv:
+        _hi_t, _hi, _lo = (("single deals", round(_sv), round(_lv)) if _sv >= _lv
+                           else ("loot boards", round(_lv), round(_sv)))
+        _lo_t = "loot boards" if _hi_t == "single deals" else "single deals"
+        facts_ctx["per_post_leader"] = (
+            f"{_hi_t} lead on views PER POST ({_hi}) vs {_lo_t} ({_lo}). State the type "
+            f"comparison in EXACTLY this direction — {_hi_t} performed better per post; "
+            f"never say {_lo_t} out-viewed {_hi_t} per post.")
     # Flatten the new grounded signals into the fact-check pool as their own items so
     # cited style/follower/competitor numbers verify (nested lists inside facts_ctx are
     # otherwise invisible to check_cited_numbers, which flattens only one level).
@@ -913,6 +926,11 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     # whole weekly narrative. Same flattening the daily plan already does.
     facts.extend(facts_ctx.get("post_type_performance") or [])
     facts.extend(facts_ctx.get("merchant_opportunities") or [])
+    # The 7-day per-day series + totals must be in the pool so the digest can cite a real
+    # day's posts/views (e.g. "37 posts, 542 views on Wed") without being flagged.
+    facts.extend(facts_ctx.get("week_trajectory") or [])
+    if facts_ctx.get("week_totals"):
+        facts.append(facts_ctx["week_totals"])
     sfc = facts_ctx.get("style_follower_correlation") or {}
     facts.extend(sfc.get("days") or [])
     facts.extend(sfc.get("comparisons") or [])

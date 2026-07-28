@@ -144,7 +144,7 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
     by_date = {d["date"]: d for d in r["days"]}
     # Each day carries only real per-day POSTS/VIEWS — follower deltas were removed
     # (Telegram has no subscriber history to give a reliable per-day joined/left/net).
-    assert set(by_date["2026-07-07"]) == {"date", "weekday", "posts", "views_avg"}
+    assert set(by_date["2026-07-07"]) == {"date", "weekday", "posts", "views_avg", "views_maturing"}
     assert "joined" not in by_date["2026-07-07"]
     # The window ends AT the anchor — no future days past it.
     assert "2026-07-09" not in by_date and "2026-07-08" in by_date

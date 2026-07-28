@@ -1313,7 +1313,11 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
         # captured reliably day-by-day. Posts/views below are real per-day.
         days = [{"date": d["date"],
                  "weekday": date_cls.fromisoformat(d["date"]).strftime("%a"),
-                 "posts": d["posts"], "views_avg": d["views_avg"]}
+                 "posts": d["posts"], "views_avg": d["views_avg"],
+                 # Today's and yesterday's posts are still accumulating views (views
+                 # build over days), so their avg understates and must NOT be read as a
+                 # performance dip vs older, fully-matured days. Flag for the UI.
+                 "views_maturing": (week_end - date_cls.fromisoformat(d["date"])).days <= 1}
                 for d in traj["days"]]
         posts_total = sum(d["posts"] for d in traj["days"])
         # true sum of daily view totals (not posts x rounded-avg, which drifts)

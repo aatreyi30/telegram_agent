@@ -371,6 +371,8 @@ export interface DailyBrief {
 
 export interface WeeklyBriefDay {
   date: string; weekday: string; posts: number; views_avg: number;
+  // Today/yesterday: posts still accumulating views, so views_avg understates (not a dip).
+  views_maturing?: boolean;
   // Follower deltas removed — Telegram exposes only the live subscriber count (no
   // history), so per-day joined/left/net can't be captured reliably.
 }
