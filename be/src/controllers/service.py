@@ -1681,7 +1681,18 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         from src.services.analytics.periods import to_ist
         _now_ist = to_ist(_dt.now(_tz.utc))
         now_min = (_now_ist.hour * 60 + _now_ist.minute) if day == ist_today() else None
-        past_slots, _ = _past_future_split((old.blueprint or {}).get("post_slots") if old else [], now_min)
+        _old_slots = (old.blueprint or {}).get("post_slots") if old else []
+        past_slots, _future_slots = _past_future_split(_old_slots, now_min)
+        # FULLY-POSTED DAY: today, and every slot in the current plan has already fired.
+        # There's nothing left to change — steering would only regenerate a fresh plan and
+        # then splice the immutable already-posted slots back over it, producing a confusing
+        # plan whose enforcement notes describe slots that never actually change. Refuse
+        # cleanly and point at a future date, instead of that mess.
+        if now_min is not None and _old_slots and not _future_slots:
+            return {"available": False, "fully_posted": True,
+                    "reason": f"Today is fully posted — all {len(past_slots)} posts already went "
+                              "out, so steering can't change anything today. Pick a future date "
+                              "to plan and steer a fresh day."}
         s.execute(delete(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.DAILY,

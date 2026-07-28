@@ -46,13 +46,29 @@ def _isolated_db():
     yield
 
 
+def _fake_intent():
+    """A benign steer intent (no pause, no constraints) for tests that regenerate with a
+    directive — avoids a live extract_steer_intent AI call."""
+    return {"merchants": None, "categories": None, "exclude_merchants": None,
+            "exclude_categories": None, "after_min": None, "before_min": None,
+            "price_min": None, "price_max": None, "target_posts": None, "pause": False,
+            "type_lean": None, "interpretation": "", "unsupported": [], "source": "regex"}
+
+
 def _fake_ai_result(day, digest="Fake steered digest."):
+    # Time the slot ~2h in the FUTURE so a same-day regenerate doesn't hit the
+    # "fully posted, nothing to steer" guard (which fires only when every slot is past).
+    from datetime import datetime, timezone
+    from src.services.analytics.periods import to_ist
+    _n = to_ist(datetime.now(timezone.utc))
+    _m = min(_n.hour * 60 + _n.minute + 120, 23 * 60 + 59)
+    _ft = f"{_m // 60:02d}:{_m % 60:02d}"
     return {
         "available": True,
         "digest": digest,
         "plan": {"date": day, "recommended_posts": 5, "cadence_why": "test",
-                 "post_slots": [{"type": "single", "window_ist": "12:00-13:00",
-                                  "count": 5, "theme": "electronics", "merchant": "amazon",
+                 "post_slots": [{"type": "single", "time_ist": _ft,
+                                  "theme": "electronics", "merchant": "amazon",
                                   "why": "x"}],
                  "emphasis": "push electronics", "watch": "forwards", "cited_numbers": []},
         "facts": [],
@@ -84,9 +100,13 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
     from src.controllers import service
     from src.db.session import session_scope
     from src.db.models_campaign import CampaignPlan, PlanType, CAMPAIGN_VERSION
+    from datetime import timedelta
     from src.services.analytics.periods import ist_today
 
-    today = ist_today()
+    # A FUTURE day (tomorrow): steerable — not elapsed and not "fully posted" (a same-day
+    # plan whose slots are all in the past would be refused, which is correct but not what
+    # this test exercises). Variable kept named `today` for the rest of the assertions.
+    today = ist_today() + timedelta(days=1)
     today_str = today.isoformat()
 
     calls = []
@@ -96,6 +116,10 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
         return _fake_ai_result(day.isoformat(), digest=f"digest #{len(calls)}")
 
     monkeypatch.setattr("src.ai.planner.generate_day_plan", fake_generate_day_plan)
+    # Mock the universal-steer intent extractor so the test never hits the live AI
+    # (deterministic, no pause) — regenerate_daily imports it from directives.
+    monkeypatch.setattr("src.services.generation.directives.extract_steer_intent",
+                        lambda *a, **k: _fake_intent())
 
     # First, a normal (non-regenerate) request populates the cache, as it always does.
     first = service.daily_brief(date=today_str)
