@@ -226,7 +226,13 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
               <TableCell className="tabular-nums">{fmtCompact(e.subscribers)}</TableCell>
               <TableCell><PostsPerDayCell e={e} /></TableCell>
               <TableCell className="tabular-nums">{fmtNum(e.posts)}</TableCell>
-              <TableCell className="tabular-nums">{fmtNum(e.avg_views_per_post)}</TableCell>
+              <TableCell className="tabular-nums">
+                {e.avg_views_reliable === false ? (
+                  <span className="text-muted-foreground" title="Views weren't captured reliably for this channel (placeholder/implausible counts), so the average isn't shown.">—</span>
+                ) : (
+                  fmtNum(e.avg_views_per_post)
+                )}
+              </TableCell>
             </TableRow>
           ))}
           {entities.length === 0 && (

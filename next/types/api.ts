@@ -171,6 +171,9 @@ export interface CompetitorEntity {
   name: string; is_owned?: boolean; category?: "platform" | "channel" | "unclassified";
   subscribers?: number | null;
   posts_per_day?: number | null; avg_views_per_post?: number | null;
+  // False when this channel's views were captured unreliably (placeholder/implausible
+  // counts) — the UI hides the average rather than showing a misleading number.
+  avg_views_reliable?: boolean | null; median_views?: number | null; views_sample?: number | null;
   emoji_rate?: number | null; cta_rate?: number | null; coupon_rate?: number | null;
   hashtag_rate?: number | null; media_rate?: number | null; avg_links?: number | null;
   deal_mix?: Record<string, number>; merchant_mix?: Record<string, number>;
