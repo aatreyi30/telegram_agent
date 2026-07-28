@@ -10,6 +10,8 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Async, Empty } from "@/components/Async";
 import { AiBadge } from "@/components/AiBadge";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { Reveal } from "@/components/Reveal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -91,9 +93,9 @@ function SteerPanel({
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md bg-muted/50 px-2.5 py-1.5">
+    <div className="rounded-lg bg-muted/50 px-2.5 py-1.5 transition-colors duration-200 hover:bg-muted tabular-nums">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="text-sm font-semibold">{value}</p>
+      <p className="text-sm font-semibold"><AnimatedNumber value={value} /></p>
     </div>
   );
 }
@@ -254,7 +256,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
         </div>
 
         {brief.digest ? (
-          <div className="space-y-1.5">
+          <div className="ai-surface ai-sheen relative overflow-hidden space-y-1.5 rounded-xl border bg-gradient-to-b from-violet-500/[0.04] to-transparent p-3.5">
             <div className="flex items-center gap-2">
               <span className="text-xs font-medium text-muted-foreground">Narrative</span>
               <AiBadge />
@@ -425,9 +427,9 @@ function DailyView({ q }: { q: ReturnType<typeof useDailyBrief> }) {
           <Empty>{brief.reason || "No plan available."}</Empty>
         ) : (
           <div className="space-y-4">
-            <YesterdayCard y={brief.yesterday} prevDate={brief.prev_date} />
-            <TodayCard brief={brief} />
-            {brief.upcoming_event && <UpcomingEventCallout event={brief.upcoming_event} />}
+            <Reveal index={0}><YesterdayCard y={brief.yesterday} prevDate={brief.prev_date} /></Reveal>
+            <Reveal index={1}><TodayCard brief={brief} /></Reveal>
+            {brief.upcoming_event && <Reveal index={2}><UpcomingEventCallout event={brief.upcoming_event} /></Reveal>}
           </div>
         )
       }
@@ -631,11 +633,12 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
           <Empty>{w.reason || "No weekly plan available."}</Empty>
         ) : (
           <div className="space-y-4">
-            <RetroCard q={retroQ} />
-            <WeekCard w={w} />
+            <Reveal index={0}><RetroCard q={retroQ} /></Reveal>
+            <Reveal index={1}><WeekCard w={w} /></Reveal>
 
             {w.digest ? (
-              <Card>
+              <Reveal index={2} as="div">
+              <Card className="ai-surface ai-sheen overflow-hidden bg-gradient-to-b from-violet-500/[0.04] to-transparent">
                 <CardHeader>
                   <div className="flex items-center gap-2">
                     <CardTitle className="text-base">Weekly narrative</CardTitle>
@@ -659,10 +662,12 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                   ) : null}
                 </CardContent>
               </Card>
+              </Reveal>
             ) : !w.ai_available ? (
               <p className="text-xs text-muted-foreground">AI narrative unavailable — relying on the numbers above.</p>
             ) : null}
 
+            <Reveal index={3} as="div">
             <Card>
               <CardContent className="pt-6">
                 <SteerPanel
@@ -675,6 +680,7 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                 />
               </CardContent>
             </Card>
+            </Reveal>
           </div>
         )
       }
