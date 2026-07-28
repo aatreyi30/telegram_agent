@@ -304,6 +304,15 @@ def parse_plan(raw: str, available_merchants: list[str] | None = None) -> dict:
     data.setdefault("cadence_why", "")
     if not isinstance(data.get("post_slots"), list):
         raise ValueError("post_slots must be a list")
+    # Canonicalize the slot `type` to the prompt's single|collection vocabulary BEFORE
+    # any counting. gpt-4o-mini drifts to "loot_deal"/"single_deal" (see constants.py),
+    # and the floor guard + _lock_type_split compare raw strings — so a mixed vocabulary
+    # split loot across two labels, letting a skewed plan pass the 30% floor and making
+    # the padding miscount loot (the "3 single / 36 loot" bug). One label, one truth.
+    from src.services.generation.constants import is_loot_type
+    for _sl in data["post_slots"]:
+        if isinstance(_sl, dict):
+            _sl["type"] = "collection" if is_loot_type(_sl.get("type")) else "single"
     _check_type_mix(data["post_slots"])
     _check_merchants(data["post_slots"], available_merchants)
     return data

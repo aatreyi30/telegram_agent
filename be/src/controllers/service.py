@@ -1030,10 +1030,13 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
         # figure stays as the canonical metric). `allocation` was already handed to
         # the generator above, so this only corrects the DISPLAY, not the AI input.
         if slots and allocation:
-            _tk = {"single": "single_deal", "collection": "loot_deal"}
+            # Bucket by loot-vs-single MEANING, not a literal type string — the model
+            # drifts across single|collection|loot_deal|single_deal (see constants.py),
+            # so a string map alone splits loot across keys and mis-tallies the table.
+            from src.services.generation.constants import is_loot_type
             _actual: dict = {}
             for _sl in slots:
-                _k = _tk.get(_sl.get("type"), _sl.get("type"))
+                _k = "loot_deal" if is_loot_type(_sl.get("type")) else "single_deal"
                 _actual[_k] = _actual.get(_k, 0) + 1
             for _a in allocation:
                 _a["target_posts"] = _actual.get(_a.get("post_type"), 0)
