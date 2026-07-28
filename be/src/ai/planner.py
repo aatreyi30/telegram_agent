@@ -236,6 +236,21 @@ def _repair_plan_diversity(slots: list[dict], available_merchants: list[str] | N
             )
 
 
+# A comma immediately before a closing } or ] (optionally across whitespace) — an
+# LLM JSON habit that strict json rejects. ``strict=False`` forgives control chars
+# but NOT this, so a single trailing comma sank a whole (otherwise valid) plan.
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def _loads_lenient(obj: str) -> dict:
+    """``json.loads`` tolerant of the two model quirks that reject a real plan:
+    unescaped control chars in a string (``strict=False``) and a trailing comma
+    before ``}``/``]`` (stripped first). ponytail: the comma regex could in theory
+    touch a literal ', }' inside a string value — vanishingly rare in prose whys;
+    upgrade to a real tokenizer only if that ever actually bites."""
+    return json.loads(_TRAILING_COMMA_RE.sub(r"\1", obj), strict=False)
+
+
 def _extract_json_object(text: str) -> str | None:
     """The first top-level {...} object in ``text``, found by counting brace
     depth (string-literal aware) rather than ``re.search(r"\\{.*\\}")``. The
@@ -277,12 +292,10 @@ def parse_plan(raw: str, available_merchants: list[str] | None = None) -> dict:
     if obj is None:
         raise ValueError("no JSON object found in model output")
     try:
-        # strict=False: the model occasionally embeds a raw control character
-        # inside a string value (e.g. a stray byte in a "why" field) — valid
-        # enough to mean, invalid per strict JSON's ban on unescaped control
-        # chars in strings. That was rejecting a real, well-formed plan and
-        # falling back to the generic deterministic one ~1 in 4-8 generations.
-        data = json.loads(obj, strict=False)
+        # Tolerant load: forgives a stray control char in a "why" AND a trailing
+        # comma before }/] — both are model habits that sank a real, well-formed
+        # plan into the deterministic fallback ~1 in 4-8 generations.
+        data = _loads_lenient(obj)
     except json.JSONDecodeError as e:
         raise ValueError(f"plan JSON invalid: {e}") from e
     data.setdefault("post_slots", [])
@@ -714,7 +727,17 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
             "CANNOT — say so explicitly and name what IS available (e.g. \"today's feed only "
             "has ajio deals, so every slot stays ajio; I can't add other merchants until the "
             "feed carries them\"). Never silently keep the same merchants without explaining "
-            "this constraint.\n" + directive
+            "this constraint.\n"
+            "ATTRIBUTION (honesty — do NOT dress the directive up as your own analysis): a "
+            "choice you make ONLY because the operator asked for it must be attributed to the "
+            "directive, e.g. 'per your steer, leaning electronics from Amazon/Flipkart'. NEVER "
+            "justify a directive-driven choice with 'based on successful patterns' / 'the data "
+            "shows' / 'historically strong' UNLESS a real figure in DATA actually supports it — "
+            "and if it does, cite that number. If DATA does NOT support the directive (or is "
+            "silent), say so plainly, e.g. 'this is your directive, not an evidence-led pick — "
+            "Flipkart isn't independently a top performer in the data'. The reader must be able "
+            "to tell which choices came from the data and which came from your instruction.\n"
+            + directive
         )
     try:
         user = f"DATA:\n{to_json(plan_ctx)}{recon_note}{directive_note}"
@@ -778,12 +801,8 @@ def _parse_week_plan(raw: str) -> dict:
     if obj is None:
         raise ValueError("no JSON object found in model output")
     try:
-        # strict=False: the model occasionally embeds a raw control character
-        # inside a string value (e.g. a stray byte in a "why" field) — valid
-        # enough to mean, invalid per strict JSON's ban on unescaped control
-        # chars in strings. That was rejecting a real, well-formed plan and
-        # falling back to the generic deterministic one ~1 in 4-8 generations.
-        data = json.loads(obj, strict=False)
+        # Tolerant load (control char + trailing comma) — see _loads_lenient.
+        data = _loads_lenient(obj)
     except json.JSONDecodeError as e:
         raise ValueError(f"weekly plan JSON invalid: {e}") from e
     data.setdefault("daily_themes", [])
@@ -920,6 +939,15 @@ def _demo() -> None:
     )
     assert plan["recommended_posts"] == 9
     assert len(plan["post_slots"]) == 2  # a real mix (minority share 3/9=33% clears the 30% floor)
+
+    # A trailing comma before ]/} (an LLM habit) must NOT sink an otherwise-valid plan.
+    tc = parse_plan(
+        '{"date":"2026-07-21","recommended_posts":2,"cadence_why":"x",'
+        '"post_slots":[{"type":"single","time_ist":"09:00","theme":"e",'
+        '"merchant":"amazon","why":"x"},],'  # <- trailing comma in the array
+        '"emphasis":"e","watch":"w","cited_numbers":[1,2,],}'  # <- and in two objects
+    )
+    assert len(tc["post_slots"]) == 1, tc
 
     skewed_raw = (
         '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x",'
