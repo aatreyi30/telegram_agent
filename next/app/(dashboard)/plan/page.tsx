@@ -444,22 +444,17 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
       <TableHeader>
         <TableRow>
           <TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Posts</TableHead><TableHead>Avg views</TableHead>
-          <TableHead>Joined</TableHead><TableHead>Left</TableHead><TableHead>Net</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
+        {/* Joined/Left/Net columns removed: Telegram exposes only the LIVE subscriber
+            count (no history), so per-day follower deltas can't be captured reliably. */}
         {days.map((d) => (
           <TableRow key={d.date}>
             <TableCell className="font-medium">{d.weekday}</TableCell>
             <TableCell className="text-muted-foreground tabular-nums">{isoSlash(d.date)}</TableCell>
             <TableCell className="tabular-nums">{d.posts}</TableCell>
             <TableCell className="tabular-nums">{Math.round(d.views_avg).toLocaleString()}</TableCell>
-            {/* A day with no subscriber snapshot shows a plain "—" (never a misleading 0). */}
-            <TableCell className="text-emerald-600 tabular-nums dark:text-emerald-400">{d.joined == null ? "—" : `+${d.joined}`}</TableCell>
-            <TableCell className="text-red-600 tabular-nums dark:text-red-400">{d.left == null ? "—" : `-${d.left}`}</TableCell>
-            <TableCell className={cn("tabular-nums", d.net == null ? "text-muted-foreground" : d.net < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
-              {d.net == null ? "—" : `${d.net > 0 ? "+" : ""}${d.net}`}
-            </TableCell>
           </TableRow>
         ))}
       </TableBody>

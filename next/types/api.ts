@@ -371,8 +371,8 @@ export interface DailyBrief {
 
 export interface WeeklyBriefDay {
   date: string; weekday: string; posts: number; views_avg: number;
-  // null on days with no subscriber snapshot (not measured), never a misleading 0.
-  joined: number | null; left: number | null; net: number | null;
+  // Follower deltas removed — Telegram exposes only the live subscriber count (no
+  // history), so per-day joined/left/net can't be captured reliably.
 }
 
 export interface WeeklyBriefTheme { day: string; date: string; theme_focus?: string; loot_share?: number | null; single_share?: number | null; posts_planned: number; }
