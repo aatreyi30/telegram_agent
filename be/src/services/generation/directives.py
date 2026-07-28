@@ -39,6 +39,22 @@ def _mentions(text: str, slug: str) -> bool:
     return bool(words) and any(re.search(rf"\b{re.escape(w)}\b", text) for w in words)
 
 
+# Cues that turn a merchant/category MENTION into a hard EXCLUSION ("avoid amazon",
+# "no fashion", "skip electronics"). Phrase-scoped (the cue must sit a few words before
+# the slug) so "focus on amazon, avoid ajio" excludes only ajio, not amazon.
+_EXCLUDE_CUE_RE = r"(?:avoid|exclude|skip|without|drop|no|not|don'?t|nothing from)"
+
+
+def _excluded(text: str, slug: str) -> bool:
+    """True if the directive asks to EXCLUDE this feed slug — an exclusion cue within a
+    few words before a significant word of the slug. Same word-splitting as `_mentions`."""
+    words = [w for w in re.split(r"[^a-z0-9]+", slug.lower())
+             if len(w) > 2 and w not in ("and", "the", "for")]
+    return bool(words) and any(
+        re.search(rf"\b{_EXCLUDE_CUE_RE}\b(?:\s+\w+){{0,3}}\s+{re.escape(w)}\b", text)
+        for w in words)
+
+
 def _hm(hour: str, minute: str | None, ampm: str | None) -> int:
     """(hour, minute, am/pm) -> minutes since midnight. No am/pm is read as a 24h
     clock ('18:00' -> 1080), so '6pm' and '18:00' both resolve to 18:00."""
@@ -69,24 +85,150 @@ def _parse_time_window(t: str) -> tuple[int | None, int | None]:
     return after, before
 
 
+# Common merchant shorthands/abbreviations an operator types that regex-matching the
+# exact feed slug would miss. Only canonicalized when the canonical merchant is actually
+# in today's feed (so we never inject a merchant that isn't stocked).
+_MERCHANT_ALIASES = {
+    "amazon": ("amzn", "amazonin", "amazon.in", "amzn.in", "amazone", "amzon"),
+    "flipkart": ("flip", "fk", "flpkart", "flipcart", "flipkrt", "flpkrt", "flipcard"),
+    "myntra": ("myntr", "mynta", "myntraa"),
+    "ajio": ("ajio.com", "aajio"),
+}
+
+
+# Clear PAUSE intents ("pause posting", "don't post today", "stop posting"). Kept
+# deliberately narrow: the general object (posting/today/anything/at all) must follow the
+# stop-verb, so "don't post electronics" is an EXCLUSION, not a pause.
+_PAUSE_RE = re.compile(
+    r"\b(?:pause|stop|halt|freeze|hold(?:\s*off)?)\s+(?:the\s+)?"
+    r"(?:post|posts|posting|publishing|channel|plan|everything|all(?:\s+posts?)?|today)\b"
+    r"|\b(?:do\s*n['o]?t|don'?t|dont)\s+post(?:ing|s)?\s+(?:today|anything|everything|at\s+all)\b"
+    r"|\bno\s+post(?:s|ing)?\s+(?:today|at\s+all)\b"
+    r"|\bskip\s+(?:posting\s+)?today\b")
+
+_PAUSE_EXACT = frozenset({
+    "pause", "stop", "halt", "freeze", "stop posting", "pause posting", "pause today",
+    "no posts today", "skip today", "don't post today", "dont post today",
+    "hold posting", "pause the channel"})
+
+
+def parse_pause(directive: str | None) -> bool:
+    """True if the directive is a clear request to PAUSE/stop posting (not a content
+    steer). Handled specially by the caller — steering reshapes the plan but can't stop
+    the live queue, so a pause must NOT be silently reinterpreted as a normal plan."""
+    if not directive:
+        return False
+    t = directive.strip().lower()
+    return t in _PAUSE_EXACT or bool(_PAUSE_RE.search(t))
+
+
+def _canonicalize_merchants(t: str, available_merchants: list[str] | None) -> str:
+    """Rewrite merchant shorthands/typos in ``t`` to the canonical feed slug, so 'amzn'
+    or 'flipkrt' still pins/excludes the right merchant. Static aliases handle
+    abbreviations; a strict difflib pass (cutoff 0.85, 4+ chars) handles misspellings —
+    both restricted to merchants ACTUALLY in today's feed so nothing unstocked is
+    injected."""
+    import difflib
+
+    avail = {m.lower() for m in (available_merchants or [])}
+    if not avail:
+        return t
+    for canon, aliases in _MERCHANT_ALIASES.items():
+        if canon in avail:
+            for a in aliases:
+                t = re.sub(rf"\b{re.escape(a)}\b", canon, t)
+    for tok in set(re.findall(r"[a-z0-9.]+", t)):
+        if len(tok) < 4 or tok in avail:
+            continue
+        # 5+ chars tolerate a looser 0.8 (catches more typos); 4-char tokens keep the
+        # strict 0.85 (short words false-match too easily, e.g. 'audio'~'ajio').
+        cutoff = 0.8 if len(tok) >= 5 else 0.85
+        match = difflib.get_close_matches(tok, avail, n=1, cutoff=cutoff)
+        if match:
+            t = re.sub(rf"\b{re.escape(tok)}\b", match[0], t)
+    return t
+
+
+# Price-tier cues -> rupee bound. Two-digit minimum (\d{2,6}) dodges single-digit clock
+# times ('from 6pm'); the band form additionally requires both sides >= 50 so a time
+# span like '18:00-21:00' can't be misread as a price band.
+_PRICE_UNDER_RE = re.compile(r"(?:under|below|less than|upto|up to|max|maximum|within)\s*(?:rs\.?|inr|₹)?\s*(\d{2,6})")
+# Note: 'from'/'starting' are deliberately NOT price cues — the time parser owns 'from'
+# ('from 6pm'), so sharing it would let a price steer set a bogus time window.
+_PRICE_OVER_RE = re.compile(r"(?:over|above|more than|at least|minimum|min)\s*(?:rs\.?|inr|₹)?\s*(\d{2,6})")
+_PRICE_BAND_RE = re.compile(r"(?:rs\.?|inr|₹)?\s*(\d{2,6})\s*(?:-|to|–|and)\s*(?:rs\.?|inr|₹)?\s*(\d{2,6})")
+
+
+def _parse_price_window(t: str) -> tuple[int | None, int | None]:
+    """(min_price, max_price) rupee bounds from the directive, or None per side."""
+    mb = _PRICE_BAND_RE.search(t)
+    if mb:
+        a, b = int(mb.group(1)), int(mb.group(2))
+        if min(a, b) >= 50:   # both sides look like prices, not clock digits
+            return min(a, b), max(a, b)
+    lo = hi = None
+    mu = _PRICE_UNDER_RE.search(t)
+    if mu:
+        hi = int(mu.group(1))
+    mo = _PRICE_OVER_RE.search(t)
+    if mo:
+        lo = int(mo.group(1))
+    if lo is not None and hi is not None and lo > hi:
+        lo, hi = hi, lo   # contradictory bounds ('over 1500 under 500') -> a sane band
+    return lo, hi
+
+
+_TARGET_POSTS_RE = re.compile(
+    r"\b(?:post|publish|schedule|put out|send|do|run)\s+"
+    r"(?:only\s+|just\s+|about\s+|around\s+|roughly\s+)?(\d{1,3})\b"
+    r"|\b(\d{1,3})\s+posts?\b")
+
+
+def parse_target_posts(directive: str | None) -> int | None:
+    """Explicit post-count override from a quantity steer ('post 20 today', '30 posts'),
+    or None when the directive doesn't name a count. Bounded to 1..200 — a downstream
+    safety clamp still caps it against the channel's recent cadence. Parse the RAW
+    operator ask, NEVER the composed blob (which contains 'N posts already live' etc.)."""
+    if not directive:
+        return None
+    m = _TARGET_POSTS_RE.search(directive.lower())
+    if not m:
+        return None
+    n = int(m.group(1) or m.group(2))
+    return n if 1 <= n <= 200 else None
+
+
 def parse_directive_constraints(directive: str | None,
                                 available_merchants: list[str] | None = None,
                                 available_categories: list[str] | None = None) -> dict:
-    """Free-text directive -> {merchants, categories, after_min, before_min}. Each is
-    None when unconstrained. merchants/categories are populated ONLY when the directive
-    both names real feed values AND carries a restriction cue ('only'/'focus on'…)."""
-    out = {"merchants": None, "categories": None, "after_min": None, "before_min": None}
+    """Free-text directive -> {merchants, categories, exclude_merchants,
+    exclude_categories, after_min, before_min}. Each is None when unconstrained.
+    merchants/categories (the ALLOW-list) are populated only when the directive both
+    names real feed values AND carries a restriction cue ('only'/'focus on'…);
+    exclude_* (the DENY-list) when an exclusion cue ('avoid'/'no'/'skip'…) names one."""
+    out = {"merchants": None, "categories": None,
+           "exclude_merchants": None, "exclude_categories": None,
+           "after_min": None, "before_min": None,
+           "price_min": None, "price_max": None}
     if not directive:
         return out
-    t = directive.lower()
+    t = _canonicalize_merchants(directive.lower(), available_merchants)
+    avail_m, avail_c = available_merchants or [], available_categories or []
+    excl_m = {m for m in avail_m if _excluded(t, m)}
+    excl_c = {c for c in avail_c if _excluded(t, c)}
     if any(cue in t for cue in _RESTRICT_CUES):
-        named_m = [m for m in (available_merchants or []) if _mentions(t, m)]
+        # An include-cue mention that's ALSO flagged for exclusion (e.g. "post only
+        # electronics, no fashion") stays excluded — deny wins over a broad include.
+        named_m = [m for m in avail_m if _mentions(t, m) and m not in excl_m]
         if named_m:
             out["merchants"] = set(named_m)
-        named_c = [c for c in (available_categories or []) if _mentions(t, c)]
+        named_c = [c for c in avail_c if _mentions(t, c) and c not in excl_c]
         if named_c:
             out["categories"] = set(named_c)
+    out["exclude_merchants"] = excl_m or None
+    out["exclude_categories"] = excl_c or None
     out["after_min"], out["before_min"] = _parse_time_window(t)
+    out["price_min"], out["price_max"] = _parse_price_window(t)
     return out
 
 
@@ -116,18 +258,29 @@ def enforce_pair_constraints(slots: list[dict], constraints: dict,
     matching both) — slots are left as-is rather than silently faked."""
     allowed_m = constraints.get("merchants")
     allowed_c = constraints.get("categories")
-    if not allowed_m and not allowed_c:
+    excl_m = constraints.get("exclude_merchants")
+    excl_c = constraints.get("exclude_categories")
+    if not allowed_m and not allowed_c and not excl_m and not excl_c:
         return []
-    pairs = feed_pairs or {}
-    valid = [(m, c) for (m, c) in pairs
-             if (not allowed_m or m in allowed_m) and (not allowed_c or c in allowed_c)]
-    if not valid:
+
+    def _describe() -> str:
         want = []
         if allowed_m:
             want.append("merchants " + "/".join(sorted(allowed_m)))
         if allowed_c:
             want.append("categories " + "/".join(sorted(allowed_c)))
-        return [f"today's feed has no deals matching your steer ({' + '.join(want)}), "
+        if excl_m:
+            want.append("excluding merchant(s) " + "/".join(sorted(excl_m)))
+        if excl_c:
+            want.append("excluding categor(y/ies) " + "/".join(sorted(excl_c)))
+        return "; ".join(want)
+
+    pairs = feed_pairs or {}
+    valid = [(m, c) for (m, c) in pairs
+             if (not allowed_m or m in allowed_m) and (not allowed_c or c in allowed_c)
+             and (not excl_m or m not in excl_m) and (not excl_c or c not in excl_c)]
+    if not valid:
+        return [f"today's feed has no deals matching your steer ({_describe()}), "
                 "so slots were left unchanged"]
 
     valid_set = set(valid)
@@ -150,13 +303,34 @@ def enforce_pair_constraints(slots: list[dict], constraints: dict,
         sl["why"] = _steer_why(sl, "pinned to your steer")
         changed += 1
     if changed:
-        want = []
-        if allowed_m:
-            want.append("merchants " + "/".join(sorted(allowed_m)))
-        if allowed_c:
-            want.append("categories " + "/".join(sorted(allowed_c)))
-        return [f"{changed} slot(s) reassigned to honor your steer ({'; '.join(want)})"]
+        return [f"{changed} slot(s) reassigned to honor your steer ({_describe()})"]
     return []
+
+
+def apply_price_constraints(slots: list[dict], constraints: dict) -> list[str]:
+    """Set the operator's rupee bounds on LOOT (collection) slots, IN PLACE — jit_fill
+    fetches items within max_price/min_price for a price-tier loot. Single slots are left
+    untouched (a single is one specific deal, not a price-filtered board). Returns an
+    honest note when applied, and one caveat when the steer's price only fits loots but
+    the day has none."""
+    from src.services.generation.constants import is_loot_type
+
+    lo, hi = constraints.get("price_min"), constraints.get("price_max")
+    if lo is None and hi is None:
+        return []
+    loot = [sl for sl in slots if is_loot_type(sl.get("type"))]
+    for sl in loot:
+        if hi is not None:
+            sl["max_price"] = hi
+        if lo is not None:
+            sl["min_price"] = lo
+    band = (f"₹{lo}-₹{hi}" if lo is not None and hi is not None
+            else f"under ₹{hi}" if hi is not None else f"over ₹{lo}")
+    if not loot:
+        return [f"your price steer ({band}) applies to loot boards, but today's plan has "
+                "no loot slots — singles are single specific deals, not price-filtered, "
+                "so nothing was capped"]
+    return [f"{len(loot)} loot slot(s) capped to {band} per your steer"]
 
 
 def _demo() -> None:
@@ -177,6 +351,51 @@ def _demo() -> None:
     assert parse_directive_constraints("push electronics hard", merch, cats)["categories"] is None
     assert parse_directive_constraints("post only electronics deals", merch, cats)["categories"] \
         == {"electronics-and-gadgets"}
+    # EXCLUSION steers: "avoid ajio" denies ajio (no restrict cue needed).
+    ex = parse_directive_constraints("avoid ajio today", merch, cats)
+    assert ex["exclude_merchants"] == {"ajio"} and ex["merchants"] is None, ex
+    # mixed: include electronics but exclude fashion in one directive.
+    mix = parse_directive_constraints("post only electronics deals, no fashion", merch, cats)
+    assert mix["categories"] == {"electronics-and-gadgets"}, mix
+    assert mix["exclude_categories"] == {"fashion-and-lifestyle"}, mix
+    # enforcement honors the deny-list: an ajio slot must move OFF ajio.
+    ex_slots = [{"merchant": "ajio", "theme": "fashion-and-lifestyle", "why": "x"},
+                {"merchant": "amazon", "theme": "electronics-and-gadgets", "why": "x"}]
+    note = enforce_pair_constraints(ex_slots, {"exclude_merchants": {"ajio"}}, feed)
+    assert all(sl["merchant"] != "ajio" for sl in ex_slots), ex_slots
+    assert note and "excluding" in note[0], note
+
+    # ALIAS/typo canonicalization: 'amzn' and a misspelling both resolve to feed slugs.
+    assert parse_directive_constraints("focus on amzn only", merch, cats)["merchants"] == {"amazon"}
+    assert parse_directive_constraints("avoid flipkrt", merch, cats)["exclude_merchants"] == {"flipkart"}
+
+    # PRICE steers: under / over / band; clock spans are NOT misread as prices.
+    assert _parse_price_window("only deals under ₹1000") == (None, 1000)
+    assert _parse_price_window("nothing over rs 500") == (500, None)
+    assert _parse_price_window("show ₹500-₹1500 loots") == (500, 1500)
+    assert _parse_price_window("post only in the evening 18:00-21:00") == (None, None)
+    # contradictory bounds normalize to a sane band (min<=max), never an impossible range.
+    assert _parse_price_window("over 1500 under 500") == (500, 1500)
+    # price applies to loot slots only; singles untouched.
+    pslots = [{"type": "collection", "max_price": None, "min_price": None},
+              {"type": "single", "max_price": None, "min_price": None}]
+    pnote = apply_price_constraints(pslots := pslots, {"price_min": None, "price_max": 999})
+    assert pslots[0]["max_price"] == 999 and pslots[1]["max_price"] is None, pslots
+    assert pnote and "999" in pnote[0], pnote
+
+    # PAUSE intents recognized; a content exclusion is NOT a pause.
+    assert parse_pause("pause posting") and parse_pause("don't post today")
+    assert parse_pause("stop") and parse_pause("no posts today")
+    assert not parse_pause("don't post electronics")   # exclusion, not a pause
+    assert not parse_pause("focus on amazon")
+
+    # QUANTITY steers: explicit count parsed; a plain lean has none.
+    assert parse_target_posts("post 20 today") == 20
+    assert parse_target_posts("30 posts please") == 30
+    assert parse_target_posts("push electronics harder") is None
+    # a bare number without a post-verb/noun is ignored (avoids matching '6pm' etc.)
+    assert parse_target_posts("focus after 6pm") is None
+
     # time windows: word + explicit clock, tighter side wins.
     a, b = _parse_time_window("post only in the evening, 6pm onwards")
     assert a == 18 * 60 and b == 24 * 60, (a, b)

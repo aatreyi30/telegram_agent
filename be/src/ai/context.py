@@ -120,16 +120,24 @@ def post_type_performance_range(s: Session, start, end) -> list[dict]:
     out = []
     for descriptor, items in groups.items():
         vpd = []
+        raw_views = []
         for posted_at, views in items:
             if views is None or posted_at is None:
                 continue
+            raw_views.append(views)
             pa = posted_at if posted_at.tzinfo else posted_at.replace(tzinfo=timezone.utc)
             age = max((now - pa).total_seconds() / 86400.0, 1.0)
             vpd.append(views / age)
+        # Real per-post mean of raw view counts in THIS window (the intuitive "avg
+        # views/post"), alongside the age-confounded per-day velocity. Both keys mirror
+        # the snapshot's `post_type_performance` shape so callers can swap window-scoped
+        # for all-time freely (the Plan page's deal-type table now uses this per date).
+        avg_vpp = round(statistics.fmean(raw_views), 1) if raw_views else None
         out.append({
             "post_type": descriptor, "posts": len(items),
             "share": round(len(items) / total, 3),
             "avg_views_per_day": round(statistics.fmean(vpd), 1) if vpd else None,
+            "avg_views": avg_vpp, "avg_views_per_post": avg_vpp,
         })
     out.sort(key=lambda r: (r["avg_views_per_day"] or -1), reverse=True)
     for i, r in enumerate(out):

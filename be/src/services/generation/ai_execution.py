@@ -514,7 +514,7 @@ def _rescale_slot_counts(plan: dict, target_total: int,
 def persist_ai_plan(
     s: Session, result: dict,
     recent_median: int | None = None, recent_max_30d: int | None = None,
-    steered: bool = False,
+    steered: bool = False, now_min: int | None = None,
 ) -> CampaignPlan | None:
     """``recent_median``/``recent_max_30d`` are the same clamp bounds
     ``daily_brief`` uses for DISPLAY (``ctx.clamp_recommended_posts``) — passing
@@ -586,14 +586,27 @@ def persist_ai_plan(
         _cons = plan.pop("_directive_constraints", None)
         _after = _before = None
         if _cons:
-            from src.services.generation.directives import enforce_pair_constraints
+            from src.services.generation.directives import (
+                apply_price_constraints, enforce_pair_constraints)
             _notes = enforce_pair_constraints(_slots, _cons, result.get("feed_pairs"))
+            # Price bounds go on loot slots AFTER merchant/category pinning (which can
+            # change a slot's type mix via reassignment) so every loot the day ends with
+            # gets the cap.
+            _notes += apply_price_constraints(_slots, _cons)
             if _notes:
                 plan["watch"] = ((plan.get("watch") or "") + " " + " ".join(_notes)).strip()
             _after, _before = _cons.get("after_min"), _cons.get("before_min")
         if _after is not None or _before is not None:
             _lo = _after if _after is not None else _ACTIVE_START_MIN
             _hi = (_before - 1) if _before is not None else _ACTIVE_END_MIN
+            # Planning TODAY (now_min set): if the window still has room after "now",
+            # floor placement at now so slots aren't spread into already-past minutes and
+            # then dropped by the mid-day splice (which thinned the plan). If the window
+            # ENDS before now (_hi < now_min) it's fully elapsed — leave it as-is so the
+            # slots land in the past, the splice drops them all, and regenerate_daily's
+            # honest "that window already passed today" note fires.
+            if now_min is not None and _hi >= now_min:
+                _lo = max(_lo, now_min)
             plan["post_slots"] = _place_in_window(_slots, _lo, _hi)
         else:
             _spread_by_performance(_slots, _hw)

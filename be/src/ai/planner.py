@@ -830,11 +830,16 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         from src.services.generation.directives import parse_directive_constraints
         _cons = parse_directive_constraints(
             directive, plan_ctx.get("available_merchants"), plan_ctx.get("available_categories"))
-        if any(_cons.get(k) is not None for k in ("merchants", "categories", "after_min", "before_min")):
+        if any(_cons.get(k) is not None for k in ("merchants", "categories",
+               "exclude_merchants", "exclude_categories", "after_min", "before_min",
+               "price_min", "price_max")):
             plan["_directive_constraints"] = {
                 "merchants": sorted(_cons["merchants"]) if _cons["merchants"] else None,
                 "categories": sorted(_cons["categories"]) if _cons["categories"] else None,
-                "after_min": _cons["after_min"], "before_min": _cons["before_min"]}
+                "exclude_merchants": sorted(_cons["exclude_merchants"]) if _cons["exclude_merchants"] else None,
+                "exclude_categories": sorted(_cons["exclude_categories"]) if _cons["exclude_categories"] else None,
+                "after_min": _cons["after_min"], "before_min": _cons["before_min"],
+                "price_min": _cons["price_min"], "price_max": _cons["price_max"]}
     return {"available": True, "digest": digest, "plan": plan, "facts": facts,
             "feed_pairs": _feed_pair_counts}
 
