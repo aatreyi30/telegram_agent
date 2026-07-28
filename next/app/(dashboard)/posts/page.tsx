@@ -28,10 +28,10 @@ import type { DraftItem, QueueItem, StrategyRationale } from "@/types/api";
 import { Plus, Edit, Trash2 } from "lucide-react";
 
 const TABS = [
+  { value: "all", label: "All" },
   { value: "queued", label: "Queued" },
   { value: "published", label: "Published" },
   { value: "blocked", label: "Blocked" },
-  { value: "all", label: "All" },
 ] as const;
 
 /** Normalized shape both DraftItem and QueueItem map onto, so one row/sheet renderer
