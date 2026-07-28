@@ -28,7 +28,7 @@ WEEKLY_PLAN_SYSTEM = (
     "posts/views and name specific days from WEEK_TRAJECTORY (e.g. 'the strongest day was "
     "<date> at <avg_views_per_post> views/post'), copied VERBATIM; do NOT compute a "
     "posts-per-day average or any percentage yourself. A day flagged "
-    "views_still_maturing=true (today/yesterday) has posts that are STILL accumulating "
+    "views_still_maturing=true (one of the most recent ~3-4 days) has posts STILL accumulating "
     "views — its avg is artificially low; NEVER read it as a dip, a drop, or a concern, "
     "and don't compare it against older, fully-matured days. Then cover which "
     "POST TYPE (loot vs single) and which MERCHANTS pulled the most views/engagement. When "

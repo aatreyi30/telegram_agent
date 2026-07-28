@@ -454,7 +454,7 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
             <TableCell className="tabular-nums">
               {Math.round(d.views_avg).toLocaleString()}
               {d.views_maturing && (
-                <span className="ml-1 text-xs text-muted-foreground" title="Posts from today/yesterday are still accumulating views — this average will rise and isn't a dip.">
+                <span className="ml-1 text-xs text-muted-foreground" title="Posts from the last few days are still accumulating views — this average will keep rising and isn't a dip.">
                   · still rising
                 </span>
               )}

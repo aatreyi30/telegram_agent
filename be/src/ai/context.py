@@ -338,13 +338,13 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
         # The real 7-day per-day series (posts + views) — the SAME numbers the weekly UI
         # shows — so the narrative grounds on actual days ("37 posts Wed, 542 views")
         # instead of computing a fabricated "43 posts/day". `views_still_maturing` flags
-        # today/yesterday, whose posts are still accumulating views (their avg understates
+        # the last ~3-4 days, whose posts are still accumulating views (their avg understates
         # and is NOT a real dip); the narrative must not read those as a performance drop.
         out["week_trajectory"] = [
             {"date": d["date"], "posts": d["posts"],
              "total_views": round(d.get("views") or 0),
              "avg_views_per_post": round(d.get("views_avg") or 0),
-             "views_still_maturing": bool(end_day) and (end_day - _date.fromisoformat(d["date"])).days <= 1}
+             "views_still_maturing": bool(end_day) and (end_day - _date.fromisoformat(d["date"])).days <= 3}
             for d in traj["days"]]
         out["week_totals"] = {
             "posts": sum(d["posts"] for d in traj["days"]),
