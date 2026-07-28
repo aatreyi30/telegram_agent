@@ -21,7 +21,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { useQueryParams } from "@/lib/use-search-params";
 import { cn } from "@/lib/utils";
 import { postTypeLabel, merchantLabel, categoryLabel, titleCase, statusLabel, isoSlash } from "@/lib/format";
-import { useRegenerateDailyPlan, useRegenerateWeeklyPlan } from "@/queries/mutations";
+import { useRegenerateDailyPlan, useRegenerateWeeklyPlan, useRevertDailyPlan } from "@/queries/mutations";
 import { useDailyBrief, useLatestRetro, useWeeklyBrief } from "@/queries/queries";
 import type {
   DailyBrief, DailyPlanToday, DailySlot, PlanRisk, RetroLatest, WeeklyBrief,
@@ -46,11 +46,17 @@ function priceIntent(s: DailySlot): string {
  * steering the past has no effect. */
 function SteerPanel({
   operatorDirective, canRegenerate, isPending, onRegenerate,
+  canRevert, revertPending, onRevert,
 }: {
   operatorDirective?: string | null;
   canRegenerate?: boolean;
   isPending: boolean;
   onRegenerate: (directive: string) => void;
+  // Revert (undo the last steer) is daily-only and shown only when a pre-steer
+  // snapshot exists — omitted by the weekly card.
+  canRevert?: boolean;
+  revertPending?: boolean;
+  onRevert?: () => void;
 }) {
   const [directive, setDirective] = useState(operatorDirective || "");
   useEffect(() => setDirective(operatorDirective || ""), [operatorDirective]);
@@ -77,10 +83,21 @@ function SteerPanel({
             This day has elapsed — regenerating it has no effect.
           </span>
         )}
+        {canRevert && onRevert && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={disabled || isPending || revertPending}
+            title="Restore the plan from before the last steer"
+            onClick={onRevert}
+          >
+            {revertPending ? "Reverting…" : "Revert steer"}
+          </Button>
+        )}
         <Button
           size="sm"
           variant="outline"
-          disabled={disabled || isPending}
+          disabled={disabled || isPending || revertPending}
           title={disabled ? "This day has elapsed" : undefined}
           onClick={() => onRegenerate(directive.trim())}
         >
@@ -217,6 +234,7 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
 function TodayCard({ brief }: { brief: DailyBrief }) {
   const t: DailyPlanToday = brief.today;
   const regenerate = useRegenerateDailyPlan();
+  const revert = useRevertDailyPlan();
   return (
     <Card>
       <CardHeader><CardTitle className="text-base">Today — {isoSlash(brief.date)}</CardTitle></CardHeader>
@@ -403,6 +421,9 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
           onRegenerate={(directive) =>
             regenerate.mutate({ date: brief.date, directive: directive || undefined })
           }
+          canRevert={brief.can_revert}
+          revertPending={revert.isPending}
+          onRevert={() => revert.mutate({ date: brief.date })}
         />
 
       </CardContent>

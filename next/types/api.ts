@@ -370,6 +370,7 @@ export interface DailyBrief {
   upcoming_event: UpcomingEventBrief | null;
   operator_directive?: string | null;
   can_regenerate?: boolean;
+  can_revert?: boolean;
 }
 
 export interface WeeklyBriefDay {

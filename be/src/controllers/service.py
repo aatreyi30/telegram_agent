@@ -1129,6 +1129,10 @@ def daily_brief(date: str | None = None, directive: str | None = None,
             "upcoming_event": evt,
             "operator_directive": plan_row.operator_directive if plan_row is not None else None,
             "can_regenerate": day >= ist_today(),
+            # True when a pre-steer snapshot exists to undo to — the FE shows a "Revert" action.
+            "can_revert": (day >= ist_today()
+                           and bool((plan_row.blueprint or {}).get("_pre_steer"))
+                           if plan_row is not None else False),
         }
 
 
@@ -1517,6 +1521,20 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         # fails — otherwise a failed regen (e.g. AI at quota) destroys the good plan.
         old_snap = ({c.name: getattr(old, c.name) for c in CampaignPlan.__table__.columns
                      if c.name != "id"} if old is not None else None)
+        # A JSON-safe snapshot of the PRE-steer plan, stored on the new row so the operator
+        # can REVERT to exactly this plan (no regeneration, no AI cost). Only the display/
+        # restore fields (all JSON-safe); target_date/plan_type/version are constants on
+        # rebuild, generated_at is stamped fresh. The nested blueprint's own `_pre_steer` is
+        # stripped so undo is one level deep and snapshots can't nest unboundedly.
+        pre_steer_snap = None
+        if old is not None:
+            _obp = {k: v for k, v in (old.blueprint or {}).items() if k != "_pre_steer"}
+            pre_steer_snap = {
+                "title": old.title, "blueprint": _obp,
+                "expected_outcome": old.expected_outcome, "confidence": old.confidence,
+                "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
+                "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
+                "report_ids": old.report_ids, "operator_directive": old.operator_directive}
         trace = list((old.blueprint or {}).get("steering_history") or []) if old else []
         # For a mid-day steer of TODAY, freeze what already went out: slots whose IST
         # time has passed are already posted (immutable). Capture them so (a) the AI is
@@ -1579,6 +1597,9 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             # success — persist the RAW trace so the next regeneration accumulates it;
             # keep operator_directive as just the latest raw ask (not the composed blob).
             _bp = {**(row.blueprint or {}), "steering_history": trace}
+            # Stash the pre-steer plan so a "Revert" restores it exactly (one level of undo).
+            if pre_steer_snap is not None:
+                _bp["_pre_steer"] = pre_steer_snap
             # Splice the already-posted PAST slots back over the fresh plan: a mid-day
             # steer only rewrites the remaining day; posts that already went out stay
             # exactly as they were. Also reflect it in the response the UI renders now.
@@ -1618,6 +1639,64 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         note = f"daily {day.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
         record_ai_output("plan_regenerated", note, get_settings().ai_model)
     return result
+
+
+def revert_daily(date: str | None = None) -> dict:
+    """Undo the last steer/regenerate for ``date`` — restore the plan that existed BEFORE
+    it, from the snapshot `regenerate_daily` stashed under blueprint._pre_steer. No AI call:
+    it rebuilds the exact prior row. One level of undo. Refuses when there's no snapshot (the
+    day was never steered) or the day has already elapsed."""
+    from datetime import date as date_cls, datetime, timezone
+    from sqlalchemy import delete
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    from src.services.ai_outputs import record_ai_output
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_today
+
+    with session_scope() as s:
+        day = None
+        if date:
+            try:
+                day = date_cls.fromisoformat(date)
+            except ValueError:
+                day = None
+        if day is None:
+            day = latest_owned_date(s)
+        if day is None:
+            return {"available": False, "reason": "No owned posts yet."}
+        if day < ist_today():
+            return {"available": False,
+                    "reason": "This day has already elapsed — reverting it has no effect."}
+        cur = s.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day).order_by(CampaignPlan.generated_at.desc()))
+        snap = (cur.blueprint or {}).get("_pre_steer") if cur is not None else None
+        if not snap:
+            return {"available": False,
+                    "reason": "No earlier plan to revert to — this day hasn't been steered."}
+        # Replace the current steered row with an exact rebuild of the pre-steer one.
+        s.execute(delete(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day))
+        s.add(CampaignPlan(
+            plan_type=PlanType.DAILY, campaign_version=CAMPAIGN_VERSION,
+            target_date=day, generated_at=datetime.now(timezone.utc),
+            title=snap.get("title") or f"AI day plan {day.isoformat()}",
+            blueprint=snap.get("blueprint") or {},
+            expected_outcome=snap.get("expected_outcome"),
+            confidence=snap.get("confidence"),
+            is_ai_generated=bool(snap.get("is_ai_generated")),
+            ai_digest=snap.get("ai_digest") or "",
+            cited_numbers=snap.get("cited_numbers") or [],
+            factcheck_status=snap.get("factcheck_status"),
+            report_ids=snap.get("report_ids") or [],
+            operator_directive=snap.get("operator_directive")))
+        record_ai_output("plan_reverted",
+                         f"daily {day.isoformat()} — reverted to pre-steer plan",
+                         get_settings().ai_model)
+    return daily_brief(date=day.isoformat())
 
 
 def regenerate_weekly(end: str | None = None, directive: str | None = None) -> dict:
