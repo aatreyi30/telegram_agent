@@ -346,6 +346,17 @@ def full_briefing_context(s: Session, weekly: bool = False, end_day=None) -> dic
         traj = posting_trajectory(s, days=7, end_day=end_day)
         week_start = _date.fromisoformat(traj["days"][0]["date"]) if traj["days"] else None
         end_day = _date.fromisoformat(traj["days"][-1]["date"]) if traj["days"] else None
+        # Window the per-post type benchmark to the same 30 days the DAILY plan uses, so the
+        # weekly narrative's "single X vs loot Y per post" matches the daily table (both
+        # windowed) instead of the all-time snapshot — which said 779/569 while the daily
+        # showed 526/518, contradicting each other on the same metric.
+        if end_day is not None:
+            from datetime import timedelta as _td
+
+            from src.services.analytics.periods import ist_day_bounds_utc as _ib
+            _pw = post_type_performance_range(s, _ib(end_day - _td(days=29))[0], _ib(end_day)[1])
+            if _pw:
+                out["post_type_performance"] = _pw
         # The real 7-day per-day series (posts + views) — the SAME numbers the weekly UI
         # shows — so the narrative grounds on actual days ("37 posts Wed, 542 views")
         # instead of computing a fabricated "43 posts/day". `views_still_maturing` flags

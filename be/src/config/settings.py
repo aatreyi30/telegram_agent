@@ -60,9 +60,10 @@ def _ai_provider_kwargs() -> dict:
     OpenAI key is set (else groq); AI_MODEL overrides the per-provider default."""
     openai_key = _get("OPENAI_API_KEY")
     provider = (_get("AI_PROVIDER") or ("openai" if openai_key else "groq")).lower()
-    # gpt-4o (not -mini): the daily/weekly plan is generated once per day and cached, so
-    # the cost of a stronger model is negligied on those). Override per-deploy with AI_MODEL.
-    default_model = "gpt-4o" if provider == "openai" else "llama-3.3-70b-versatile"
+    # gpt-4o-mini: the known-good plan model. gpt-4o was tried for stronger prompt-
+    # following but its plan JSON failed our parser (fell back every run), so we stay
+    # on -mini until that's diagnosed. Override with AI_MODEL to retry another model.
+    default_model = "gpt-4o-mini-2024-07-18" if provider == "openai" else "llama-3.3-70b-versatile"
     return {
         "ai_provider": provider,
         "groq_api_key": _get("GROQ_API_KEY"),
