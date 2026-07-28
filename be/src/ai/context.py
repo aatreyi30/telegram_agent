@@ -564,22 +564,52 @@ def latest_retro(s: Session) -> dict | None:
 def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_day) -> dict[str, dict]:
     """Per-IST-day joined/left/net follower counts for `channel_id` over
     [start_day, end_day], keyed by ISO date — drops in alongside `posting_trajectory`'s
-    day series for the weekly view. Days with no `DailySubscriberStat` row are simply
-    absent from the result (the caller decides the gap-fill default)."""
+    day series for the weekly view. Days with no delta are simply absent (the caller
+    gap-fills to zero).
+
+    Subscriber counts are captured sparsely (only when a snapshot lands), so a row's
+    net is really the change since the PREVIOUS snapshot — which can be many days back.
+    Dumping that whole delta on the snapshot day reads as a fake one-day spike (a
+    fortnight's growth shown on a Friday). So when a snapshot follows a gap (>1 day), we
+    SPREAD its joined/left/net evenly across the gap days — but only the gap days INSIDE
+    this window (never before ``start_day``), so the view stays a week and every figure
+    it shows belongs to the week. A daily capture (gap == 1) or the first-ever snapshot
+    is placed as-is. ponytail: even spread + int rounding can drift the weekly net by a
+    couple; the counts are already approximate (only net between snapshots is exact)."""
+    from datetime import timedelta
+
     from src.db.models_growth_snapshot import DailySubscriberStat
 
     if channel_id is None:
         return {}
+    # Include snapshots BEFORE start_day too, so the first in-window snapshot knows how
+    # far back its gap reaches (and thus that it needs spreading, clipped to the window).
     rows = s.scalars(
         select(DailySubscriberStat)
         .where(DailySubscriberStat.channel_id == channel_id,
-               DailySubscriberStat.stat_date >= start_day,
                DailySubscriberStat.stat_date <= end_day)
+        .order_by(DailySubscriberStat.stat_date)
     ).all()
-    return {r.stat_date.isoformat(): {"joined": r.subs_joined or 0,
-                                       "left": r.subs_left or 0,
-                                       "net": r.subs_net or 0}
-            for r in rows}
+    out: dict[str, dict] = {}
+    prev = None
+    for r in rows:
+        d = r.stat_date
+        if d < start_day:
+            prev = d
+            continue
+        j, l, n = (r.subs_joined or 0), (r.subs_left or 0), (r.subs_net or 0)
+        if prev is not None and (d - prev).days > 1:
+            span_start = max(prev + timedelta(days=1), start_day)  # never before the window
+            gap = (d - span_start).days + 1
+            cur = span_start
+            while cur <= d:
+                out[cur.isoformat()] = {"joined": round(j / gap), "left": round(l / gap),
+                                        "net": round(n / gap)}
+                cur += timedelta(days=1)
+        else:  # daily capture or first-ever snapshot — a genuine single-day figure
+            out[d.isoformat()] = {"joined": j, "left": l, "net": n}
+        prev = d
+    return out
 
 
 # Min paired (posts + follower delta) days before the style→follower correlation is
