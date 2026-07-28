@@ -1629,10 +1629,8 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             return {"available": False,
                     "reason": "This day has already elapsed — regenerating it has no effect."}
 
-        # Capture the FULL steering trace before deleting the old plan, so repeated
-        # regenerations accumulate (the AI sees every prior ask, not just the latest),
-        # and gather today's available merchants so it can explain a request it can't
-        # satisfy (e.g. "diversify merchants" when the feed is single-merchant).
+        # Load the current plan (for the pre-steer snapshot + mid-day freeze below). Each
+        # steer is independent now, so we do NOT accumulate a steering history.
         old = s.scalar(select(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.DAILY,
@@ -1655,7 +1653,6 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
                 "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
                 "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
                 "report_ids": old.report_ids, "operator_directive": old.operator_directive}
-        trace = list((old.blueprint or {}).get("steering_history") or []) if old else []
         # For a mid-day steer of TODAY, freeze what already went out: slots whose IST
         # time has passed are already posted (immutable). Capture them so (a) the AI is
         # told not to replan them, and (b) we splice them back over the fresh plan so a
@@ -1665,27 +1662,30 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         _now_ist = to_ist(_dt.now(_tz.utc))
         now_min = (_now_ist.hour * 60 + _now_ist.minute) if day == ist_today() else None
         past_slots, _ = _past_future_split((old.blueprint or {}).get("post_slots") if old else [], now_min)
-        if directive:
-            trace.append(directive)
-        avail = sorted({d.get("merchant_key") for d in ctx.available_deals(s, limit=30)
-                        if d.get("merchant_key")})
         s.execute(delete(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.DAILY,
             CampaignPlan.target_date == day,
         ))
 
-    # Compose a directive that carries the whole steering history + what's actually
-    # available, so the AI addresses the repeated ask instead of silently repeating.
+    # Each steer is INDEPENDENT: the plan is restructured from THIS directive ALONE, never
+    # an accumulation of past asks. Accumulating them made an old, unrelated steer (e.g.
+    # "deals under ₹1000") keep re-applying to a new one (e.g. "make it 30"). Both the
+    # prompt AND the hard-constraint parsing now see ONLY the latest directive; to combine
+    # asks the operator writes one combined directive.
     composed = directive
-    if len(trace) > 1:  # only when there ARE prior asks — the "you've been asked N times" framing
-        composed = (
-            f"You have been asked to adjust THIS day's plan {len(trace)} time(s). Address the "
-            "LATEST request and acknowledge the earlier ones — do NOT silently reproduce the "
-            "same plan.\nSTEERING HISTORY (oldest first):\n"
-            + "\n".join(f"  {i + 1}. {d}" for i, d in enumerate(trace))
-            + f"\n\nMerchants with deals in today's feed: {avail or 'none'}."
-        )
+    # The desired post count from the RAW latest ask (not the composed blob below, which
+    # carries "N posts already live"). Threaded as the target cadence + used for the note.
+    from src.services.generation.directives import parse_target_posts
+    _target = parse_target_posts(directive)
+    # Mid-day you can't un-send what already went out, so a request to REDUCE below the
+    # already-posted count can't be honored today — say so plainly instead of showing a
+    # lower headline over a higher real count.
+    if _target and past_slots and _target < len(past_slots):
+        composed = (composed or "") + (
+            f"\n\nNOTE: {len(past_slots)} posts already went out today — MORE than the {_target} "
+            f"requested, and they can't be un-sent. State plainly that today already exceeded "
+            f"{_target}; the lower count applies to FUTURE days, not retroactively.")
     # Tell the AI what already went out today so it plans the REST of the day coherently
     # (doesn't re-suggest a merchant/theme just used, and knows how many slots remain)
     # rather than replanning the whole day blind.
@@ -1699,10 +1699,6 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             "already went out and can't be changed. If my request only affects times/windows that "
             "have ALREADY passed today (e.g. asking to change the morning when it's afternoon), say "
             "so plainly — there's nothing left to reschedule for that window today.")
-    # Parse an explicit post-count from the RAW operator ask (never the composed blob,
-    # which contains 'N posts already live') and thread it as the target cadence.
-    from src.services.generation.directives import parse_target_posts
-    _target = parse_target_posts(directive)
     result = daily_brief(date=day.isoformat(), directive=composed, target_posts=_target)
     # Success is measured by an actual AI plan being PERSISTED — not result["available"]
     # (daily_brief still returns available=True with the deterministic fallback when the
@@ -1714,9 +1710,9 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             CampaignPlan.target_date == day,
             CampaignPlan.is_ai_generated == True).order_by(CampaignPlan.generated_at.desc()))  # noqa: E712
         if row is not None:
-            # success — persist the RAW trace so the next regeneration accumulates it;
-            # keep operator_directive as just the latest raw ask (not the composed blob).
-            _bp = {**(row.blueprint or {}), "steering_history": trace}
+            # Each steer stands alone now (no steering_history accumulation) — operator_directive
+            # is just the latest raw ask, which is what the FE shows as "Steered by".
+            _bp = {**(row.blueprint or {})}
             # Stash the pre-steer plan so a "Revert" restores it exactly (one level of undo).
             if pre_steer_snap is not None:
                 _bp["_pre_steer"] = pre_steer_snap

@@ -179,23 +179,29 @@ def _parse_price_window(t: str) -> tuple[int | None, int | None]:
 
 
 _TARGET_POSTS_RE = re.compile(
-    r"\b(?:post|publish|schedule|put out|send|do|run)\s+"
+    r"\b(?:post|publish|schedule|put out|send|do|run|make it|set to|change to|reduce to|"
+    r"increase to|bump to|down to|up to)\s+"
     r"(?:only\s+|just\s+|about\s+|around\s+|roughly\s+)?(\d{1,3})\b"
     r"|\b(\d{1,3})\s+posts?\b")
+# A number the operator is moving AWAY from ("don't want 39", "not 39", "instead of 39")
+# is the OLD count, never the target — exclude it.
+_REJECTED_COUNT_RE = re.compile(
+    r"(?:don'?t\s+want|do\s+not\s+want|instead\s+of|rather\s+than|not)\s+(\d{1,3})")
 
 
 def parse_target_posts(directive: str | None) -> int | None:
-    """Explicit post-count override from a quantity steer ('post 20 today', '30 posts'),
-    or None when the directive doesn't name a count. Bounded to 1..200 — a downstream
-    safety clamp still caps it against the channel's recent cadence. Parse the RAW
-    operator ask, NEVER the composed blob (which contains 'N posts already live' etc.)."""
+    """The desired post count from a quantity steer, or None when none is named. Handles
+    a correction like 'I don't want 39, make it 30' — the REJECTED number (39) is dropped
+    and the LAST remaining candidate wins (a correction comes later in the sentence).
+    Bounded to 1..200; a downstream safety clamp still caps it against recent cadence.
+    Parse the RAW ask, NEVER the composed blob ('N posts already live')."""
     if not directive:
         return None
-    m = _TARGET_POSTS_RE.search(directive.lower())
-    if not m:
-        return None
-    n = int(m.group(1) or m.group(2))
-    return n if 1 <= n <= 200 else None
+    t = directive.lower()
+    rejected = {int(x) for x in _REJECTED_COUNT_RE.findall(t)}
+    cands = [int(g1 or g2) for g1, g2 in _TARGET_POSTS_RE.findall(t)]
+    cands = [n for n in cands if 1 <= n <= 200 and n not in rejected]
+    return cands[-1] if cands else None
 
 
 def parse_directive_constraints(directive: str | None,
@@ -395,6 +401,10 @@ def _demo() -> None:
     assert parse_target_posts("push electronics harder") is None
     # a bare number without a post-verb/noun is ignored (avoids matching '6pm' etc.)
     assert parse_target_posts("focus after 6pm") is None
+    # a CORRECTION drops the rejected number and takes the target (not the first number).
+    assert parse_target_posts("i don't want 39 posts, make it 30, on the new 30 posts") == 30
+    assert parse_target_posts("reduce to 15") == 15
+    assert parse_target_posts("not 40 — set to 25") == 25
 
     # time windows: word + explicit clock, tighter side wins.
     a, b = _parse_time_window("post only in the evening, 6pm onwards")
