@@ -961,12 +961,21 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
                if traj.get("lifetime_baseline") else "")
         )
 
+        from sqlalchemy import or_
         cached = s.scalars(
             select(CampaignPlan)
             .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
                    CampaignPlan.plan_type == PlanType.DAILY,
                    CampaignPlan.target_date == day,
-                   CampaignPlan.is_ai_generated == True)  # noqa: E712
+                   CampaignPlan.is_ai_generated == True,  # noqa: E712
+                   # Never cache-serve a deterministic FALLBACK row: it was written
+                   # because the AI was down at the time, so serving it freezes the
+                   # whole day on the outage. Skipping it means the next page load
+                   # re-attempts the AI and auto-heals once it (or the groq failover)
+                   # is back. ponytail: re-attempts per refresh during an outage — a
+                   # model call each; fine, it's the "keep trying" behavior we want.
+                   or_(CampaignPlan.factcheck_status.is_(None),
+                       CampaignPlan.factcheck_status != "fallback"))
             .order_by(CampaignPlan.generated_at.desc())
         ).first()
 

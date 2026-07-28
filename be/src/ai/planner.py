@@ -718,7 +718,13 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         )
     try:
         user = f"DATA:\n{to_json(plan_ctx)}{recon_note}{directive_note}"
-        raw = ai.complete(user, system_extra=_DAILY_PLAN_SYSTEM, max_tokens=3200,
+        # The prompt requires ONE JSON object PER POST, each with a 3-4 sentence `why`
+        # (~180 output tokens/slot). A fixed 3200-token cap truncated the JSON array for
+        # high-cadence days (e.g. 39 posts -> unparseable / too-few-slots -> fallback
+        # EVERY time). Fund the budget from the actual slot count so any cadence fits.
+        _n_slots = plan_ctx.get("recommended_posts") or 10
+        _budget = min(max(3200, _n_slots * 180 + 1500), 16000)
+        raw = ai.complete(user, system_extra=_DAILY_PLAN_SYSTEM, max_tokens=_budget,
                           trace_call="day_plan")
     except AIUnavailable as e:
         # G6 — never go silent: the channel still needs slots even when the AI is
