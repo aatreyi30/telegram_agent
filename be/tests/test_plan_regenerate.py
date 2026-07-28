@@ -119,7 +119,10 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
     assert second["available"] is True
     assert second["operator_directive"] == directive
     assert len(calls) == 2
-    assert calls[1] == directive  # the directive reached generate_day_plan
+    # the raw directive reached generate_day_plan (now carried inside the composed
+    # prompt, which also appends the already-posted-today context when the day is
+    # mid-flight — so it's contained, not necessarily equal).
+    assert directive in calls[1]
 
     with session_scope() as s:
         rows = s.scalars(select(CampaignPlan).where(

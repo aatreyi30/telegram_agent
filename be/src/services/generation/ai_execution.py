@@ -201,6 +201,35 @@ def _humanize_fire_times(slots: list[dict]) -> list[dict]:
     return sorted(deduped, key=lambda s: (_slot_minute(s) is None, _slot_minute(s) or 0))
 
 
+def _place_in_window(slots: list[dict], lo: int, hi: int) -> list[dict]:
+    """Distribute ALL slots evenly across [lo, hi] minutes — a HARD operator time
+    window ("post only in the evening / 6pm onwards"). Each slot lands in its own
+    sub-cell nudged off the round grid by a deterministic per-slot hash, so the result
+    is unique, chronological, inside the window, and stable across reopens. Overrides
+    the performance-weighted spread because the operator asked for a specific window."""
+    n = len(slots)
+    if n == 0:
+        return slots
+    lo, hi = max(lo, 0), min(hi, 24 * 60 - 1)
+    if hi <= lo:
+        hi = min(lo + n, 24 * 60 - 1)
+    span = hi - lo + 1
+    if span < n:  # window tighter than one slot/min — spill just past it, keep uniqueness
+        hi, span = lo + n - 1, n
+    ordered = sorted(slots, key=lambda s: (_slot_minute(s) is None, _slot_minute(s) or 0))
+    for i, sl in enumerate(ordered):
+        cell_lo = lo + span * i // n
+        cell_hi = max(lo + span * (i + 1) // n - 1, cell_lo)
+        h = int.from_bytes(hashlib.md5(
+            f"{sl.get('type')}|{sl.get('merchant')}|{sl.get('theme')}|{i}".encode()
+        ).digest()[:4], "big")
+        m = cell_lo + (h % (cell_hi - cell_lo + 1))
+        if m % 5 == 0 and cell_hi > cell_lo:  # keep it off the round grid
+            m = m + 1 if m < cell_hi else m - 1
+        sl["time_ist"] = f"{m // 60:02d}:{m % 60:02d}"
+    return ordered
+
+
 def _dedupe_fire_times(slots: list[dict]) -> list[dict]:
     """Guarantee no two per-post slots fire on the same minute. The model — or the
     upstream adjacency repair — can leave two slots at the same ``time_ist``; only
@@ -490,10 +519,28 @@ def persist_ai_plan(
         from src.services.planning.campaign import CampaignPlanningEngine
         _hourly = CampaignPlanningEngine()._recent_hourly_all(s, datetime.now(timezone.utc))
         _hw = {int(h): a for h, a, _n in _hourly if _n >= 3 and a and 6 <= int(h) <= 23}
-        _spread_by_performance(plan.get("post_slots") or [], _hw)
-        # Finally, break the round :00/:30 grid so the schedule reads as a human
-        # posting, not a cron bot — deterministic per-slot nudge, stable across reopens.
-        plan["post_slots"] = _humanize_fire_times(plan.get("post_slots") or [])
+        # Enforce operator STEER constraints HERE — after all padding/reconciliation, so
+        # they can't be undone by slot cloning. Merchant/category pins first (may change
+        # a slot's merchant/theme), then times: a hard time window overrides the
+        # performance-weighted spread; otherwise the normal spread + human off-grid nudge.
+        _slots = plan.get("post_slots") or []
+        _cons = plan.pop("_directive_constraints", None)
+        _after = _before = None
+        if _cons:
+            from src.services.generation.directives import enforce_pair_constraints
+            _notes = enforce_pair_constraints(_slots, _cons, result.get("feed_pairs"))
+            if _notes:
+                plan["watch"] = ((plan.get("watch") or "") + " " + " ".join(_notes)).strip()
+            _after, _before = _cons.get("after_min"), _cons.get("before_min")
+        if _after is not None or _before is not None:
+            _lo = _after if _after is not None else _ACTIVE_START_MIN
+            _hi = (_before - 1) if _before is not None else _ACTIVE_END_MIN
+            plan["post_slots"] = _place_in_window(_slots, _lo, _hi)
+        else:
+            _spread_by_performance(_slots, _hw)
+            # Break the round :00/:30 grid so the schedule reads as a human posting, not
+            # a cron bot — deterministic per-slot nudge, stable across reopens.
+            plan["post_slots"] = _humanize_fire_times(_slots)
     fc = result.get("factcheck", {"status": "skipped"})
     target_date = _parse_date(plan.get("date"))
     row = CampaignPlan(
@@ -656,6 +703,15 @@ def _demo() -> None:
     ordered_times = [s["time_ist"] for s in hz]
     assert ordered_times == sorted(ordered_times)         # chronological order
     assert ordered_times == [s["time_ist"] for s in _humanize_fire_times(_mk())]  # stable
+
+    # _place_in_window: a hard time window (evening 18:00-23:59) keeps EVERY slot in
+    # window, unique, chronological, off-grid, and stable across reopens.
+    wn = _place_in_window(_mk(), 18 * 60, 24 * 60 - 1)
+    wmins = [_slot_minute(s) for s in wn]
+    assert all(18 * 60 <= m <= 24 * 60 - 1 for m in wmins), wmins   # inside the window
+    assert wmins == sorted(wmins) and len(set(wmins)) == len(wmins)  # ordered + unique
+    assert not any(m % 5 == 0 for m in wmins)                        # off the round grid
+    assert [s["time_ist"] for s in wn] == [s["time_ist"] for s in _place_in_window(_mk(), 18 * 60, 24 * 60 - 1)]
 
     print("services/generation/ai_execution.py self-check OK")
 

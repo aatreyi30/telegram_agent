@@ -1345,6 +1345,27 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
                 "can_regenerate": week_start >= current_week_start}
 
 
+def _past_future_split(slots, now_min):
+    """Split a plan's slots into (already-elapsed, still-upcoming) by an IST
+    minute-of-day cutoff. now_min=None (not today) -> everything is upcoming."""
+    from src.ai.planner import _slot_minute
+    past, future = [], []
+    for sl in slots or []:
+        m = _slot_minute(sl)
+        (past if (now_min is not None and m is not None and m < now_min) else future).append(sl)
+    return past, future
+
+
+def _splice_past_over(past, fresh, now_min):
+    """Keep the already-posted PAST slots and take the FRESH plan's FUTURE slots, in
+    chronological order — so a mid-day steer rewrites only the remaining day and never
+    posts that already went out (they are immutable — already live in ScheduledPost)."""
+    from src.ai.planner import _slot_minute
+    _, fresh_future = _past_future_split(fresh, now_min)
+    return sorted(list(past) + fresh_future,
+                  key=lambda x: (_slot_minute(x) is None, _slot_minute(x) or 0))
+
+
 def regenerate_daily(date: str | None = None, directive: str | None = None) -> dict:
     """Steer & Regenerate — force a fresh AI day plan for ``date`` (or latest owned
     day), optionally steered by a free-text operator ``directive``. Refuses to
@@ -1388,6 +1409,15 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         old_snap = ({c.name: getattr(old, c.name) for c in CampaignPlan.__table__.columns
                      if c.name != "id"} if old is not None else None)
         trace = list((old.blueprint or {}).get("steering_history") or []) if old else []
+        # For a mid-day steer of TODAY, freeze what already went out: slots whose IST
+        # time has passed are already posted (immutable). Capture them so (a) the AI is
+        # told not to replan them, and (b) we splice them back over the fresh plan so a
+        # steer rewrites only the REMAINING day.
+        from datetime import datetime as _dt, timezone as _tz
+        from src.services.analytics.periods import to_ist
+        _now_ist = to_ist(_dt.now(_tz.utc))
+        now_min = (_now_ist.hour * 60 + _now_ist.minute) if day == ist_today() else None
+        past_slots, _ = _past_future_split((old.blueprint or {}).get("post_slots") if old else [], now_min)
         if directive:
             trace.append(directive)
         avail = sorted({d.get("merchant_key") for d in ctx.available_deals(s, limit=30)
@@ -1409,6 +1439,16 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             + "\n".join(f"  {i + 1}. {d}" for i, d in enumerate(trace))
             + f"\n\nMerchants with deals in today's feed: {avail or 'none'}."
         )
+    # Tell the AI what already went out today so it plans the REST of the day coherently
+    # (doesn't re-suggest a merchant/theme just used, and knows how many slots remain)
+    # rather than replanning the whole day blind.
+    if past_slots:
+        _posted = "; ".join(f"{sl.get('time_ist')} {sl.get('type')} {sl.get('merchant')}/{sl.get('theme')}"
+                            for sl in past_slots[:40])
+        composed = (composed or directive or "") + (
+            f"\n\nALREADY POSTED TODAY — {len(past_slots)} posts are already live and CANNOT change: "
+            f"{_posted}.\nPlan ONLY the remaining slots for AFTER {_now_ist.strftime('%H:%M')} IST today; "
+            "do not replan the posts above.")
     result = daily_brief(date=day.isoformat(), directive=composed)
     # Success is measured by an actual AI plan being PERSISTED — not result["available"]
     # (daily_brief still returns available=True with the deterministic fallback when the
@@ -1422,8 +1462,20 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         if row is not None:
             # success — persist the RAW trace so the next regeneration accumulates it;
             # keep operator_directive as just the latest raw ask (not the composed blob).
-            row.blueprint = {**(row.blueprint or {}), "steering_history": trace}
+            _bp = {**(row.blueprint or {}), "steering_history": trace}
+            # Splice the already-posted PAST slots back over the fresh plan: a mid-day
+            # steer only rewrites the remaining day; posts that already went out stay
+            # exactly as they were. Also reflect it in the response the UI renders now.
+            if past_slots:
+                _spliced = _splice_past_over(past_slots, _bp.get("post_slots") or [], now_min)
+                _bp["post_slots"] = _spliced
+                if result.get("today"):
+                    result["today"]["slots"] = _spliced
+            row.blueprint = _bp
             row.operator_directive = directive
+            # Surface the RAW operator ask, not the composed blob (history + the
+            # already-posted context) that daily_brief persisted as it generated.
+            result["operator_directive"] = directive
         elif old_snap is not None:
             # regeneration produced no AI plan (AI unavailable) — restore the previous one
             # so the day is never left plan-less with an orphaned queue.

@@ -748,6 +748,21 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     _repair_plan_diversity(plan.get("post_slots") or [], plan_ctx.get("available_merchants"),
                            plan_ctx.get("available_categories"),
                            available_pairs=_feed_pair_counts or None)
+    # Steer directive -> HARD constraints the diversity-repair can't express: PARSE the
+    # merchants/categories an operator restricted, plus any time window, and stash them
+    # on the plan. They're ENFORCED in persist_ai_plan AFTER all slot padding/
+    # reconciliation — enforcing here would be undone when persist pads the plan up to
+    # the cadence (the padding re-introduces dropped merchants). Constraints are matched
+    # only against real feed values, so nothing is invented.
+    if directive:
+        from src.services.generation.directives import parse_directive_constraints
+        _cons = parse_directive_constraints(
+            directive, plan_ctx.get("available_merchants"), plan_ctx.get("available_categories"))
+        if any(_cons.get(k) is not None for k in ("merchants", "categories", "after_min", "before_min")):
+            plan["_directive_constraints"] = {
+                "merchants": sorted(_cons["merchants"]) if _cons["merchants"] else None,
+                "categories": sorted(_cons["categories"]) if _cons["categories"] else None,
+                "after_min": _cons["after_min"], "before_min": _cons["before_min"]}
     return {"available": True, "digest": digest, "plan": plan, "facts": facts,
             "feed_pairs": _feed_pair_counts}
 
