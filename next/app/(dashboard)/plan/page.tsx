@@ -179,7 +179,7 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
   const noActivity = !y || y.source === "none";
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">Yesterday — {prevDate}</CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base">Yesterday — {isoSlash(prevDate)}</CardTitle></CardHeader>
       <CardContent className="space-y-3 text-sm">
         {noActivity ? (
           <p className="text-sm text-muted-foreground">No activity recorded.</p>
@@ -486,7 +486,7 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
-                <CardTitle className="text-base">Weekly retro — week of {r.week_start}</CardTitle>
+                <CardTitle className="text-base">Weekly retro — week of {isoSlash(r.week_start)}</CardTitle>
                 <AiBadge />
               </div>
             </CardHeader>
@@ -573,7 +573,7 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
 function WeekCard({ w }: { w: WeeklyBrief }) {
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">Last 7 days — {w.week_start} to {w.week_end}</CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base">Last 7 days — {isoSlash(w.week_start)} to {isoSlash(w.week_end)}</CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Stat label="Posts" value={String(w.totals.posts)} />
