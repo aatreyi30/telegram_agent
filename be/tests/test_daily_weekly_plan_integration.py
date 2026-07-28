@@ -89,7 +89,14 @@ def test_daily_brief_uses_ai_number_when_in_range(monkeypatch):
     r = service.daily_brief(date="2026-07-01")
     assert r["today"]["recommended_posts"] == 2
     assert r["today"]["plan_clamped"] is False
-    assert r["today"]["cadence_why"] == "AI says 2 is right"
+    # cadence_why is the deterministic line, now keyed to the DISPLAYED count (2) so the
+    # headline and the sentence can never name different numbers. The seeded history is a
+    # steady 1/day (range 1–1), so the AI's 2 sits OUTSIDE that range — the honest line is
+    # "planning ~2 today", NOT a false "~2 matches that pace" (that claim is reserved for
+    # counts inside the observed range). Never the AI's own drifting prose.
+    cw = r["today"]["cadence_why"]
+    assert "AI says" not in cw
+    assert "planning ~2 today" in cw and "matches that pace" not in cw
 
 
 def test_daily_brief_clamps_out_of_range_ai_number(monkeypatch):
@@ -127,64 +134,59 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
 
     monkeypatch.setattr(
         "src.ai.planner.generate_week_plan",
-        lambda s, week_start=None, directive=None: {"available": True, "digest": "Weekly digest text."},
+        lambda s, week_start=None, directive=None, end_day=None: {"available": True, "digest": "Weekly digest text."},
     )
 
     r = service.weekly_brief(end="2026-07-08")
     assert r["ai_available"] is True
     assert r["digest"] == "Weekly digest text."
 
-    assert r["week_start"] == "2026-07-06"
-    assert r["week_end"] == "2026-07-12"
+    # TRAILING 7-day window ending at the anchor (2026-07-08), not a Mon->Sun week.
+    assert r["week_start"] == "2026-07-02"
+    assert r["week_end"] == "2026-07-08"
 
     by_date = {d["date"]: d for d in r["days"]}
-    assert by_date["2026-07-06"]["joined"] == 10
-    assert by_date["2026-07-06"]["left"] == 2
-    assert by_date["2026-07-06"]["net"] == 8
-    assert by_date["2026-07-09"]["net"] == 0
-    # A day with no DailySubscriberStat row gap-fills to zero, not a KeyError/None.
-    assert by_date["2026-07-07"] == {"date": "2026-07-07", "weekday": "Tue",
-                                      "posts": by_date["2026-07-07"]["posts"],
-                                      "views_avg": by_date["2026-07-07"]["views_avg"],
-                                      "joined": 0, "left": 0, "net": 0}
+    # Each day carries only real per-day POSTS/VIEWS — follower deltas were removed
+    # (Telegram has no subscriber history to give a reliable per-day joined/left/net).
+    assert set(by_date["2026-07-07"]) == {"date", "weekday", "posts", "views_avg", "views_maturing"}
+    assert "joined" not in by_date["2026-07-07"]
+    # The window ends AT the anchor — no future days past it.
+    assert "2026-07-09" not in by_date and "2026-07-08" in by_date
 
+    from datetime import date as _date
     with session_scope() as s:
         wk = s.scalar(select(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
-            CampaignPlan.plan_type == PlanType.WEEKLY))
+            CampaignPlan.plan_type == PlanType.WEEKLY,
+            CampaignPlan.target_date == _date(2026, 7, 2)))  # the trailing window's start
         assert wk.ai_digest == "Weekly digest text."
         assert wk.is_ai_generated is True
 
 
 def test_weekly_brief_reuses_cached_digest_on_second_call(monkeypatch):
-    """Regression test: weekly_brief() must call the AI at most once per calendar
-    week. Before this fix, weekly_brief() had no create-path for a missing WEEKLY
-    CampaignPlan row (unlike daily_brief()'s persist_ai_plan) — every single call
-    fell through to a fresh, non-deterministic Groq call. This reproduces exactly
-    the reported symptom: open the weekly plan twice, get two different digests."""
+    """Regression test: weekly_brief() must call the AI at most once per window (keyed
+    by the trailing window's start). Before this fix it had no create-path for a
+    missing WEEKLY CampaignPlan row (unlike daily_brief()'s persist_ai_plan) — every
+    call fell through to a fresh, non-deterministic Groq call: open the plan twice, get
+    two different digests."""
     from src.controllers import service
 
     calls = {"n": 0}
 
-    def _fake_generate(s, week_start=None, directive=None):
+    def _fake_generate(s, week_start=None, directive=None, end_day=None):
         calls["n"] += 1
         return {"available": True, "digest": f"Digest attempt #{calls['n']}"}
 
     monkeypatch.setattr("src.ai.planner.generate_week_plan", _fake_generate)
 
-    # A week with no pre-existing CampaignPlan row or seeded data (the earlier test
-    # in this module already cached 2026-07-06..07-12) — exercises the create-path
-    # that was missing: weekly_brief() previously could only UPDATE an existing
-    # row, never INSERT one, so it called the AI fresh on every single request.
+    # A window with no pre-existing CampaignPlan row or seeded data — exercises the
+    # create-path that was missing: weekly_brief() previously could only UPDATE an
+    # existing row, never INSERT one, so it called the AI fresh on every request.
     first = service.weekly_brief(end="2026-09-02")
     second = service.weekly_brief(end="2026-09-02")
 
-    assert calls["n"] == 1, "AI must only be called once for the same calendar week"
+    assert calls["n"] == 1, "AI must only be called once for the same trailing window"
     assert first["digest"] == "Digest attempt #1"
     assert second["digest"] == "Digest attempt #1"  # reused, not "attempt #2"
-
-    # A different date INSIDE THE SAME calendar week must also hit the same cache.
-    third = service.weekly_brief(end=first["week_start"])
-    assert calls["n"] == 1
-    assert third["digest"] == "Digest attempt #1"
-    assert third["week_start"] == first["week_start"]
+    # The trailing window ends at the anchor: end=2026-09-02 -> start 2026-08-27.
+    assert first["week_start"] == "2026-08-27" and first["week_end"] == "2026-09-02"

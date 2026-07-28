@@ -60,6 +60,9 @@ def _ai_provider_kwargs() -> dict:
     OpenAI key is set (else groq); AI_MODEL overrides the per-provider default."""
     openai_key = _get("OPENAI_API_KEY")
     provider = (_get("AI_PROVIDER") or ("openai" if openai_key else "groq")).lower()
+    # gpt-4o-mini: the known-good plan model. gpt-4o was tried for stronger prompt-
+    # following but its plan JSON failed our parser (fell back every run), so we stay
+    # on -mini until that's diagnosed. Override with AI_MODEL to retry another model.
     default_model = "gpt-4o-mini-2024-07-18" if provider == "openai" else "llama-3.3-70b-versatile"
     return {
         "ai_provider": provider,
@@ -165,6 +168,11 @@ class Settings:
     # --- Publishing (Phase 0.3) ---
     # a draft older than this (or a deal that fails revalidation) is BLOCKED, not sent.
     prepublish_max_staleness_min: int = 30
+    # A multi-deal loot board that loses items to revalidation is trimmed, not killed —
+    # but a board stripped down to one or two links is not worth posting. Below this
+    # many surviving items the whole post is BLOCKED instead. Single-deal posts are
+    # unaffected: they have nothing to drop, so any failure still blocks them.
+    min_collection_items: int = 3
 
     # --- Runtime ---
     log_level: str = "INFO"
@@ -216,6 +224,7 @@ class Settings:
             grabcash_api_base=_get("GRABCASH_API_BASE"),
             **_ai_provider_kwargs(),
             prepublish_max_staleness_min=_get_int("PREPUBLISH_MAX_STALENESS_MIN", 30),
+            min_collection_items=_get_int("MIN_COLLECTION_ITEMS", 3),
             owned_incremental_interval_min=_get_int("OWNED_INCREMENTAL_INTERVAL_MIN", 15),
             owned_analytics_interval_min=_get_int("OWNED_ANALYTICS_INTERVAL_MIN", 60),
             competitor_interval_min=_get_int("COMPETITOR_INTERVAL_MIN", 60),

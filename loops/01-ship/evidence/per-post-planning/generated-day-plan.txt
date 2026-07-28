@@ -1,0 +1,20 @@
+Deterministic fallback day plan (AI unavailable) -> jit_fill schedule, 2026-07-25 IST
+========================================================================
+  09:00  collection  amazon    electronics-and-gadgets
+  10:00  single      flipkart  home-and-living
+  11:00  collection  myntra    fashion-and-lifestyle
+  12:00  single      ajio      beauty-and-personal-care
+  13:00  collection  amazon    electronics-and-gadgets
+  14:20  single      flipkart  home-and-living
+  15:40  collection  myntra    fashion-and-lifestyle
+  17:00  single      ajio      beauty-and-personal-care
+  19:00  collection  amazon    electronics-and-gadgets
+  20:20  single      flipkart  home-and-living
+  21:40  collection  myntra    fashion-and-lifestyle
+  23:00  single      ajio      beauty-and-personal-care
+
+merchants: {'amazon': 3, 'flipkart': 3, 'myntra': 3, 'ajio': 3}
+types: {'collection': 6, 'single': 6}
+unique minutes: 12/12
+adjacent same-merchant: 0
+adjacent same-theme: 0

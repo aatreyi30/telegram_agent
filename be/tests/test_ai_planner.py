@@ -60,13 +60,16 @@ def test_build_plan_context_yesterday_digest_present():
     with session_scope() as s:
         s.add(CampaignPlan(
             plan_type=PlanType.DAILY, title="AI day plan", target_date=PREV,
-            blueprint={"post_slots": []}, confidence=0.6,
-            generated_at=datetime.now(timezone.utc),
+            blueprint={"post_slots": [], "emphasis": "Lean into loot boards."},
+            confidence=0.6, generated_at=datetime.now(timezone.utc),
             is_ai_generated=True, ai_digest="Yesterday views up 12%."))
 
     with session_scope() as s:
         ctx = build_plan_context(s, DAY)
-    assert ctx["yesterday_digest"] == "Yesterday views up 12%."
+    # Continuity now comes from the prior plan's STRUCTURED emphasis, not its free-text
+    # digest — the digest's own "Yesterday: …" numbers describe two days ago and the
+    # model kept misquoting them as yesterday's (the 5-vs-22 loot mismatch).
+    assert ctx["yesterday_digest"] == "Lean into loot boards."
 
 
 def test_build_plan_context_yesterday_digest_absent():

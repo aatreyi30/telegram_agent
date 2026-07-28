@@ -101,6 +101,11 @@ class GeneratedPost(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), default=PostStatus.DRAFT)
     publish_note: Mapped[str | None] = mapped_column(Text)
     channel_ref: Mapped[str | None] = mapped_column(String(128))
+    # The Telegram message id returned by a successful send. Recorded IMMEDIATELY after
+    # the send (in its own resilient write) so a retry — e.g. when the status write is
+    # lost to a transient DB lock — can detect the post already went out and NEVER
+    # re-send it (idempotency guard against double-posting).
+    telegram_message_id: Mapped[int | None] = mapped_column(Integer)
     # why this draft follows the strategy: post-type/perf, target IST window, emoji policy,
     # expected views — each with its period + sample so it never reads as vague.
     strategy_rationale: Mapped[dict | None] = mapped_column(JSON)

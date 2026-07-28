@@ -2,8 +2,11 @@ import { Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** Small pill marking a block as AI-authored (grounded in report data + fact-checked),
- * so the UI stays honest about what's AI reasoning vs. deterministic computation. */
-export function AiBadge({ label = "AI", className }: { label?: string; className?: string }) {
+ * so the UI stays honest about what's AI reasoning vs. deterministic computation.
+ * Pass `thinking` for the live "working" state (bouncing dots) instead of the sparkle. */
+export function AiBadge({
+  label = "AI", thinking = false, className,
+}: { label?: string; thinking?: boolean; className?: string }) {
   return (
     <span
       className={cn(
@@ -12,8 +15,16 @@ export function AiBadge({ label = "AI", className }: { label?: string; className
       )}
       title="Written by AI — grounded in your report data and fact-checked"
     >
-      <Sparkles className="h-3 w-3 animate-pulse" />
-      {label}
+      {thinking ? (
+        <span className="flex items-center gap-[3px] pr-0.5" aria-hidden>
+          <span className="think-dot h-1 w-1 rounded-full bg-current" />
+          <span className="think-dot h-1 w-1 rounded-full bg-current" />
+          <span className="think-dot h-1 w-1 rounded-full bg-current" />
+        </span>
+      ) : (
+        <Sparkles className="h-3 w-3 animate-pulse" />
+      )}
+      {thinking ? "Thinking" : label}
     </span>
   );
 }

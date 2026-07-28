@@ -78,11 +78,22 @@ def content_mix_from_rows(rows: list[dict]) -> list[dict]:
     batch blueprint and the Insights page's live date-ranged view. `target_share`
     is a bounded nudge off the current share (not a formal optimization): +50%
     (capped at 30%) for above-median performers, -30% for below-median ones."""
-    vals = [r["avg_views_per_day"] for r in rows if r.get("avg_views_per_day")]
+    # Rank by AVERAGE VIEWS PER POST (the honest performance signal), not the
+    # age-confounded avg_views_per_day velocity. The velocity ranked loot above
+    # single (30.7 vs 10.5/day) only because loot posts are newer, while per-post
+    # single actually outperforms (781 vs 573) — so the old ranking pushed the
+    # channel toward the weaker type. Falls back to per-day when a row has no
+    # per-post figure. This is what makes the growth blueprint (→ daily allocation)
+    # and the weekly plan agree AND be correct; the 30% type-floor downstream still
+    # guarantees variety so single can't crowd loot out.
+    def _perf(r):
+        v = r.get("avg_views")
+        return v if v is not None else r.get("avg_views_per_day")
+    vals = [_perf(r) for r in rows if _perf(r)]
     med = statistics.median(vals) if vals else None
     out = []
     for r in rows:
-        avg = r.get("avg_views_per_day")
+        avg = _perf(r)
         share = r.get("share") or 0.0
         action = "maintain"
         target_share = share
@@ -533,7 +544,7 @@ class GrowthEngine(BaseCollector):
 
     def _content_mix(self, perf) -> list[dict]:
         rows = [{"post_type": p.post_type, "avg_views_per_day": p.avg_views_per_day,
-                 "share": p.share} for p in perf]
+                 "avg_views": getattr(p, "avg_views", None), "share": p.share} for p in perf]
         return content_mix_from_rows(rows)
 
     def _derive_channel_type(self, perf):

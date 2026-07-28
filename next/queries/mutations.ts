@@ -120,6 +120,17 @@ export function useRegenerateDailyPlan() {
     },
   });
 }
+// Revert the last steer — restore the pre-steer daily plan (no AI call).
+export function useRevertDailyPlan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { date?: string }) => api.post<DailyBrief>("/plan/daily/revert", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.dailyBriefAll() });
+      qc.invalidateQueries({ queryKey: queryKeys.retroLatestAll() });
+    },
+  });
+}
 export function useRegenerateWeeklyPlan() {
   const qc = useQueryClient();
   return useMutation({

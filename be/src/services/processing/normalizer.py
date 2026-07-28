@@ -113,9 +113,28 @@ class PostNormalizer(BaseCollector):
         threshold = parser.parse_price_threshold(text)
 
         link_infos = [parser.classify_link(u) for u in all_urls]
+        is_multi_deal = len(all_urls) > 1
+
+        # upsert lookup: fetch any prior NormalizedPost for this raw row FIRST,
+        # so link-resolution state (resolved_url/resolution_status/.../merchant_key
+        # — written only by the network resolver, link_resolution.py:437-447) can
+        # be carried forward instead of wiped on re-normalization (S1-c).
+        existing = s.scalar(
+            select(NormalizedPost).where(
+                NormalizedPost.source_type == source_type,
+                NormalizedPost.source_id == raw.id,
+            )
+        )
+        is_update = existing is not None
+        existing_links_by_url = {l.url: l for l in existing.links} if existing else {}
+
         merchant_keys = []
         for u in all_urls:
             mk = detect_merchant_key(u)
+            if mk is None:
+                prior = existing_links_by_url.get(u)
+                if prior is not None:
+                    mk = prior.merchant_key
             merchant_keys.append(mk)
 
         # primary merchant = most common KNOWN merchant across links (never guessed)
@@ -134,41 +153,51 @@ class PostNormalizer(BaseCollector):
 
         confidence = self._completeness(bool(prices), bool(all_urls), primary_merchant is not None)
 
-        # upsert: delete a stale NormalizedPost (children cascade) then recreate
-        existing = s.scalar(
-            select(NormalizedPost).where(
-                NormalizedPost.source_type == source_type,
-                NormalizedPost.source_id == raw.id,
-            )
-        )
-        is_update = existing is not None
-        if existing is not None:
-            s.delete(existing)
-            s.flush()
+        # deal-dimension extraction (deterministic, from the same text/merchant
+        # already resolved above — never guessed)
+        discount_pct = parser.parse_discount_pct(text)
+        discount_band = parser.discount_band(discount_pct)
+        price_band = parser.price_band(prices, threshold, is_multi_deal=is_multi_deal)
+        category = parser.infer_category(text, primary_merchant)
 
-        np = NormalizedPost(
-            source_type=source_type,
-            source_id=raw.id,
-            normalization_version=NORMALIZATION_VERSION,
-            normalized_at=datetime.now(timezone.utc),
-            raw_content_sha256=raw.content_sha256,
-            language="unknown",  # language detection deferred (no guessing)
-            emojis=emojis or None,
-            hashtags=hashtags or None,
-            mentions=mentions or None,
-            cta_texts=ctas or None,
-            num_links=len(all_urls),
-            num_prices=len(prices),
-            has_coupon=bool(coupons),
-            price_threshold=threshold,
-            is_multi_deal=len(all_urls) > 1,
-            primary_merchant_key=primary_merchant,
-            primary_merchant_confidence=primary_conf,
-            extraction_confidence=confidence,
-        )
-        s.add(np)
+        # upsert IN PLACE: reuse the existing row (and its links, by url) rather
+        # than delete+recreate. Delete+recreate used to cascade away
+        # ExtractedLink.resolved_url/resolution_status/resolution_error/
+        # resolution_attempts (network-resolver-only state) and PostClassification
+        # rows on every re-normalization — see S1-c. Prices/coupons carry no
+        # external state, so those are still fully replaced from the fresh parse.
+        if existing is not None:
+            np = existing
+            for pm in list(np.prices):
+                s.delete(pm)
+            for cp in list(np.coupons):
+                s.delete(cp)
+        else:
+            np = NormalizedPost(source_type=source_type, source_id=raw.id)
+            s.add(np)
+
+        np.normalization_version = NORMALIZATION_VERSION
+        np.normalized_at = datetime.now(timezone.utc)
+        np.raw_content_sha256 = raw.content_sha256
+        np.language = "unknown"  # language detection deferred (no guessing)
+        np.emojis = emojis or None
+        np.hashtags = hashtags or None
+        np.mentions = mentions or None
+        np.cta_texts = ctas or None
+        np.num_links = len(all_urls)
+        np.num_prices = len(prices)
+        np.has_coupon = bool(coupons)
+        np.price_threshold = threshold
+        np.is_multi_deal = is_multi_deal
+        np.primary_merchant_key = primary_merchant
+        np.primary_merchant_confidence = primary_conf
+        np.extraction_confidence = confidence
+        np.category = category
+        np.discount_pct = discount_pct
+        np.discount_band = discount_band
+        np.price_band = price_band
         s.flush()
-        logger.info("[normalizer] normalized_post created: id=%d source_type=%s source_id=%d num_links=%d", np.id, source_type, raw.id, len(all_urls))
+        logger.info("[normalizer] normalized_post upserted: id=%d source_type=%s source_id=%d num_links=%d", np.id, source_type, raw.id, len(all_urls))
 
         for pm in prices:
             s.add(ExtractedPrice(
@@ -177,13 +206,28 @@ class PostNormalizer(BaseCollector):
             ))
         for code, raw_text in coupons:
             s.add(ExtractedCoupon(normalized_post_id=np.id, code=code, raw_text=raw_text))
+
+        # links: update in place for urls seen before (preserves resolver-only
+        # columns, which are simply left untouched here), drop urls that
+        # disappeared from the post, add brand-new urls.
+        new_url_set = set(all_urls)
+        for url, link in existing_links_by_url.items():
+            if url not in new_url_set:
+                s.delete(link)
         for u, info, mk in zip(all_urls, link_infos, merchant_keys):
-            s.add(ExtractedLink(
-                normalized_post_id=np.id, url=u, domain=info.domain,
-                is_shortlink=info.is_shortlink, merchant_key=mk,
-                tracking_params=info.tracking_params,
-            ))
-        logger.info("[normalizer] extracted_links created: normalized_post_id=%d link_count=%d", np.id, len(all_urls))
+            link = existing_links_by_url.get(u)
+            if link is not None:
+                link.domain = info.domain
+                link.is_shortlink = info.is_shortlink
+                link.merchant_key = mk
+                link.tracking_params = info.tracking_params
+            else:
+                s.add(ExtractedLink(
+                    normalized_post_id=np.id, url=u, domain=info.domain,
+                    is_shortlink=info.is_shortlink, merchant_key=mk,
+                    tracking_params=info.tracking_params,
+                ))
+        logger.info("[normalizer] extracted_links upserted: normalized_post_id=%d link_count=%d", np.id, len(all_urls))
 
         # queue events (published after commit)
         emits.append((EventType.POST_NORMALIZED, str(np.id),

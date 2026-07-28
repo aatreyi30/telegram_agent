@@ -21,18 +21,27 @@ from src.services.analytics.growth import get_growth
 from src.db.models import Post
 from src.db.models_normalization import NormalizedPost, SourceType
 
+# Minimum sample size for a category/discount-band/price-band bucket to appear
+# in the ranked `segments` leaderboard — mirrors MIN_GOLDEN_HOUR_N's reasoning
+# (a lucky post in a thin bucket shouldn't crown it). Exposed in the payload
+# (segments_min_n) so the UI can render "not enough data" instead of noise.
+MIN_SEGMENT_N = 3
+
 
 def _owned_rows(s: Session, start=None, end=None):
     """Fetch owned posts with engagement + content signals.
 
     Returns rows: (posted_at, views, merchant_key,
-                    reactions_total, forwards, has_coupon, is_multi_deal, cta_texts)
+                    reactions_total, forwards, has_coupon, is_multi_deal, cta_texts,
+                    category, discount_band, price_band)
     Optional [start, end) UTC datetimes restrict the posting-date window."""
     q = (select(Post.posted_at, Post.views,
                 NormalizedPost.primary_merchant_key,
                 Post.reactions_total, Post.forwards,
                 NormalizedPost.has_coupon, NormalizedPost.is_multi_deal,
-                NormalizedPost.cta_texts)
+                NormalizedPost.cta_texts,
+                NormalizedPost.category, NormalizedPost.discount_band,
+                NormalizedPost.price_band)
          .join(NormalizedPost, NormalizedPost.source_id == Post.id)
          .where(NormalizedPost.source_type == SourceType.OWNED, Post.views.isnot(None),
                 Post.posted_at.isnot(None)))
@@ -66,6 +75,9 @@ def compute(s: Session, start=None, end=None) -> dict:
     by_weekday: dict[str, list[tuple]] = defaultdict(list)
     by_type: dict[str, list[tuple]] = defaultdict(list)
     by_merchant: dict[str, list[tuple]] = defaultdict(list)
+    by_category: dict[str, list[tuple]] = defaultdict(list)
+    by_discount_band: dict[str, list[tuple]] = defaultdict(list)
+    by_price_band: dict[str, list[tuple]] = defaultdict(list)
 
     # Column indices for readability
     I_VIEWS = 1
@@ -74,6 +86,9 @@ def compute(s: Session, start=None, end=None) -> dict:
     I_COUPON = 5
     I_MULTI = 6
     I_CTA = 7
+    I_CATEGORY = 8
+    I_DISCOUNT_BAND = 9
+    I_PRICE_BAND = 10
 
     for r in rows:
         ist = to_ist(r[0])
@@ -93,6 +108,25 @@ def compute(s: Session, start=None, end=None) -> dict:
         mk = r[2]  # merchant_key
         if mk:
             by_merchant[mk].append(tup)
+        if r[I_CATEGORY]:
+            by_category[r[I_CATEGORY]].append(tup)
+        if r[I_DISCOUNT_BAND]:
+            by_discount_band[r[I_DISCOUNT_BAND]].append(tup)
+        if r[I_PRICE_BAND]:
+            by_price_band[r[I_PRICE_BAND]].append(tup)
+
+    # ------- coverage: how many of this window's posts actually carry each
+    # dimension, so the UI can say "this leaderboard covers 31% of the
+    # window's posts" instead of implying every post was counted -------
+    total_posts_n = len(rows)
+    dimension_coverage = {
+        "category": {"categorized": sum(len(v) for v in by_category.values()),
+                      "total": total_posts_n},
+        "discount_band": {"categorized": sum(len(v) for v in by_discount_band.values()),
+                           "total": total_posts_n},
+        "price_band": {"categorized": sum(len(v) for v in by_price_band.values()),
+                        "total": total_posts_n},
+    }
 
     # ------- helper: reduce a list of tuples -------
     def _reduce(tups: list[tuple]) -> dict:
@@ -141,6 +175,43 @@ def compute(s: Session, start=None, end=None) -> dict:
         [{"label": k, **_reduce(v)} for k, v in by_merchant.items()],
         key=lambda x: x["total_views"], reverse=True)[:10]
 
+    # ------- by category / discount band / price band -------
+    # These raw breakdowns are ungated (unlike `segments`), so each row carries
+    # `below_min_n` — an n=1 bucket at 100% engagement is real data, but the UI
+    # must be able to mark it as a sub-sample rather than render it as the
+    # tallest, most confident bar next to a leaderboard that gates on sample size.
+    category_series = sorted(
+        [{"label": k, "below_min_n": len(v) < MIN_SEGMENT_N, **_reduce(v)}
+         for k, v in by_category.items()],
+        key=lambda x: x["total_views"], reverse=True)
+    discount_band_series = sorted(
+        [{"label": k, "below_min_n": len(v) < MIN_SEGMENT_N, **_reduce(v)}
+         for k, v in by_discount_band.items()],
+        key=lambda x: x["total_views"], reverse=True)
+    price_band_series = sorted(
+        [{"label": k, "below_min_n": len(v) < MIN_SEGMENT_N, **_reduce(v)}
+         for k, v in by_price_band.items()],
+        key=lambda x: x["total_views"], reverse=True)
+
+    # ------- segments: dimension buckets ranked by engagement rate -------
+    # A minimum sample size gate (mirrors MIN_GOLDEN_HOUR_N above) so a single
+    # lucky post in a thin bucket can't top the leaderboard as noise — the
+    # payload states the gate so the UI can say "not enough data" instead of
+    # silently hiding or, worse, showing an unreliable rank.
+    segments = sorted(
+        [
+            {"dimension": dim, "label": row["label"], **row}
+            for dim, series in (
+                ("category", category_series),
+                ("discount_band", discount_band_series),
+                ("price_band", price_band_series),
+            )
+            for row in series
+            if row["n"] >= MIN_SEGMENT_N
+        ],
+        key=lambda x: x["engagement_rate"], reverse=True,
+    )
+
     # ------- golden hours: top 3 hours by median views/post, views-only -------
     # A per-post efficiency question, not a volume one — median (not mean) so a
     # single viral post can't crown an hour, and a minimum sample size so a lucky
@@ -171,6 +242,12 @@ def compute(s: Session, start=None, end=None) -> dict:
         "by_weekday": weekday_series,
         "by_type": type_series,
         "by_merchant": merchant_series,
+        "by_category": category_series,
+        "by_discount_band": discount_band_series,
+        "by_price_band": price_band_series,
+        "segments": segments,
+        "segments_min_n": MIN_SEGMENT_N,
+        "dimension_coverage": dimension_coverage,
         "golden_hours": golden_hours,
         "growth": get_growth(s, start, end),
         "total_posts": all_agg["n"],
@@ -181,4 +258,41 @@ def compute(s: Session, start=None, end=None) -> dict:
         "engagement_rate": all_agg["engagement_rate"],
         "cta_rate": round(all_agg["cta_posts"] / all_agg["n"] * 100, 1) if all_agg["n"] else 0,
         "deal_rate": round(all_agg["deal_posts"] / all_agg["n"] * 100, 1) if all_agg["n"] else 0,
+    }
+
+
+def segment_performance(s: Session, top_n: int = 3) -> dict:
+    """Top/bottom categories and discount bands by engagement rate (gated at
+    MIN_SEGMENT_N), for the daily-plan's grounding context (AC5) — so a slot's
+    `why` can cite a dimension-level number instead of the channel average.
+
+    Carries the ``window`` its numbers actually span, same as every other
+    fact fed to the plan — this product's whole promise is that no number
+    ships unlabelled."""
+    full = compute(s)
+    segs = full["segments"]
+    cats = [row for row in segs if row["dimension"] == "category"]
+    bands = [row for row in segs if row["dimension"] == "discount_band"]
+
+    def _top_bottom(ranked: list[dict]) -> tuple[list[dict], list[dict]]:
+        # Disjoint by construction: bottom is drawn only from what's left
+        # after top is removed, so a row can never be both "top" and
+        # "bottom" (the old `ranked[-top_n:]` could overlap `ranked[:top_n]`
+        # whenever top_n < len(ranked) <= 2 * top_n).
+        top = ranked[:top_n]
+        remaining = ranked[top_n:]
+        bottom = remaining[-top_n:] if remaining else []
+        return top, bottom
+
+    top_categories, bottom_categories = _top_bottom(cats)
+    top_discount_bands, bottom_discount_bands = _top_bottom(bands)
+
+    return {
+        "available": bool(cats or bands),
+        "min_n": MIN_SEGMENT_N,
+        "window": full["window"],
+        "top_categories": top_categories,
+        "bottom_categories": bottom_categories,
+        "top_discount_bands": top_discount_bands,
+        "bottom_discount_bands": bottom_discount_bands,
     }

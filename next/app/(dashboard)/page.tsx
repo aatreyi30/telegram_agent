@@ -19,7 +19,7 @@ import { TimelineChart } from "@/components/charts";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useOverview, useGrowth, useInsights, useDrafts, useQueue, useActivity } from "@/queries/queries";
 import { titleCase, istDate } from "@/lib/format";
-import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint } from "@/types/api";
+import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint, GrowthResponse } from "@/types/api";
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -50,6 +50,27 @@ function periodTrend(daily: GrowthDailyPoint[], key: "subs_end" | "joined" | "le
   if (olderVal === 0) return null;
   const pct = ((recentVal - olderVal) / Math.abs(olderVal)) * 100;
   return { value: Math.round(pct * 10) / 10 };
+}
+
+// One plain-English sentence that translates the growth chart into what it MEANS —
+// direction, start→end, and how joins compare to unsubscribes — so the page reads at a
+// glance instead of leaving the reader to decode two axes. All numbers are the real
+// backend figures (no new computation beyond start/churn from what's already fetched).
+function growthStory(g: Extract<GrowthResponse, { available: true }>): { icon: string; text: string } {
+  const firstSubs = g.daily.find((d) => d.subs_end != null)?.subs_end ?? g.current ?? 0;
+  const endSubs = g.current ?? firstSubs;
+  const icon = g.net > 0 ? "📈" : g.net < 0 ? "📉" : "➖";
+  const dir = g.net > 0 ? "Growing" : g.net < 0 ? "Shrinking" : "Holding steady";
+  const gap = g.has_collection_gap ? " (spanning a multi-day tracking gap, not one day)" : "";
+  // The TOTAL is Telegram's real count; joined/left are DERIVED from how that count moved
+  // between captures (Telegram's API gives no per-person join/leave events), so they're net
+  // movement — NOT true gross churn. State that honestly; never claim a retention rate off it.
+  return {
+    icon,
+    text: `${dir}: ${fmtNum(firstSubs)} → ${fmtNum(endSubs)} subscribers, a net `
+      + `${g.net >= 0 ? "+" : ""}${fmtNum(g.net)} over this window${gap}. `
+      + `Joined/left are inferred from the count's ups and downs between captures, not Telegram per-person events.`,
+  };
 }
 
 /** True when the agent has actually done something in the last 10 minutes —
@@ -229,10 +250,28 @@ export default function OverviewPage() {
                             sub={g.has_collection_gap ? gapNote : undefined}
                             trend={netTrend ? { ...netTrend, label: "vs prior period" } : undefined} />
                         </div>
-                        <TimelineChart data={chartData} dataKey="subs_end" unit="" />
+                        {(() => {
+                          const story = growthStory(g);
+                          return (
+                            <div className="flex items-start gap-2 rounded-lg border border-primary/20 bg-primary/[0.05] px-3 py-2.5 text-sm">
+                              <span aria-hidden className="text-base leading-none">{story.icon}</span>
+                              <p className="text-foreground">{story.text}</p>
+                            </div>
+                          );
+                        })()}
                         <div>
-                          <p className="mb-1 text-xs font-medium text-muted-foreground">Joined vs left</p>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">Total subscribers, day by day</p>
+                          <TimelineChart data={chartData} dataKey="subs_end" unit="" />
+                        </div>
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">New joins vs unsubscribes</p>
                           <TimelineChart data={churnData} dataKey="joined" secondaryKey="left" unit="" secondaryUnit="" />
+                          <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
+                            <span className="inline-block h-2 w-2 rounded-full align-middle" style={{ background: "hsl(var(--chart-1))" }} /> Joins (left axis)
+                            {" · "}
+                            <span className="inline-block h-2 w-2 rounded-full align-middle" style={{ background: "hsl(var(--chart-2))" }} /> Unsubscribes (right axis)
+                            {" — the two use different scales, so a tall dashed line still means far fewer people left than joined."}
+                          </p>
                         </div>
                         {hasSourceBreakdown(g.view_sources, g.follower_sources) && (
                           <div className="border-t pt-4">

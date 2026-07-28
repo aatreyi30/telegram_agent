@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
+  Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
@@ -87,8 +87,11 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
   );
 }
 
-export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260, countKey, countLabel }: {
+export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260, countKey, countLabel, mutedKey }: {
   data: any[]; dataKey?: string; unit?: string; height?: number; countKey?: string; countLabel?: string;
+  /** When set, bars whose row has `row[mutedKey]` truthy (e.g. `below_min_n`) render faded
+   * so an under-sampled bucket never reads as a confident winner next to a well-sampled one. */
+  mutedKey?: string;
 }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -99,7 +102,11 @@ export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260
           height={data.length > 8 ? 60 : 30} />
         <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
         <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
-        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit} />
+        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit}>
+          {mutedKey && data.map((row, i) => (
+            <Cell key={i} fillOpacity={row?.[mutedKey] ? 0.35 : 1} />
+          ))}
+        </Bar>
       </BarChart>
     </ResponsiveContainer>
   );

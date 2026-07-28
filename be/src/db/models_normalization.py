@@ -33,7 +33,10 @@ from src.db.models_classification import PostClassification
 
 # Bump whenever the parsers/normalizer logic changes — triggers reprocessing of
 # posts normalized under an older version (README/09 versioning requirement).
-NORMALIZATION_VERSION = 2
+# v3: category/discount_pct/discount_band/price_band deal-dimension extraction
+# (deal-dimension-intelligence spec) — triggers a full re-normalize so the
+# existing ~8k rows pick up the new columns with no bespoke backfill script.
+NORMALIZATION_VERSION = 3
 
 
 class SourceType:
@@ -83,6 +86,14 @@ class NormalizedPost(Base, TimestampMixin):
     # merchant detection (deterministic, from known link domains only)
     primary_merchant_key: Mapped[str | None] = mapped_column(String(64))
     primary_merchant_confidence: Mapped[float | None] = mapped_column(Float)
+
+    # deal-dimension extraction (deterministic, from post text — see
+    # services/processing/parser.py). Never guessed: NULL when the text
+    # doesn't state it (category is NULL rather than a guessed "general").
+    category: Mapped[str | None] = mapped_column(String(32))
+    discount_pct: Mapped[float | None] = mapped_column(Float)
+    discount_band: Mapped[str | None] = mapped_column(String(16))
+    price_band: Mapped[str | None] = mapped_column(String(16))
 
     # overall extraction confidence (0..1), never a guess about meaning
     extraction_confidence: Mapped[float] = mapped_column(Float, default=0.0)
