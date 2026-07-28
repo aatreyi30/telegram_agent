@@ -819,6 +819,63 @@ def _today_details(s, recommended_posts: int, day=None):
     return windows, allocation, merchants, (risks or None)
 
 
+def _llm_allocation_reasoning(allocation: list[dict]) -> dict:
+    """One small, grounded LLM call: a plain-English one-liner per deal type for the Plan
+    page's 'Why' column. Grounded STRICTLY in the deterministic numbers (target posts, avg
+    views/post, measured sample); any sentence that cites a number NOT among those is
+    dropped, so it can never contradict the computed split. Returns {post_type: sentence};
+    '{}' on any failure — every row already carries a deterministic reasoning fallback."""
+    import json as _json
+
+    from src.ai.client import AIClient, AIUnavailable
+    from src.ai.factcheck import check_cited_numbers, extract_prose_numbers
+    from src.ai.planner import _extract_json_object, _loads_lenient
+
+    rows = [{"deal_type": a.get("deal_type"), "post_type": a.get("post_type"),
+             "target_posts": a.get("target_posts"),
+             "avg_views_per_post": (round(a["avg_views_per_post"])
+                                    if a.get("avg_views_per_post") is not None else None),
+             "measured_across_posts": a.get("views_sample")}
+            for a in allocation if a.get("post_type")]
+    if not rows:
+        return {}
+    system = (
+        "You explain a deals channel's deal-type split to its operator for a 'Why' column. "
+        "For EACH deal type in DATA, write ONE short, plain, conversational sentence: why it "
+        "gets this many posts and what its average views/post says. Use ONLY numbers present "
+        "in DATA — never invent a number, percentage, or comparison that isn't there. No "
+        "fluff, no unmeasurable claims (no conversion/CTR/revenue). Output EXACTLY one JSON "
+        "object mapping each type's post_type to its sentence, e.g. "
+        '{"single_deal":"...","loot_deal":"..."} — no text outside the JSON.')
+    try:
+        raw = AIClient().complete("DATA:\n" + _json.dumps(rows), system_extra=system,
+                                  max_tokens=400, trace_call="alloc_reason")
+    except AIUnavailable:
+        return {}
+    obj = _extract_json_object(raw)
+    if obj is None:
+        return {}
+    try:
+        parsed = _loads_lenient(obj)
+    except Exception:
+        return {}
+    # Only numbers actually in the inputs are allowed to appear in the prose; a sentence
+    # citing anything else is a fabrication and gets dropped (deterministic fallback kept).
+    _nums = [v for r in rows for v in (r["target_posts"], r["avg_views_per_post"],
+                                       r["measured_across_posts"]) if v is not None]
+    allowed = [{f"n{i}": v for i, v in enumerate(_nums)}]
+    out: dict = {}
+    for pt, sentence in (parsed or {}).items():
+        if not isinstance(sentence, str) or not sentence.strip():
+            continue
+        # `digest` is one of the keys extract_prose_numbers actually scans — pull the
+        # sentence's numbers through it and verify each against the allowed inputs.
+        fc = check_cited_numbers(extract_prose_numbers({"digest": sentence}), allowed)
+        if fc.get("status") != "failed":   # pass/warn ok; a hard fail means an invented number
+            out[pt] = sentence.strip()
+    return out
+
+
 def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                         directive: str | None = None, recent_max_30d: int | None = None) -> dict:
     """The cache-miss generation path for the daily AI plan: call the planner
@@ -879,6 +936,13 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                 fc = {**fc, "unmeasurable": bad_claims}
                 if fc_status == "pass":
                     fc_status = "warn"
+        # LLM-authored reasoning for the deal-type table's Why column — a small grounded,
+        # fact-checked call, attached to the plan so it's cached in the blueprint (generated
+        # once per plan, not per page-load). Skipped for a fallback plan (no AI to trust).
+        if ai_ok and not plan.get("is_fallback"):
+            _ar = _llm_allocation_reasoning(allocation)
+            if _ar:
+                plan["allocation_reasoning"] = _ar
         # Current IST minute-of-day when planning TODAY — lets persist floor a hard time
         # window at "now" so a partial-future steer ("after 6pm" sent at 8pm) places all
         # its slots in the remaining window instead of thinning into already-past minutes.
@@ -1108,6 +1172,17 @@ def daily_brief(date: str | None = None, directive: str | None = None,
             for _a in allocation:
                 _a["target_posts"] = _actual.get(_a.get("post_type"), 0)
             allocation = [_a for _a in allocation if (_a.get("target_posts") or 0) > 0]
+
+        # Overlay the LLM-authored per-type reasoning (grounded + fact-checked at
+        # generation, cached in the blueprint) onto the Why column. Each row already
+        # carries a deterministic reasoning; the LLM one only REPLACES it when present, so
+        # a fresh channel / AI-down / cron plan still shows the deterministic explanation.
+        _alloc_reason = plan.get("allocation_reasoning") if isinstance(plan, dict) else None
+        if _alloc_reason:
+            for _a in allocation:
+                _r = _alloc_reason.get(_a.get("post_type"))
+                if _r:
+                    _a["reasoning"] = _r
 
         # Same alignment for posting windows: they're built from the deterministic
         # recent cadence, so when the AI plans fewer posts (e.g. 15) the windows still
