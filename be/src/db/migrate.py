@@ -78,6 +78,9 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
     # spans more than one calendar day (a collection outage), so it's never silently
     # read as "one day's growth".
     "daily_subscriber_stats": [("spans_days", "INTEGER DEFAULT 1")],
+    # idempotency: the Telegram message id of a successful send, so a retry after a lost
+    # status write never re-sends (double-post guard).
+    "generated_posts": [("telegram_message_id", "INTEGER")],
 }
 
 

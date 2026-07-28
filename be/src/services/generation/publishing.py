@@ -16,9 +16,11 @@ but the admin-rights gate remains.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from src.config.settings import get_settings
 from src.db.models_generation import GeneratedPost, PostStatus
@@ -27,6 +29,24 @@ from src.services.events import Event, EventType, get_event_bus
 from src.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _write_with_retry(fn, *, attempts: int = 5, base_delay: float = 0.4) -> None:
+    """Run a tiny single-row write, retrying on SQLite 'database is locked'. The
+    post-send status / message-id writes MUST NOT be lost to a transient lock — a lost
+    status write is exactly what left a SENT post marked 'failed' and triggered a
+    re-send. Every write here is an idempotent single-row update, so retrying is always
+    safe. Non-lock errors, or a lock that survives every attempt, still raise."""
+    for i in range(attempts):
+        try:
+            with session_scope() as s:
+                fn(s)
+            return
+        except OperationalError as e:
+            if "database is locked" not in str(e).lower() or i == attempts - 1:
+                raise
+            logger.warning("[publishing] DB locked on a status write — retry %d/%d", i + 1, attempts)
+            time.sleep(base_delay * (i + 1))
 
 
 async def resolve_entity(client, chat_ref: str):
@@ -193,6 +213,14 @@ class Publisher:
             if post is None:
                 return False, f"No generated post #{post_id}."
             text = post.rendered_text
+            already_sent = post.telegram_message_id
+        # IDEMPOTENCY: if a prior attempt already sent this post (its Telegram message id
+        # is recorded) but the status write was lost to a DB lock, do NOT send again —
+        # report success so the scheduler reconciles it to published. This is the guard
+        # that stops a retry from double-posting a message that already went out.
+        if already_sent is not None:
+            return True, (f"Already sent (message id={already_sent}) on a prior attempt; "
+                          "not resending.")
         if not (text or "").strip():
             return False, f"Post #{post_id} has no rendered text — nothing to send."
 
@@ -216,13 +244,31 @@ class Publisher:
             # link_preview=False: every post carries a shortened grbn.in link and Telegram's
             # auto-preview card for it is bulky/unwanted (dev_send.py does the same).
             msg = await client.send_message(entity, text, link_preview=False)
+            # Record the message id in its OWN resilient write, IMMEDIATELY after the send
+            # and BEFORE the status write below — so even if everything after this is lost
+            # to a DB lock, the next attempt sees the post already went out and won't
+            # re-send it. This is the durable half of the double-post guard.
+            self._record_message_id(post_id, msg.id)
             return True, f"Sent to {channel_ref} (message id={msg.id})."
 
     @staticmethod
-    def _set(post_id: int, status: str, note: str, channel_ref: str | None = None) -> None:
-        with session_scope() as s:
+    def _record_message_id(post_id: int, message_id: int) -> None:
+        """Persist the Telegram message id of a successful send (resiliently, and only if
+        not already set — never overwrite an earlier send's id)."""
+        def _apply(s):
             post = s.get(GeneratedPost, post_id)
+            if post is not None and post.telegram_message_id is None:
+                post.telegram_message_id = message_id
+        _write_with_retry(_apply)
+
+    @staticmethod
+    def _set(post_id: int, status: str, note: str, channel_ref: str | None = None) -> None:
+        def _apply(s):
+            post = s.get(GeneratedPost, post_id)
+            if post is None:
+                return
             post.status = status
             post.publish_note = note
             if channel_ref:
                 post.channel_ref = channel_ref
+        _write_with_retry(_apply)
