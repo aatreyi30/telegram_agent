@@ -18,16 +18,18 @@ def test_grounded_kept_invented_dropped(monkeypatch):
     import src.ai.client as client_mod
 
     fake = (
-        '{"single_deal":"Singles average 526 views/post across 1240 posts, so they take 21 slots.",'
-        '"loot_deal":"Loot boards convert 94% better than singles, so 20 slots."}'
+        '{"single_deal":"Singles average 526 views/post across 1240 measured posts, so they lead the mix.",'
+        '"loot_deal":"Loot boards convert 94% better than singles, so they get priority."}'
     )
     monkeypatch.setattr(client_mod.AIClient, "complete", lambda self, *a, **k: fake)
 
     out = service._llm_allocation_reasoning(_ALLOC)
-    # grounded single reason (526, 1240, 21 all real) survives verbatim
+    # grounded single reason (526 + 1240 are real views/sample) survives verbatim
     assert out.get("single_deal") and "526" in out["single_deal"]
     # loot reason invents "94" (a made-up conversion figure) -> dropped, not trusted
     assert "loot_deal" not in out
+    # never emits a post count (rebucketed later -> would go stale)
+    assert "21" not in (out.get("single_deal") or "") and "20" not in (out.get("single_deal") or "")
 
 
 def test_ai_unavailable_returns_empty(monkeypatch):

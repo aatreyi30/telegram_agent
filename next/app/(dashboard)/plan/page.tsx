@@ -256,11 +256,14 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             // always read as a deficit all day). Only a genuine plan shortfall is a gap.
             const planned = (t.slots || []).reduce((a, s) => a + (s.count ?? 1), 0);
             const short = Math.max(t.recommended_posts - planned, 0);
+            const over = Math.max(planned - t.recommended_posts, 0);
             return (
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <Badge variant="outline">{planned} planned across {t.slots?.length || 0} slots</Badge>
                 {short > 0 ? (
                   <Badge variant="warning">{short} short of target</Badge>
+                ) : over > 0 ? (
+                  <Badge variant="warning">{over} over target</Badge>
                 ) : (
                   <Badge variant="success">On target</Badge>
                 )}

@@ -821,31 +821,38 @@ def _today_details(s, recommended_posts: int, day=None):
 
 def _llm_allocation_reasoning(allocation: list[dict]) -> dict:
     """One small, grounded LLM call: a plain-English one-liner per deal type for the Plan
-    page's 'Why' column. Grounded STRICTLY in the deterministic numbers (target posts, avg
-    views/post, measured sample); any sentence that cites a number NOT among those is
-    dropped, so it can never contradict the computed split. Returns {post_type: sentence};
-    '{}' on any failure — every row already carries a deterministic reasoning fallback."""
+    page's 'Why' column. Deliberately COUNT-FREE: it's fed the views figures + which type
+    leads, NEVER the post count — because the count is rebucketed to the real slots AFTER
+    this runs, so a cited count would go stale (single 'gets 27 posts' while the table
+    shows 21). It explains the views + the lean; the count lives in its own column. Any
+    sentence citing a number NOT in the inputs (e.g. a hallucinated count) is dropped.
+    Returns {post_type: sentence}; '{}' on failure (deterministic fallback stays)."""
     import json as _json
 
     from src.ai.client import AIClient, AIUnavailable
     from src.ai.factcheck import check_cited_numbers, extract_prose_numbers
     from src.ai.planner import _extract_json_object, _loads_lenient
 
+    # Rank by views so the prompt can name which type leads WITHOUT a post count.
+    _ranked = sorted([a for a in allocation if a.get("avg_views_per_post") is not None],
+                     key=lambda a: -a["avg_views_per_post"])
+    _lead = _ranked[0].get("post_type") if _ranked else None
     rows = [{"deal_type": a.get("deal_type"), "post_type": a.get("post_type"),
-             "target_posts": a.get("target_posts"),
              "avg_views_per_post": (round(a["avg_views_per_post"])
                                     if a.get("avg_views_per_post") is not None else None),
-             "measured_across_posts": a.get("views_sample")}
+             "measured_across_posts": a.get("views_sample"),
+             "leads_on_views": a.get("post_type") == _lead}
             for a in allocation if a.get("post_type")]
     if not rows:
         return {}
     system = (
-        "You explain a deals channel's deal-type split to its operator for a 'Why' column. "
-        "For EACH deal type in DATA, write ONE short, plain, conversational sentence: why it "
-        "gets this many posts and what its average views/post says. Use ONLY numbers present "
-        "in DATA — never invent a number, percentage, or comparison that isn't there. No "
-        "fluff, no unmeasurable claims (no conversion/CTR/revenue). Output EXACTLY one JSON "
-        "object mapping each type's post_type to its sentence, e.g. "
+        "You explain a deals channel's deal-type mix to its operator for a 'Why' column. For "
+        "EACH deal type in DATA, write ONE short, plain, conversational sentence: what its "
+        "average views/post is and why it gets more or less emphasis (the type that leads on "
+        "views is favoured; both still run for variety). Use ONLY numbers present in DATA. "
+        "CRITICAL: do NOT state any post count or percentage — those live in another column "
+        "and would go stale here. No fluff, no unmeasurable claims (no conversion/CTR/revenue). "
+        "Output EXACTLY one JSON object mapping each post_type to its sentence, e.g. "
         '{"single_deal":"...","loot_deal":"..."} — no text outside the JSON.')
     try:
         raw = AIClient().complete("DATA:\n" + _json.dumps(rows), system_extra=system,
@@ -859,10 +866,10 @@ def _llm_allocation_reasoning(allocation: list[dict]) -> dict:
         parsed = _loads_lenient(obj)
     except Exception:
         return {}
-    # Only numbers actually in the inputs are allowed to appear in the prose; a sentence
-    # citing anything else is a fabrication and gets dropped (deterministic fallback kept).
-    _nums = [v for r in rows for v in (r["target_posts"], r["avg_views_per_post"],
-                                       r["measured_across_posts"]) if v is not None]
+    # Only the VIEWS numbers are allowed in the prose (no counts fed in) — a sentence citing
+    # anything else (a hallucinated post count/percentage) is dropped, deterministic kept.
+    _nums = [v for r in rows for v in (r["avg_views_per_post"], r["measured_across_posts"])
+             if v is not None]
     allowed = [{f"n{i}": v for i, v in enumerate(_nums)}]
     out: dict = {}
     for pt, sentence in (parsed or {}).items():
