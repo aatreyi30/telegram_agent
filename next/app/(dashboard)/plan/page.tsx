@@ -46,7 +46,7 @@ function priceIntent(s: DailySlot): string {
  * steering the past has no effect. */
 function SteerPanel({
   operatorDirective, canRegenerate, isPending, onRegenerate,
-  canRevert, revertPending, onRevert,
+  canRevert, revertPending, onRevert, status,
 }: {
   operatorDirective?: string | null;
   canRegenerate?: boolean;
@@ -57,6 +57,9 @@ function SteerPanel({
   canRevert?: boolean;
   revertPending?: boolean;
   onRevert?: () => void;
+  // Feedback after a regenerate/revert settles: applied, refused (with the reason
+  // the backend gave — elapsed day, pause, already-over-count…), or errored.
+  status?: { kind: "success" | "refused" | "error"; message: string } | null;
 }) {
   const [directive, setDirective] = useState(operatorDirective || "");
   useEffect(() => setDirective(operatorDirective || ""), [operatorDirective]);
@@ -77,6 +80,20 @@ function SteerPanel({
         onChange={(e) => setDirective(e.target.value)}
         disabled={disabled}
       />
+      {(isPending || revertPending) && (
+        <div className="flex items-center gap-2 rounded-md bg-primary/5 px-3 py-2 text-xs text-primary">
+          <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-primary/30 border-t-primary" aria-hidden />
+          {revertPending ? "Restoring your previous plan…" : "Applying your steer — regenerating the plan (this calls the AI, a few seconds)…"}
+        </div>
+      )}
+      {!isPending && !revertPending && status && (
+        <div className={"rounded-md px-3 py-2 text-xs " + (
+          status.kind === "success" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+          : status.kind === "refused" ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+          : "bg-destructive/10 text-destructive")}>
+          {(status.kind === "success" ? "✓ " : status.kind === "refused" ? "⚠ " : "✕ ") + status.message}
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         {disabled && (
           <span className="text-xs text-muted-foreground" title="This day has elapsed">
@@ -235,6 +252,22 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
   const t: DailyPlanToday = brief.today;
   const regenerate = useRegenerateDailyPlan();
   const revert = useRevertDailyPlan();
+  // Translate the last settled mutation into an operator-facing banner. A backend
+  // `available:false` is a REFUSAL (elapsed day, pause intent, already over count) — show
+  // its reason rather than a false "applied".
+  const steerStatus: { kind: "success" | "refused" | "error"; message: string } | null =
+    regenerate.isPending || revert.isPending ? null
+    : revert.isSuccess && revert.data
+      ? (revert.data.available === false
+          ? { kind: "refused" as const, message: revert.data.reason || "Nothing to revert to." }
+          : { kind: "success" as const, message: "Reverted to your previous plan." })
+    : regenerate.isError
+      ? { kind: "error" as const, message: (regenerate.error as Error)?.message || "Something went wrong — try again." }
+    : regenerate.isSuccess && regenerate.data
+      ? (regenerate.data.available === false
+          ? { kind: "refused" as const, message: regenerate.data.reason || "That steer couldn't be applied." }
+          : { kind: "success" as const, message: "Plan updated — your steer was applied. See the schedule above." })
+    : null;
   return (
     <Card>
       <CardHeader><CardTitle className="text-base">Today — {isoSlash(brief.date)}</CardTitle></CardHeader>
@@ -414,6 +447,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
           canRevert={brief.can_revert}
           revertPending={revert.isPending}
           onRevert={() => revert.mutate({ date: brief.date })}
+          status={steerStatus}
         />
 
       </CardContent>
@@ -636,6 +670,15 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
 function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
   const retroQ = useLatestRetro();
   const regenerate = useRegenerateWeeklyPlan();
+  const weekStatus: { kind: "success" | "refused" | "error"; message: string } | null =
+    regenerate.isPending ? null
+    : regenerate.isError
+      ? { kind: "error" as const, message: (regenerate.error as Error)?.message || "Something went wrong — try again." }
+    : regenerate.isSuccess && regenerate.data
+      ? (regenerate.data.available === false
+          ? { kind: "refused" as const, message: regenerate.data.reason || "That steer couldn't be applied." }
+          : { kind: "success" as const, message: "Weekly plan updated — your steer was applied." })
+    : null;
   return (
     <Async q={q} rows={3}>
       {(w: WeeklyBrief) =>
@@ -687,6 +730,7 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                   onRegenerate={(directive) =>
                     regenerate.mutate({ end: w.week_end, directive: directive || undefined })
                   }
+                  status={weekStatus}
                 />
               </CardContent>
             </Card>
