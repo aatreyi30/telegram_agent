@@ -475,6 +475,13 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     follower_trajectory = [{"date": d["date"], **(fdeltas.get(d["date"])
                             or {"joined": None, "left": None, "net": None})}
                            for d in traj_days]
+    # The PRIOR plan's free-text digest carries its OWN "Yesterday: posted N…, 5 loot"
+    # recap whose numbers describe TWO days ago — the model kept copying those onto THIS
+    # yesterday (a real mismatch: it wrote "5 loot deals" when yesterday had 22). Pass
+    # only the prior plan's structured emphasis as the continuity signal (what it set out
+    # to do), never its stale numeric prose. Yesterday's real numbers live in `yesterday`.
+    _prior_bp = (yesterday_plan.blueprint or {}) if yesterday_plan is not None else {}
+    _prior_note = _prior_bp.get("emphasis") or None
     return {
         "today": day.isoformat(),
         "day_of_week": day.strftime("%A"),
@@ -483,7 +490,7 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
         "available_categories": available_categories,
         "available_merchants": available_merchants,
         "yesterday": yesterday,
-        "yesterday_digest": yesterday_plan.ai_digest if yesterday_plan else None,
+        "yesterday_digest": _prior_note,
         "trajectory": traj["days"],
         "recent_cadence": recent_cadence,
         "lifetime_baseline": traj["lifetime_baseline"],
