@@ -482,7 +482,7 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     # to do), never its stale numeric prose. Yesterday's real numbers live in `yesterday`.
     _prior_bp = (yesterday_plan.blueprint or {}) if yesterday_plan is not None else {}
     _prior_note = _prior_bp.get("emphasis") or None
-    return {
+    ctx_dict = {
         "today": day.isoformat(),
         "day_of_week": day.strftime("%A"),
         "this_week_theme": _week_theme_for(day, week_bp),
@@ -509,6 +509,33 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
         "available_deals": available_deals,
         "operator_directive": directive,
     }
+    # Views are whole numbers to a reader — round every view figure the model will see
+    # to an integer so it can't cite "573.087 views". Both the prompt AND the fact-check
+    # pool are built from this dict, so they stay mutually consistent. Rates/shares
+    # (engagement_rate, *_ratio, share) are deliberately NOT rounded.
+    _round_view_fields(ctx_dict)
+    return ctx_dict
+
+
+# View-count fields (a whole number of views) — rounded to int before the AI sees them.
+# Excludes engagement_rate / shares / ratios, which are genuinely fractional.
+_VIEW_KEYS = frozenset({
+    "views", "views_avg", "views_total", "views_median", "views_max", "views_min",
+    "avg_views", "avg_views_per_post", "avg_views_per_day", "median_views",
+})
+
+
+def _round_view_fields(obj) -> None:
+    """Recursively round every view-count value (see ``_VIEW_KEYS``) to an int, in place."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in _VIEW_KEYS and isinstance(v, float):
+                obj[k] = int(round(v))
+            else:
+                _round_view_fields(v)
+    elif isinstance(obj, list):
+        for it in obj:
+            _round_view_fields(it)
 
 
 _WINDOW_SPAN_RE = re.compile(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})")
