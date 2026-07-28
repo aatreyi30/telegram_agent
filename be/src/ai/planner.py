@@ -438,6 +438,7 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     the grounding context."""
     from datetime import timedelta
     from src.ai import context as ctx
+    from src.services.analytics.periods import ist_day_bounds_utc
 
     prev = day - timedelta(days=1)
     yesterday = ctx.daily_report_or_live(s, prev)
@@ -498,7 +499,15 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
         "posting_windows": inputs.get("posting_windows", []),
         "deal_type_allocation": inputs.get("deal_type_allocation", []),
         "merchant_mix": inputs.get("merchant_allocation", []),
-        "post_type_performance": ctx.post_type_performance(s),
+        # Windowed to the SAME 30 days ending yesterday that the Plan page's deal-type
+        # table now uses (service._today_details), so the AI narrative's per-post type
+        # views match the displayed table instead of diverging (all-time snapshot said
+        # loot 569 while the windowed table showed 518 — same metric, two numbers). Falls
+        # back to the all-time snapshot when the window has no posts.
+        "post_type_performance": (
+            ctx.post_type_performance_range(
+                s, ist_day_bounds_utc(prev - timedelta(days=29))[0],
+                ist_day_bounds_utc(prev)[1]) or ctx.post_type_performance(s)),
         "channel_style": ctx.channel_style(s),
         "segment_performance": ctx.segment_performance(s),
         "follower_trajectory": follower_trajectory,
