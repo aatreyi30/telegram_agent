@@ -252,7 +252,6 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
               </div>
             );
           })()}
-          {t.cadence_why && <p className="mt-1.5 text-sm text-foreground">{t.cadence_why}</p>}
         </div>
 
         {brief.digest ? (
