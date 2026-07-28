@@ -141,17 +141,27 @@ function ProcessingBadge({ e }: { e: CompetitorEntity }) {
  * "You 2/day · Them 5/day (+3)" — the diff is a plain subtraction (their posts_per_day
  * minus ours), never a ratio of the delta over our own (often small) value. That ratio pattern
  * was removed because dividing by a small "owned" denominator produces misleadingly huge %s.
+ *
+ * You / Them / delta ALL come from the benchmark row so they share ONE window and always
+ * reconcile (Them − You = delta). The entity's full-span `posts_per_day` is a DIFFERENT
+ * window — mixing it in produced rows like "You 38 · Them 212 (+27)" where 38+27≠212.
+ * We only fall back to the full-span rate when there's no benchmark (and then show no delta).
  */
 function PostsPerDayCell({ e }: { e: CompetitorEntity }) {
-  const theirs = e.posts_per_day;
-  if (theirs == null) return <span className="text-muted-foreground">—</span>;
   const bench = (e.benchmarks ?? []).find((b) => b.dimension === "posts_per_day");
+  const theirs = bench?.competitor_value ?? e.posts_per_day;
+  if (theirs == null) return <span className="text-muted-foreground">—</span>;
   const yours = bench?.owned_value;
-  const delta = bench?.delta;
+  // Derive the shown delta from the SHOWN (rounded) You/Them so it always adds up on
+  // screen — rounding the raw delta separately left rows like "You 40 · Them 19 (-20)"
+  // where 19-40 reads as -21. When there's no owned value, fall back to the raw delta.
+  const shownThem = Math.round(theirs);
+  const shownYou = yours != null ? Math.round(yours) : null;
+  const delta = shownYou != null && bench?.delta != null ? shownThem - shownYou : bench?.delta ?? null;
   return (
     <span className="text-xs whitespace-nowrap">
-      {yours != null && <span className="text-muted-foreground">You {Math.round(yours)}/day · </span>}
-      <span>Them {Math.round(theirs)}/day</span>
+      {shownYou != null && <span className="text-muted-foreground">You {shownYou}/day · </span>}
+      <span>Them {shownThem}/day</span>
       {e.window_mismatch && (
         <span
           className="ml-1 text-amber-600 dark:text-amber-400"
