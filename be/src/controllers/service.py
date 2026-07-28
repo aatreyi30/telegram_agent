@@ -787,6 +787,33 @@ def _today_details(s, recommended_posts: int, day=None):
         n = views_sample.get(a.get("post_type"))
         if n is not None:
             a["views_sample"] = n
+    # Deterministic per-type reasoning for the Plan page's "Why" column — explains the
+    # split and the views figure straight from the real numbers that produced them, so
+    # it's guaranteed to match the computed allocation. (Not an LLM rationalization,
+    # which could contradict the deterministic split — the whole point is trust.)
+    # Count-free on purpose: daily_brief rebuckets target_posts from the ACTUAL slots
+    # afterwards, so hardcoding a count here could drift from the number shown. The count
+    # is its own column; this explains the VIEWS figure and WHY the split leans as it does.
+    _vpp = {a.get("post_type"): a.get("avg_views_per_post") for a in allocation}
+    _sv, _lv = _vpp.get("single_deal"), _vpp.get("loot_deal")
+    for a in allocation:
+        pt = a.get("post_type")
+        vpp = a.get("avg_views_per_post")
+        mine = _sv if pt == "single_deal" else _lv
+        other = _lv if pt == "single_deal" else _sv
+        other_label = "loot boards" if pt == "single_deal" else "single deals"
+        bits: list[str] = []
+        if vpp is not None:
+            samp = f" across {a['views_sample']:,} posts" if a.get("views_sample") else ""
+            bits.append(f"averages {round(vpp)} views/post over the last 30 days{samp}")
+        if mine is not None and other is not None:
+            if mine >= other:
+                bits.append(f"ahead of {other_label} ({round(other)}/post), so the mix leans this type")
+            else:
+                bits.append(f"just behind {other_label} ({round(other)}/post), but kept in the mix so "
+                            "both types keep running (30% variety floor)")
+        a["reasoning"] = ("This type " + "; ".join(bits) + "." if bits
+                          else "Set by the channel's learned single/loot mix.")
     merchants = eng._merchant_allocation(s, recent, now)
     risks = eng._risks(recent, recommended_posts)
     return windows, allocation, merchants, (risks or None)

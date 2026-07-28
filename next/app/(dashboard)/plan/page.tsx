@@ -350,30 +350,16 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
                       </Tooltip>
                     </span>
                   </TableHead>
+                  <TableHead>Why</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {t.deal_type_allocation.map((a, i) => (
                   <TableRow key={i}>
                     <TableCell>{postTypeLabel(a.deal_type)}</TableCell>
-                    <TableCell>
-                      <Tooltip>
-                        <TooltipTrigger className="cursor-default underline decoration-dotted underline-offset-2">{a.target_posts}</TooltipTrigger>
-                        <TooltipContent>
-                          {a.target_posts} of {totalPosts} posts{totalPosts > 0 ? ` (${Math.round((a.target_posts / totalPosts) * 100)}%)` : ""} — this type&apos;s share of today&apos;s plan
-                        </TooltipContent>
-                      </Tooltip>
-                    </TableCell>
-                    <TableCell>
-                      {a.avg_views_per_post != null ? (
-                        <Tooltip>
-                          <TooltipTrigger className="cursor-default underline decoration-dotted underline-offset-2">{Math.round(a.avg_views_per_post)}</TooltipTrigger>
-                          <TooltipContent>
-                            Measured average{a.views_sample != null ? ` across ${a.views_sample.toLocaleString()} ${postTypeLabel(a.deal_type).toLowerCase()} posts` : ""}
-                          </TooltipContent>
-                        </Tooltip>
-                      ) : "—"}
-                    </TableCell>
+                    <TableCell className="tabular-nums">{a.target_posts}</TableCell>
+                    <TableCell className="tabular-nums">{a.avg_views_per_post != null ? Math.round(a.avg_views_per_post) : "—"}</TableCell>
+                    <TableCell className="max-w-md text-xs leading-snug text-muted-foreground">{a.reasoning || "—"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -390,7 +376,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Time (IST)</TableHead><TableHead>Posts</TableHead>
+                  <TableHead className="w-8">#</TableHead><TableHead>Time (IST)</TableHead><TableHead>Posts</TableHead>
                   <TableHead>Type</TableHead><TableHead>Theme</TableHead>
                   <TableHead>Merchant</TableHead>
                   <TableHead>Why</TableHead>
@@ -399,6 +385,7 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
               <TableBody>
                 {t.slots.map((s, i) => (
                   <TableRow key={i}>
+                    <TableCell className="tabular-nums text-muted-foreground">{i + 1}</TableCell>
                     <TableCell className="font-medium tabular-nums">{s.time_ist || s.window_ist || "—"}</TableCell>
                     <TableCell className="tabular-nums">{s.time_ist ? 1 : (s.count ?? 1)}</TableCell>
                     <TableCell><Badge variant="secondary" className="font-medium">{postTypeLabel(s.type)}</Badge></TableCell>
