@@ -365,7 +365,10 @@ class CampaignPlanningEngine(BaseCollector):
         schedule = blueprint.get("posting_plan") or self._recent_posting_windows(s, now, posts)
         merchants = self._merchant_allocation(s, recent, now)
         risks = self._risks(recent, posts)
-        near = events[0] if events and events[0]["days_away"] <= 7 else None
+        # Only a sale-flavored event (type in _RAMP) belongs in "consider ramping" — a
+        # plain observance/holiday isn't a shopping event and shouldn't suggest ramping.
+        _ramp_events = [e for e in events if e.get("event_type") in _RAMP]
+        near = _ramp_events[0] if _ramp_events and _ramp_events[0]["days_away"] <= 7 else None
         bp = {
             "posts_planned": posts,
             "posting_windows": [{"part": p["part"], "hours": p["hours"],

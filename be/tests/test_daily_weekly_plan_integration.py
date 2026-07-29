@@ -239,6 +239,41 @@ def test_daily_brief_floors_recommended_posts_to_the_weekly_event_ramp(monkeypat
     assert "Test Sale" not in r2["today"]["cadence_why"]
 
 
+def test_daily_brief_upcoming_event_callout_ignores_context_only_events(monkeypatch):
+    """A plain observance/holiday (e.g. "Friendship Day") must never surface the
+    "consider ramping" callout — only a sale-flavored event (type in _RAMP) should.
+    Regression for a real live bug: seeding the Aug 2026 festival/holiday calendar
+    made `upcoming_events(...)[0]` (unfiltered by type) pick the nearest ANY event,
+    surfacing "Friendship Day ... consider ramping" in the UI."""
+    from datetime import date as _date
+    from src.controllers import service
+    from src.db.models_campaign import SaleEvent
+    from src.db.session import session_scope
+
+    monkeypatch.setattr(
+        "src.ai.planner.generate_day_plan",
+        lambda s, day=None, inputs=None, **_kw: {"available": False, "reason": "down",
+                                                  "plan": None, "digest": "", "facts": []},
+    )
+
+    with session_scope() as s:
+        s.add(SaleEvent(key="test_observance", name="Friendship Day",
+                        event_type="observance", merchant_key=None,
+                        next_date=_date(2026, 7, 6), window_days=1,
+                        date_confidence="approximate"))
+    r = service.daily_brief(date="2026-07-01")
+    assert r["upcoming_event"] is None
+
+    with session_scope() as s:
+        s.add(SaleEvent(key="test_merchant_sale", name="Flipkart Test Sale",
+                        event_type="merchant_sale", merchant_key="flipkart",
+                        next_date=_date(2026, 7, 4), window_days=3,
+                        date_confidence="approximate"))
+    r2 = service.daily_brief(date="2026-07-02")
+    assert r2["upcoming_event"] is not None
+    assert r2["upcoming_event"]["name"] == "Flipkart Test Sale"
+
+
 def test_weekly_brief_event_ramp_merchant_bias_survives_ai_merge(monkeypatch):
     """The AI's own weekly plan unconditionally overwrites merchant_priorities from
     ai_plan.get(...) — even when that's None. An active event's merchant bias (and the

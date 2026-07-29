@@ -982,7 +982,11 @@ def ensure_daily_ai_plan(s, day):
     recent_max_30d = max((d["posts"] for d in traj30["days"]), default=0)
     evt = None
     try:
-        evs = upcoming_events(s, day, within_days=14)
+        from src.services.planning.campaign import _RAMP
+        # Only a sale-flavored event (type in _RAMP) belongs in the "consider ramping"
+        # callout — a plain observance/holiday (e.g. "Friendship Day") isn't a shopping
+        # event and shouldn't tell the operator to ramp frequency for it.
+        evs = [e for e in upcoming_events(s, day, within_days=14) if e.event_type in _RAMP]
         if evs:
             e = evs[0]
             evt = {"name": e.name, "days_away": (e.next_date - day).days,
@@ -1136,7 +1140,10 @@ def daily_brief(date: str | None = None, directive: str | None = None,
 
         evt = None
         try:
-            evs = upcoming_events(s, day, within_days=14)
+            from src.services.planning.campaign import _RAMP
+            # Same ramp-type-only filter as ensure_daily_ai_plan — a context-only
+            # observance/holiday must never surface a "consider ramping" callout.
+            evs = [e for e in upcoming_events(s, day, within_days=14) if e.event_type in _RAMP]
             if evs:
                 e = evs[0]
                 evt = {"name": e.name, "days_away": (e.next_date - day).days,
@@ -1327,7 +1334,23 @@ def _grounded_weekly_summary(s, end_day=None) -> str:
     total_posts = sum(d["posts"] for d in days)
     total_views = sum((d.get("views") or 0) for d in days)
     active = [d for d in days if d["posts"]]
-    ptp = {p["post_type"]: p for p in ctx.post_type_performance(s)}
+    # SAME 30-day window ending at end_day that the rest of the weekly plan (mix
+    # override, narrative grounding) reads — an all-time snapshot here previously
+    # produced a DIFFERENT per-post comparison than the plan's own mix decision, and
+    # this fallback also used to conclude "so the mix leans X" from that comparison,
+    # which could contradict an operator steer (e.g. "lean into loot") that had
+    # already set a DIFFERENT mix for a different reason. State the measured
+    # per-post numbers only — never assert a mix conclusion this function didn't
+    # actually decide.
+    if end_day is not None:
+        from datetime import timedelta as _td
+        from src.services.analytics.periods import ist_day_bounds_utc as _ib
+        _w_start, _ = _ib(end_day - _td(days=29))
+        _, _w_end = _ib(end_day)
+        ptp = {p["post_type"]: p for p in (ctx.post_type_performance_range(s, _w_start, _w_end)
+                                           or ctx.post_type_performance(s))}
+    else:
+        ptp = {p["post_type"]: p for p in ctx.post_type_performance(s)}
     sv = (ptp.get("single_deal") or {}).get("avg_views")
     lv = (ptp.get("loot_deal") or {}).get("avg_views")
 
@@ -1341,11 +1364,11 @@ def _grounded_weekly_summary(s, end_day=None) -> str:
         parts.append(line)
     if sv and lv:
         if sv >= lv:
-            parts.append(f"per post, single deals ({round(sv)} views) out-perform loot boards "
-                         f"({round(lv)}), so the mix leans single while keeping loot for variety")
+            parts.append(f"per post, single deals averaged {round(sv)} views vs loot boards' "
+                         f"{round(lv)}")
         else:
-            parts.append(f"per post, loot boards ({round(lv)} views) out-perform single deals "
-                         f"({round(sv)}), so the mix leans loot while keeping singles for variety")
+            parts.append(f"per post, loot boards averaged {round(lv)} views vs single deals' "
+                         f"{round(sv)}")
     body = ". ".join(parts) if parts else "there isn't enough measured post data yet to summarise the week"
     return (f"{body}. (Grounded summary — the AI's own weekly narrative was withheld "
             "because some figures it cited couldn't be verified against the data.)")
