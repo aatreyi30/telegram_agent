@@ -406,6 +406,17 @@ export interface WeeklyBrief {
   ai_available: boolean;
   operator_directive?: string | null;
   can_regenerate?: boolean;
+  can_revert?: boolean;
+  // Universal steer: what the AI understood from a free-text steer, and any asks it
+  // could not enforce in the plan (shown so the steer is never a silent partial no-op).
+  steer_interpretation?: string | null;
+  steer_unsupported?: string[] | null;
+  // A seeded sale event (Independence Day Sale, Big Billion Days, ...) landing this
+  // week auto-ramps the cadence — present only when one is active this week.
+  event_ramp?: {
+    event: string; days_away: number; merchant_key?: string | null;
+    multiplier: number; baseline_posts_per_day: number; ramped_posts_per_day: number;
+  } | null;
 }
 
 // GET /retro/latest — Phase 2.4 weekly retro: prediction accuracy, rule-based
