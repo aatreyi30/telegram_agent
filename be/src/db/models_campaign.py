@@ -52,7 +52,10 @@ class SaleEvent(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     key: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    event_type: Mapped[str] = mapped_column(String(32))  # festival | merchant_sale | shopping
+    # festival | merchant_sale | shopping ramp posting cadence (see _RAMP in campaign.py);
+    # gazetted_holiday | observance | national_observance | festival_observance are
+    # context-only — surfaced to the AI narrative but never bump posts_per_day.
+    event_type: Mapped[str] = mapped_column(String(32))
     merchant_key: Mapped[str | None] = mapped_column(String(64))  # None = multi-merchant
     next_date: Mapped[date | None] = mapped_column(Date)
     window_days: Mapped[int] = mapped_column(Integer, default=3)

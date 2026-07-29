@@ -15,7 +15,7 @@ import statistics
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.services.collection.base import BaseCollector, CollectorResult
@@ -68,8 +68,11 @@ class CampaignPlanningEngine(BaseCollector):
         now = datetime.now(timezone.utc)
         today = now.date()
         with session_scope() as s:
-            if s.scalar(select(func.count()).select_from(SaleEvent)) == 0:
-                seed_sale_events(s, today)
+            # Upsert-by-key, so this stays cheap and safe to run every time (not just when
+            # the table is empty) — any future edit to the _SEED calendar in calendar.py
+            # then reaches the DB on the next scheduled run automatically, with no separate
+            # manual re-seed step required.
+            seed_sale_events(s, today)
 
             strat = s.scalar(select(GrowthStrategy).where(
                 GrowthStrategy.growth_version == GROWTH_VERSION))
@@ -92,7 +95,11 @@ class CampaignPlanningEngine(BaseCollector):
             # build plans
             daily = self._daily_plan(s, now, blueprint, perf, recent, today, event_data)
             weekly = self._weekly_plan(blueprint, perf, today, event_data, recent, s, now)
-            evt = self._event_plan(event_data[0], blueprint, perf) if event_data else None
+            # Only sale-flavored events (types in _RAMP) get a standalone EVENT campaign —
+            # a plain observance/holiday (e.g. "International Cat Day") has no shopping
+            # angle to ramp posting for, even if it happens to be the nearest upcoming date.
+            ramp_events = [e for e in event_data if e["event_type"] in _RAMP]
+            evt = self._event_plan(ramp_events[0], blueprint, perf) if ramp_events else None
 
             # persist (replace this version's plans)
             s.query(CampaignPlan).filter(CampaignPlan.campaign_version == CAMPAIGN_VERSION).delete()
@@ -405,13 +412,18 @@ class CampaignPlanningEngine(BaseCollector):
         # never disagree on how hard to ramp for the same event. Runs BEFORE any operator
         # steer is applied (enforce_weekly_constraints, in service.py, later) so an
         # explicit steer always overrides this automatic default, never the reverse.
+        # Only a sale-flavored event (type in _RAMP) can ramp cadence — a plain observance
+        # or gazetted holiday in the same week is still surfaced to the AI via
+        # `upcoming_events` below, but it doesn't get a fallback multiplier just for
+        # existing (the old `.get(type, 1.5)` fallback used to ramp ANY event type).
         week_end_date = today + timedelta(days=6)
         active_event = next((e for e in events
-                             if e.get("next_date") and today <= e["next_date"] <= week_end_date), None)
+                             if e.get("next_date") and today <= e["next_date"] <= week_end_date
+                             and e.get("event_type") in _RAMP), None)
         event_ramp = None
         if active_event:
             baseline_posts = posts
-            mult = _RAMP.get(active_event.get("event_type"), 1.5)
+            mult = _RAMP[active_event["event_type"]]
             posts = max(baseline_posts, round(baseline_posts * mult))
             event_ramp = {"event": active_event["name"], "days_away": active_event.get("days_away"),
                           "merchant_key": active_event.get("merchant_key"), "multiplier": mult,
@@ -460,8 +472,10 @@ class CampaignPlanningEngine(BaseCollector):
                 "evidence": {"growth_version": GROWTH_VERSION}, "confidence": 0.6}
 
     def _event_plan(self, e: dict, blueprint, perf) -> dict:
+        # Callers only ever pass a ramp-typed event (see the `ramp_events` filter in
+        # run()) — no fallback multiplier needed here.
         base = int(round(blueprint.get("posting_frequency_baseline") or 8))
-        ramp = _RAMP.get(e["event_type"], 1.5)
+        ramp = _RAMP[e["event_type"]]
         ramp_posts = int(round(base * ramp))
         approx = e["date_confidence"] == DateConfidence.APPROXIMATE
         merchant_focus = e["merchant_key"] or "diversify across top merchants"

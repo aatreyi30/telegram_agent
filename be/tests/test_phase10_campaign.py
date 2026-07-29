@@ -53,6 +53,29 @@ def test_weekly_plan_no_ramp_when_event_is_outside_the_week():
     assert bp["posts_per_day"] == 10   # unramped baseline
 
 
+def test_weekly_plan_context_only_event_does_not_ramp_even_when_nearest():
+    """A plain observance/holiday (e.g. "International Cat Day", a gazetted holiday)
+    landing this week must NOT ramp cadence — only merchant_sale/festival/shopping
+    (the _RAMP-keyed types) do. It should still be visible in upcoming_events so the
+    AI can mention it in the narrative, just without a fabricated 1.5x fallback ramp."""
+    e = CampaignPlanningEngine()
+    today = date(2026, 8, 10)  # Monday
+    blueprint = {"posting_frequency_baseline": 10}
+    events_in_week = [
+        {"name": "International Cat Day", "event_type": "observance",
+         "merchant_key": None, "next_date": date(2026, 8, 12),
+         "days_away": 2, "date_confidence": "exact"},
+        {"name": "Independence Day", "event_type": "gazetted_holiday",
+         "merchant_key": None, "next_date": date(2026, 8, 15),
+         "days_away": 5, "date_confidence": "exact"},
+    ]
+    plan = e._weekly_plan(blueprint, perf=[], today=today, events=events_in_week)
+    bp = plan["blueprint"]
+    assert bp["event_ramp"] is None
+    assert bp["posts_per_day"] == 10   # unramped baseline
+    assert [ev["name"] for ev in bp["upcoming_events"]] == ["International Cat Day", "Independence Day"]
+
+
 def test_allocate_posts_weights_by_growth_action():
     e = CampaignPlanningEngine()
     blueprint = {"content_mix": [
