@@ -681,10 +681,14 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
               const { loot, deal } = w.loot_deal_ratio!;
               const lootPct = Math.round((loot / ((loot || 0) + (deal || 0) || 1)) * 100);
               return (
-                <div className="flex items-center gap-1.5 text-xs">
-                  <span className="text-muted-foreground">Target mix:</span>
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <span className="text-muted-foreground">Recommended mix going forward:</span>
                   <Badge variant="outline">Single {100 - lootPct}%</Badge>
                   <Badge variant="outline">Loot {lootPct}%</Badge>
+                  {/* Distinct from any "X% of posts" figure the narrative cites above —
+                      that's the ACTUAL recent split; this is what to aim for next, based
+                      on per-post view performance, not a restatement of current share. */}
+                  <span className="text-muted-foreground">— not this week&apos;s actual split so far</span>
                 </div>
               );
             })()}
