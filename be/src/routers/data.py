@@ -203,6 +203,12 @@ def plan_weekly_regenerate(user: dict = Depends(require_role("editor")),
     return ok(service.regenerate_weekly(end=end, directive=directive))
 
 
+@router.post("/plan/weekly/revert")
+def plan_weekly_revert(user: dict = Depends(require_role("editor")),
+                       end: str | None = Body(None, embed=True)):
+    return ok(service.revert_weekly(end=end))
+
+
 @router.get("/weekly")
 def weekly():
     return ok(service.weekly_report())
