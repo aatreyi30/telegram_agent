@@ -97,14 +97,23 @@ export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260
    * so an under-sampled bucket never reads as a confident winner next to a well-sampled one. */
   mutedKey?: string;
 }) {
+  // Long dimension labels (category/discount-band names) collide when drawn horizontally
+  // even with just 5 bars — angle whenever there's more than a handful, not only past 8.
+  const angled = data.length > 4;
+  // A count metric (views/posts/reactions/forwards) is always a whole number — with a small
+  // max (e.g. 2 forwards in an hour), recharts' default tick picker interpolates fractional
+  // ticks (0, 0.5, 1, 1.5, 2), which reads as nonsense for a thing you can't do half of.
+  // Percent metrics (unit === "%") genuinely need decimals (e.g. a 0.26% engagement rate).
+  const allowDecimals = unit === "%";
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+      <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: angled ? 8 : 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false}
-          interval={0} angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? "end" : "middle"}
-          height={data.length > 8 ? 60 : 30} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} tickFormatter={compactNum} />
+          interval={0} angle={angled ? -35 : 0} textAnchor={angled ? "end" : "middle"}
+          height={angled ? 60 : 30} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44}
+          tickFormatter={compactNum} allowDecimals={allowDecimals} />
         <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
         <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit}>
           {mutedKey && data.map((row, i) => (
