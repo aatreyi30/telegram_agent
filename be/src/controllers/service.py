@@ -819,73 +819,6 @@ def _today_details(s, recommended_posts: int, day=None):
     return windows, allocation, merchants, (risks or None)
 
 
-def _llm_allocation_reasoning(allocation: list[dict]) -> dict:
-    """One small, grounded LLM call: a plain-English one-liner per deal type for the Plan
-    page's 'Why' column. Deliberately COUNT-FREE: it's fed the views figures + which type
-    leads, NEVER the post count — because the count is rebucketed to the real slots AFTER
-    this runs, so a cited count would go stale (single 'gets 27 posts' while the table
-    shows 21). It explains the views + the lean; the count lives in its own column. Any
-    sentence citing a number NOT in the inputs (e.g. a hallucinated count) is dropped.
-    Returns {post_type: sentence}; '{}' on failure (deterministic fallback stays)."""
-    import json as _json
-
-    from src.ai.client import AIClient, AIUnavailable
-    from src.ai.factcheck import check_cited_numbers, extract_prose_numbers
-    from src.ai.planner import _extract_json_object, _loads_lenient
-
-    # Rank by views so the prompt can name which type leads WITHOUT a post count.
-    _ranked = sorted([a for a in allocation if a.get("avg_views_per_post") is not None],
-                     key=lambda a: -a["avg_views_per_post"])
-    _lead = _ranked[0].get("post_type") if _ranked else None
-    rows = [{"deal_type": a.get("deal_type"), "post_type": a.get("post_type"),
-             "avg_views_per_post": (round(a["avg_views_per_post"])
-                                    if a.get("avg_views_per_post") is not None else None),
-             "measured_across_posts": a.get("views_sample"),
-             "leads_on_views": a.get("post_type") == _lead}
-            for a in allocation if a.get("post_type")]
-    if not rows:
-        return {}
-    system = (
-        "You explain to a deals-channel operator WHY the deal-type mix leans the way it does, "
-        "for a 'Why' column. For EACH deal type in DATA, write ONE short, plain, conversational "
-        "sentence that REASONS the choice — do NOT just restate 'gets more/less emphasis'. It "
-        "MUST: (1) state this type's avg views/post, (2) COMPARE it to the OTHER type by name "
-        "and number, (3) draw the conclusion (whichever LEADS on views gets the lean), and "
-        "(4) note both types still run so the day keeps variety. Example: 'Loot boards average "
-        "522 views/post — just ahead of single deals (521) — so the mix leans loot, with singles "
-        "kept in for variety.' Use ONLY numbers present in DATA. CRITICAL: never state a post "
-        "count or percentage (those live in another column and would go stale). No fluff, no "
-        "unmeasurable claims (conversion/CTR/revenue). Output EXACTLY one JSON object mapping "
-        'each post_type to its sentence, e.g. {"single_deal":"...","loot_deal":"..."} — JSON only.')
-    try:
-        raw = AIClient().complete("DATA:\n" + _json.dumps(rows), system_extra=system,
-                                  max_tokens=400, trace_call="alloc_reason", provider="groq")
-    except AIUnavailable:
-        return {}
-    obj = _extract_json_object(raw)
-    if obj is None:
-        return {}
-    try:
-        parsed = _loads_lenient(obj)
-    except Exception:
-        return {}
-    # Only the VIEWS numbers are allowed in the prose (no counts fed in) — a sentence citing
-    # anything else (a hallucinated post count/percentage) is dropped, deterministic kept.
-    _nums = [v for r in rows for v in (r["avg_views_per_post"], r["measured_across_posts"])
-             if v is not None]
-    allowed = [{f"n{i}": v for i, v in enumerate(_nums)}]
-    out: dict = {}
-    for pt, sentence in (parsed or {}).items():
-        if not isinstance(sentence, str) or not sentence.strip():
-            continue
-        # `digest` is one of the keys extract_prose_numbers actually scans — pull the
-        # sentence's numbers through it and verify each against the allowed inputs.
-        fc = check_cited_numbers(extract_prose_numbers({"digest": sentence}), allowed)
-        if fc.get("status") != "failed":   # pass/warn ok; a hard fail means an invented number
-            out[pt] = sentence.strip()
-    return out
-
-
 def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                         directive: str | None = None, recent_max_30d: int | None = None,
                         steer_intent: dict | None = None) -> dict:
@@ -949,13 +882,9 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                 fc = {**fc, "unmeasurable": bad_claims}
                 if fc_status == "pass":
                     fc_status = "warn"
-        # LLM-authored reasoning for the deal-type table's Why column — a small grounded,
-        # fact-checked call, attached to the plan so it's cached in the blueprint (generated
-        # once per plan, not per page-load). Skipped for a fallback plan (no AI to trust).
-        if ai_ok and not plan.get("is_fallback"):
-            _ar = _llm_allocation_reasoning(allocation)
-            if _ar:
-                plan["allocation_reasoning"] = _ar
+        # (The deal-type 'Why' is computed deterministically from the FINAL split in
+        # daily_brief — see _reason_deal_type_split — so it can never contradict the
+        # Target-posts column, which an LLM views-comparison did.)
         # Current IST minute-of-day when planning TODAY — lets persist floor a hard time
         # window at "now" so a partial-future steer ("after 6pm" sent at 8pm) places all
         # its slots in the remaining window instead of thinning into already-past minutes.
@@ -1022,6 +951,52 @@ def ensure_daily_ai_plan(s, day):
         evt = None
     return _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                               recent_max_30d=recent_max_30d).get("row")
+
+
+def _reason_deal_type_split(allocation: list[dict]) -> None:
+    """Deterministic 'Why' for the deal-type table, computed from the FINAL split so it can
+    NEVER contradict the Target-posts column (the "loot gets more emphasis" bug — loot led on
+    views by 1 but had FEWER posts). Each row: measured views, an honest tie/ahead/behind
+    comparison to the other type, and a conclusion tied to the ACTUAL slot counts."""
+    posts = {a.get("post_type"): (a.get("target_posts") or 0) for a in allocation}
+    views = {a.get("post_type"): a.get("avg_views_per_post") for a in allocation}
+    for a in allocation:
+        pt = a.get("post_type")
+        my_p, other_p = posts.get(pt, 0), posts.get("loot_deal" if pt == "single_deal" else "single_deal", 0)
+        my_v = views.get(pt)
+        other_v = views.get("loot_deal" if pt == "single_deal" else "single_deal")
+        label = "Single deals" if pt == "single_deal" else "Loot boards"
+        other_label = "loot boards" if pt == "single_deal" else "single deals"
+        samp = a.get("views_sample")
+
+        if my_v is not None:
+            vclause = f"{label} average {round(my_v)} views/post"
+            if samp:
+                vclause += f" (30 days, {samp:,} posts)"
+        else:
+            vclause = f"{label} have no measured views yet"
+
+        lead = behind = tied = False
+        if my_v is not None and other_v is not None:
+            rel = abs(my_v - other_v) / max(my_v, other_v, 1)
+            tied = rel < 0.02
+            lead = (not tied) and my_v > other_v
+            behind = (not tied) and my_v < other_v
+            cmp = (f", essentially tied with {other_label} ({round(other_v)})" if tied
+                   else f", ahead of {other_label} ({round(other_v)})" if lead
+                   else f", behind {other_label} ({round(other_v)})")
+        else:
+            cmp = ""
+
+        if my_p > other_p:
+            concl = (f" — so it takes the larger share of today's slots ({my_p} vs {other_p})" if lead
+                     else f", and still takes more of today's slots ({my_p} vs {other_p}) to hold the planned mix")
+        elif my_p < other_p:
+            concl = (f" — so it runs fewer slots today ({my_p} vs {other_p}), kept in for variety" if behind
+                     else f", but runs fewer slots today ({my_p} vs {other_p}) to keep the mix balanced")
+        else:
+            concl = f" — today's slots split evenly ({my_p} each)"
+        a["reasoning"] = vclause + cmp + concl + "."
 
 
 def daily_brief(date: str | None = None, directive: str | None = None,
@@ -1187,16 +1162,11 @@ def daily_brief(date: str | None = None, directive: str | None = None,
                 _a["target_posts"] = _actual.get(_a.get("post_type"), 0)
             allocation = [_a for _a in allocation if (_a.get("target_posts") or 0) > 0]
 
-        # Overlay the LLM-authored per-type reasoning (grounded + fact-checked at
-        # generation, cached in the blueprint) onto the Why column. Each row already
-        # carries a deterministic reasoning; the LLM one only REPLACES it when present, so
-        # a fresh channel / AI-down / cron plan still shows the deterministic explanation.
-        _alloc_reason = plan.get("allocation_reasoning") if isinstance(plan, dict) else None
-        if _alloc_reason:
-            for _a in allocation:
-                _r = _alloc_reason.get(_a.get("post_type"))
-                if _r:
-                    _a["reasoning"] = _r
+        # Compute the deal-type 'Why' from the FINAL split (post-rebucket) so it always
+        # agrees with the Target-posts column — the fix for "loot gets more emphasis" while
+        # loot has FEWER posts. Deterministic: measured views + honest tie/lead comparison +
+        # the actual slot conclusion.
+        _reason_deal_type_split(allocation)
 
         # Same alignment for posting windows: they're built from the deterministic
         # recent cadence, so when the AI plans fewer posts (e.g. 15) the windows still
