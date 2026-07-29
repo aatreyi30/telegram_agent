@@ -43,7 +43,10 @@ def _owned_window_desc(s: Session) -> str:
     return f"owned, last {w['months']} mo"
 
 
-def reasoning_insights(s: Session) -> list[dict]:
+def reasoning_insights(s: Session, limit: int = 10) -> list[dict]:
+    """Highest-confidence insights first, capped like growth_recommendations() — this fed
+    an UNBOUNDED number of rows into every AI prompt (daily + weekly), a real contributor
+    to the weekly plan's Groq 413 "request too large" errors as insights accumulated."""
     return [{"metric": i.metric, "direction": i.direction,
              "change": i.change_value, "unit": i.change_unit,
              "observation": i.observation, "why": i.reasoning,
@@ -51,7 +54,7 @@ def reasoning_insights(s: Session) -> list[dict]:
              "confidence": i.confidence}
             for i in s.scalars(select(ReasonedInsight).where(
                 ReasonedInsight.reasoning_version == REASONING_VERSION)
-                .order_by(ReasonedInsight.confidence.desc()))]
+                .order_by(ReasonedInsight.confidence.desc()).limit(limit))]
 
 
 def growth_recommendations(s: Session, limit: int = 8) -> list[dict]:
@@ -319,9 +322,16 @@ def available_deals(s: Session, limit: int = 15) -> list[dict]:
                 if len(picked) >= limit:
                     break
 
-    return [{"deal_id": d.deal_id, "title": d.title, "merchant_key": d.merchant_key,
+    # NOTE: deliberately no `url`/`deal_id` — every caller (build_plan_context's AI
+    # prompt, the regex/steer feed-vocabulary lookups) only reads merchant_key/category/
+    # title/price. The AI's plan never echoes a specific deal back (its slot schema is
+    # type/time/theme/merchant/why, no deal reference) — jit_fill matches a real deal to
+    # each slot fresh, by merchant+category, at actual post time, not from anything shown
+    # here. Affiliate URLs are long, so `url` alone was ~8,000 of the daily prompt's
+    # ~10,900 DATA tokens.
+    return [{"title": d.title, "merchant_key": d.merchant_key,
              "category": d.category, "current_price": d.current_price,
-             "discount_percent": d.discount_percent, "url": d.clean_url or d.url} for d in picked]
+             "discount_percent": d.discount_percent} for d in picked]
 
 
 def full_briefing_context(s: Session, weekly: bool = False, end_day=None) -> dict:
@@ -385,7 +395,11 @@ def full_briefing_context(s: Session, weekly: bool = False, end_day=None) -> dic
 
 
 def to_json(data: dict | list) -> str:
-    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+    """Compact (no pretty-print indent) — this only ever feeds an LLM prompt (grep confirms
+    every call site is in ai/*.py building a prompt, never rendered for a human), so the
+    indent whitespace was pure wasted tokens. Cuts ~30% off every AI call's input size —
+    the weekly plan's Groq 413 "request too large" errors were partly this."""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 _REPORT_NUMERIC = (
