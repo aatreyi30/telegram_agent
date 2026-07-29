@@ -141,3 +141,14 @@ export function useRegenerateWeeklyPlan() {
     },
   });
 }
+// Revert the last steer — restore the pre-steer weekly plan (no AI call).
+export function useRevertWeeklyPlan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { end?: string }) => api.post<WeeklyBrief>("/plan/weekly/revert", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.weeklyBriefAll() });
+      qc.invalidateQueries({ queryKey: queryKeys.retroLatestAll() });
+    },
+  });
+}
