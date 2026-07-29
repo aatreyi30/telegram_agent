@@ -21,7 +21,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { useQueryParams } from "@/lib/use-search-params";
 import { cn } from "@/lib/utils";
 import { postTypeLabel, merchantLabel, categoryLabel, titleCase, statusLabel, isoSlash } from "@/lib/format";
-import { useRegenerateDailyPlan, useRegenerateWeeklyPlan, useRevertDailyPlan } from "@/queries/mutations";
+import { useRegenerateDailyPlan, useRegenerateWeeklyPlan, useRevertDailyPlan, useRevertWeeklyPlan } from "@/queries/mutations";
 import { useDailyBrief, useLatestRetro, useWeeklyBrief } from "@/queries/queries";
 import type {
   DailyBrief, DailyPlanToday, DailySlot, PlanRisk, RetroLatest, WeeklyBrief,
@@ -47,19 +47,24 @@ function priceIntent(s: DailySlot): string {
 function SteerPanel({
   operatorDirective, canRegenerate, isPending, onRegenerate,
   canRevert, revertPending, onRevert, status,
+  placeholder = "Steer the AI — e.g. 'Push electronics harder today' or 'avoid the same merchant twice'…",
 }: {
   operatorDirective?: string | null;
   canRegenerate?: boolean;
   isPending: boolean;
   onRegenerate: (directive: string) => void;
-  // Revert (undo the last steer) is daily-only and shown only when a pre-steer
-  // snapshot exists — omitted by the weekly card.
+  // Revert (undo the last steer) is shown only when a pre-steer snapshot exists — both
+  // the daily and weekly cards pass this once their brief reports can_revert.
   canRevert?: boolean;
   revertPending?: boolean;
   onRevert?: () => void;
   // Feedback after a regenerate/revert settles: applied, refused (with the reason
   // the backend gave — elapsed day, pause, already-over-count…), or errored.
   status?: { kind: "success" | "refused" | "error"; message: string } | null;
+  // Defaults to the daily example — the weekly card passes its own (merchants/mix/
+  // posts-per-day are what a weekly steer can actually reach; there are no per-day
+  // slots at this granularity, so "today"/time-of-day examples don't fit).
+  placeholder?: string;
 }) {
   const [directive, setDirective] = useState(operatorDirective || "");
   useEffect(() => setDirective(operatorDirective || ""), [operatorDirective]);
@@ -75,7 +80,7 @@ function SteerPanel({
       )}
       <textarea
         className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
-        placeholder="Steer the AI — e.g. 'Push electronics harder today' or 'avoid the same merchant twice'…"
+        placeholder={placeholder}
         value={directive}
         onChange={(e) => setDirective(e.target.value)}
         disabled={disabled}
@@ -655,6 +660,18 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
           <Stat label="Recommended/day" value={String(w.recommended_posts_per_day)} />
         </div>
 
+        {/* A seeded sale event (Independence Day Sale, Big Billion Days, ...) landing
+            this week auto-ramps the cadence — say so plainly, with the real before/after
+            numbers, so a jump in Recommended/day is never a silent surprise. */}
+        {w.event_ramp && (
+          <div className="rounded-md border border-blue-400/40 bg-blue-500/10 px-3 py-2.5 text-xs leading-snug text-blue-800 dark:text-blue-200">
+            ⚡ <strong>{w.event_ramp.event}</strong> is {w.event_ramp.days_away === 0 ? "today" : `${w.event_ramp.days_away} day(s) away`} —
+            cadence auto-ramped from {w.event_ramp.baseline_posts_per_day} to{" "}
+            <strong>{w.event_ramp.ramped_posts_per_day}/day</strong> ({w.event_ramp.multiplier}x)
+            {w.event_ramp.merchant_key && <> and leaning into {merchantLabel(w.event_ramp.merchant_key)}</>}.
+          </div>
+        )}
+
         {/* The weekly PLAN's strategy — the recommendations that steer the daily plans. */}
         {(w.direction || w.loot_deal_ratio || (w.merchant_priorities?.length ?? 0) > 0) && (
           <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
@@ -697,14 +714,23 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
 function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
   const retroQ = useLatestRetro();
   const regenerate = useRegenerateWeeklyPlan();
+  const revert = useRevertWeeklyPlan();
   const weekStatus: { kind: "success" | "refused" | "error"; message: string } | null =
-    regenerate.isPending ? null
+    regenerate.isPending || revert.isPending ? null
+    : revert.isSuccess && revert.data
+      ? (revert.data.available === false
+          ? { kind: "refused" as const, message: revert.data.reason || "Nothing to revert to." }
+          : { kind: "success" as const, message: "Reverted to your previous weekly plan." })
     : regenerate.isError
       ? { kind: "error" as const, message: (regenerate.error as Error)?.message || "Something went wrong — try again." }
     : regenerate.isSuccess && regenerate.data
       ? (regenerate.data.available === false
           ? { kind: "refused" as const, message: regenerate.data.reason || "That steer couldn't be applied." }
-          : { kind: "success" as const, message: "Weekly plan updated — your steer was applied." })
+          : { kind: "success" as const, message:
+                "Weekly plan updated — " + (regenerate.data.steer_interpretation || "your steer was applied.")
+                + (regenerate.data.steer_unsupported?.length
+                    ? "  ·  Couldn't apply in the plan: " + regenerate.data.steer_unsupported.join("; ")
+                    : "") })
     : null;
   return (
     <Async q={q} rows={3}>
@@ -757,7 +783,11 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                   onRegenerate={(directive) =>
                     regenerate.mutate({ end: w.week_end, directive: directive || undefined })
                   }
+                  canRevert={w.can_revert}
+                  revertPending={revert.isPending}
+                  onRevert={() => revert.mutate({ end: w.week_end })}
                   status={weekStatus}
+                  placeholder="Steer the week — e.g. 'only amazon this week', 'lean into loot boards', or '25 posts a day'…"
                 />
               </CardContent>
             </Card>
@@ -778,7 +808,13 @@ export default function PlanPage() {
   const weeklyQ = useWeeklyBrief(date || undefined);
 
   const min = dailyQ.data?.min_date;
-  const max = dailyQ.data?.max_date;
+  // Daily stays capped at today (dailyQ.max_date) — it needs the LIVE deal feed, which
+  // doesn't exist for future dates. Weekly has no such dependency (it's a direction/
+  // cadence plan, not per-slot deals), so let it browse forward far enough to preview an
+  // upcoming seeded sale event (e.g. Independence Day Sale) before its week arrives.
+  const max = view === "weekly"
+    ? new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10)
+    : dailyQ.data?.max_date;
 
   const handleViewChange = (v: "daily" | "weekly") => set({ view: v === "daily" ? null : v });
   const handleDateChange = (val: string) => set({ date: val || null });
