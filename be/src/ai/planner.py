@@ -482,9 +482,17 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     # emit zero slots. Truly zero only when there is no posting history at all.
     recent_cadence = traj["recent_cadence"] or round(traj["lifetime_baseline"] or 0)
     recommended_posts = inputs.get("recommended_posts", recent_cadence)
-    # Available deals from the live feed (limit = 3x today's slots) — the pool the
-    # plan themes slots around. No scoring; ordered by discount.
-    available_deals = ctx.available_deals(s, limit=max(3 * (recommended_posts or 0), 9))
+    # Available deals from the live feed (limit = 3x today's slots, capped) — the pool
+    # the plan themes slots around. No scoring; ordered by discount. Capped at 120: this
+    # scales UNBOUNDED with recommended_posts, which can now reach 350 via a steer (or
+    # ~70+ via an event ramp) — uncapped, that's a 1000+ deal pool (~50 tokens/deal,
+    # tens of thousands of prompt tokens for one call). The AI only needs a
+    # representative SAMPLE to theme slots around (merchant/category variety plateaus
+    # long before 1000 candidates); jit_fill does the real per-slot deal match from the
+    # full live feed at actual post time, not from what the AI saw here. 120 preserves
+    # the full 3x pool for any normal day (up to ~40 posts) and only kicks in for the
+    # steered/ramped extreme.
+    available_deals = ctx.available_deals(s, limit=min(max(3 * (recommended_posts or 0), 9), 120))
     week_bp = _current_week_plan(s)
     week_direction = ({k: week_bp.get(k) for k in ("direction", "loot_deal_ratio", "merchant_priorities")}
                       if week_bp else None)
@@ -812,6 +820,12 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     sfc = plan_ctx.get("style_follower_correlation") or {}
     facts.extend(sfc.get("days") or [])
     facts.extend(sfc.get("comparisons") or [])
+    # Drop the raw day-by-day rows from what's SENT to the model — same trim as the
+    # weekly plan: the aggregated `comparisons` are what the narrative needs, and the
+    # day rows are already flattened into `facts` just above for fact-check citation
+    # matching, so this only shrinks the PROMPT, not what stays verifiable.
+    if sfc.get("days"):
+        plan_ctx["style_follower_correlation"] = {k: v for k, v in sfc.items() if k != "days"}
     cb = plan_ctx.get("competitor_benchmark") or {}
     if cb.get("available"):
         facts.append(cb.get("competitors_avg") or {})
@@ -857,10 +871,13 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         _n_slots = max(int(plan_ctx.get("recommended_posts") or 0),
                        int(plan_ctx.get("recent_cadence") or 0), 12)
         _budget = min(max(3200, _n_slots * 180 + 1500), 16000)
-        # Plan generation runs on Groq (llama-3.3-70b) — chosen over the OpenAI default;
-        # openai still serves as failover when its key is set.
+        # openai primary (not groq): same quota-relief reasoning as generate_week_plan —
+        # Groq's per-org TPM/TPD budget was shared across every daily plan + steer-intent
+        # call and got exhausted in practice. Groq still serves as automatic failover
+        # (AIClient.complete tries the OTHER configured provider on any exception) when
+        # OPENAI_API_KEY is unset/erroring.
         raw = ai.complete(user, system_extra=_DAILY_PLAN_SYSTEM, max_tokens=_budget,
-                          trace_call="day_plan", provider="groq")
+                          trace_call="day_plan", provider="openai")
     except AIUnavailable as e:
         # G6 — never go silent: the channel still needs slots even when the AI is
         # down, so fall back to a real deterministic plan instead of an empty one.
@@ -934,14 +951,18 @@ def _parse_week_plan(raw: str) -> dict:
 
 
 def generate_week_plan(s: Session, week_start=None, directive: str | None = None,
-                       end_day=None) -> dict:
+                       end_day=None, active_event: dict | None = None) -> dict:
     """Grounded AI WEEKLY plan. Analyses last week's evidence — which post type (loot vs
     single) and which merchants drew traction — and sets THIS week's direction: the
     loot:deal ratio to aim for, merchant priorities, and a per-day theme_focus. The
     digest doubles as the operator's weekly retro (win/concern/what-to-change). The
     daily planner reads this week's plan (``this_week_theme``) and aligns its slots to
     it. ``directive`` is an optional Steer & Regenerate operator instruction injected as
-    a highest-priority block. Returns the raw digest + parsed plan + grounding facts."""
+    a highest-priority block. ``active_event`` is the deterministic event-ramp info
+    (see CampaignPlanningEngine._weekly_plan) when a seeded sale event (Independence
+    Day Sale, Big Billion Days, ...) falls within THIS plan's week — grounds the
+    narrative in a REAL event instead of leaving it blind to why cadence jumped.
+    Returns the raw digest + parsed plan + grounding facts."""
     from datetime import timedelta
     from src.ai.context import full_briefing_context
     from src.services.analytics.periods import ist_today
@@ -983,10 +1004,17 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
             f"{_hi_t} lead on views PER POST ({_hi}) vs {_lo_t} ({_lo}). State the type "
             f"comparison in EXACTLY this direction — {_hi_t} performed better per post; "
             f"never say {_lo_t} out-viewed {_hi_t} per post.")
+    # A real, seeded sale event landing THIS week (see CampaignPlanningEngine._weekly_plan)
+    # — grounds the narrative in an actual event instead of leaving it to guess why the
+    # deterministic cadence jumped. The ramp numbers themselves are already computed
+    # deterministically; the AI only gets told about it, never asked to invent the size.
+    facts_ctx["active_event"] = active_event
     # Flatten the new grounded signals into the fact-check pool as their own items so
     # cited style/follower/competitor numbers verify (nested lists inside facts_ctx are
     # otherwise invisible to check_cited_numbers, which flattens only one level).
     facts = [facts_ctx]
+    if active_event:
+        facts.append(active_event)
     # Flatten the nested LISTS in the briefing into their own top-level fact items —
     # check_cited_numbers only descends one level, so per-type/merchant numbers the
     # digest legitimately cites (e.g. a type's avg_views_per_day / a merchant's views)
@@ -1002,6 +1030,14 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     sfc = facts_ctx.get("style_follower_correlation") or {}
     facts.extend(sfc.get("days") or [])
     facts.extend(sfc.get("comparisons") or [])
+    # Drop the raw 30-day-by-day rows from what's actually SENT to the model — the
+    # aggregated `comparisons` are what the narrative needs; the day rows were already
+    # flattened into `facts` just above for fact-check citation matching, so trimming
+    # them here only shrinks the PROMPT, not what stays verifiable. This section alone
+    # was ~2,500 of the weekly prompt's ~7,500 DATA tokens — a real contributor to the
+    # Groq 413 "request too large" errors.
+    if sfc.get("days"):
+        facts_ctx["style_follower_correlation"] = {k: v for k, v in sfc.items() if k != "days"}
     cb = facts_ctx.get("competitor_benchmark") or {}
     if cb.get("available"):
         facts.append(cb.get("competitors_avg") or {})
@@ -1032,8 +1068,13 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
         try:
             user = (f"WEEK_START: {week_start.isoformat()}\n\nDATA:\n"
                     f"{to_json(facts_ctx)}{directive_note}{correction}")
+            # openai primary (not groq): the weekly prompt is the largest of any AI call
+            # in the app, and shares Groq's per-org TPM/TPD budget with every daily plan +
+            # steer-intent call — it was the one hitting 413/429 quota errors in practice.
+            # Groq still serves as automatic failover (AIClient.complete tries the OTHER
+            # configured provider on any exception) when OPENAI_API_KEY is unset/erroring.
             raw = ai.complete(user, system_extra=_WEEKLY_PLAN_SYSTEM, max_tokens=2000,
-                              trace_call="week_plan", provider="groq")
+                              trace_call="week_plan", provider="openai")
         except AIUnavailable as e:
             return best or {"available": False, "reason": str(e), "plan": None,
                             "digest": "", "facts": facts}
