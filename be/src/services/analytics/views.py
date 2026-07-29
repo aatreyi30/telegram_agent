@@ -150,7 +150,11 @@ def compute(s: Session, start=None, end=None) -> dict:
             "total_reactions": sr,
             "total_forwards": sf,
             "total_engagement": sr + sf,
-            "engagement_rate": round((sr + sf) / sv * 100, 1) if sv else 0,
+            # 2dp, not 1 — reactions+forwards run far below 1% of views on this
+            # channel, so 1dp rounded nearly every segment bucket down to an
+            # indistinguishable 0.0%, making the leaderboard and per-dimension
+            # charts look like noise even when real differences existed.
+            "engagement_rate": round((sr + sf) / sv * 100, 2) if sv else 0,
             "cta_posts": sum(1 for t in tups if t[3]),
             "deal_posts": sum(1 for t in tups if t[4]),
         }
