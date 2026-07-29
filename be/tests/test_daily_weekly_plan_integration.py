@@ -134,7 +134,7 @@ def test_weekly_brief_adds_follower_deltas_and_persists_digest(monkeypatch):
 
     monkeypatch.setattr(
         "src.ai.planner.generate_week_plan",
-        lambda s, week_start=None, directive=None, end_day=None: {"available": True, "digest": "Weekly digest text."},
+        lambda s, week_start=None, directive=None, end_day=None, **_kw: {"available": True, "digest": "Weekly digest text."},
     )
 
     r = service.weekly_brief(end="2026-07-08")
@@ -173,7 +173,7 @@ def test_weekly_brief_reuses_cached_digest_on_second_call(monkeypatch):
 
     calls = {"n": 0}
 
-    def _fake_generate(s, week_start=None, directive=None, end_day=None):
+    def _fake_generate(s, week_start=None, directive=None, end_day=None, **_kw):
         calls["n"] += 1
         return {"available": True, "digest": f"Digest attempt #{calls['n']}"}
 
@@ -190,3 +190,80 @@ def test_weekly_brief_reuses_cached_digest_on_second_call(monkeypatch):
     assert second["digest"] == "Digest attempt #1"  # reused, not "attempt #2"
     # The trailing window ends at the anchor: end=2026-09-02 -> start 2026-08-27.
     assert first["week_start"] == "2026-08-27" and first["week_end"] == "2026-09-02"
+
+
+def test_daily_brief_floors_recommended_posts_to_the_weekly_event_ramp(monkeypatch):
+    """The gap the operator flagged: the weekly page could say '70/day for Independence
+    Day Sale' while the Daily tab for a day inside that same week still showed the
+    ordinary ~1/day, completely unaware of the event. daily_brief must now read the
+    SAME persisted weekly event_ramp (single source of truth, never re-derived) and
+    floor recommended_posts up to it — never down, and only for a day the weekly plan's
+    own date range actually covers."""
+    from datetime import date as _date, datetime as _dt, timezone as _tz
+    from src.controllers import service
+    from src.db.models_campaign import CampaignPlan, PlanType
+    from src.db.session import session_scope
+
+    with session_scope() as s:
+        s.add(CampaignPlan(
+            plan_type=PlanType.WEEKLY, title="Week of 2026-07-27",
+            target_date=_date(2026, 7, 27), end_date=_date(2026, 8, 2),
+            blueprint={"event_ramp": {"event": "Test Sale", "days_away": 2,
+                                      "merchant_key": None, "multiplier": 3.0,
+                                      "baseline_posts_per_day": 1, "ramped_posts_per_day": 30}},
+            confidence=0.6, generated_at=_dt.now(_tz.utc), is_ai_generated=True))
+
+    # AI unavailable -> deterministic fallback path, so the floor is the ONLY thing
+    # deciding the count (no AI number in play to muddy the assertion). generate_day_plan
+    # never raises to its caller (G6: it catches AIUnavailable internally and returns a
+    # fallback dict) — mirror that shape directly rather than raising through the fake.
+    monkeypatch.setattr(
+        "src.ai.planner.generate_day_plan",
+        lambda s, day=None, inputs=None, **_kw: {"available": False, "reason": "down",
+                                                  "plan": None, "digest": "", "facts": []},
+    )
+
+    r = service.daily_brief(date="2026-07-29")   # inside the seeded week's range
+    assert r["today"]["recommended_posts"] == 30
+    cw = r["today"]["cadence_why"]
+    assert "ramped to ~30" in cw and "Test Sale" in cw
+    # The historical-fact clause must state the TRUE observed baseline (the fixture's
+    # seeded history doesn't reach July 2026, so it's genuinely 0), never the ramped 30
+    # — that sentence describes what actually happened, not the event target.
+    assert "ran ~0 posts/day" in cw
+
+    # A day OUTSIDE the seeded week's range must NOT be floored — proves the date-range
+    # guard actually scopes the ramp, it isn't a global sticky override.
+    r2 = service.daily_brief(date="2026-07-05")
+    assert r2["today"]["recommended_posts"] != 30
+    assert "Test Sale" not in r2["today"]["cadence_why"]
+
+
+def test_weekly_brief_event_ramp_merchant_bias_survives_ai_merge(monkeypatch):
+    """The AI's own weekly plan unconditionally overwrites merchant_priorities from
+    ai_plan.get(...) — even when that's None. An active event's merchant bias (and the
+    honest cadence-ramp note) must be reapplied AFTER that merge, so it survives an AI
+    response that says nothing about merchant priorities at all."""
+    from datetime import date as _date
+    from src.controllers import service
+    from src.db.models_campaign import SaleEvent
+    from src.db.session import session_scope
+
+    with session_scope() as s:
+        s.add(SaleEvent(key="test_flipkart_sale", name="Flipkart Test Sale",
+                        event_type="merchant_sale", merchant_key="flipkart",
+                        next_date=_date(2026, 10, 11), window_days=3,
+                        date_confidence="approximate"))
+
+    def _fake_generate(s, week_start=None, directive=None, end_day=None, active_event=None):
+        assert active_event is not None and active_event["merchant_key"] == "flipkart"
+        return {"available": True, "digest": "AI digest, no merchant priorities mentioned.",
+                "plan": {"merchant_priorities": None, "loot_deal_ratio": None,
+                        "direction": "AI direction text.", "daily_themes": None}}
+    monkeypatch.setattr("src.ai.planner.generate_week_plan", _fake_generate)
+
+    r = service.weekly_brief(end="2026-10-14")
+    assert r["merchant_priorities"], "event's merchant must survive even when the AI gave none"
+    assert r["merchant_priorities"][0]["merchant"] == "flipkart"
+    assert "Cadence ramped" in r["digest"] and "Flipkart Test Sale" in r["digest"]
+    assert r["recommended_posts_per_day"] > (r.get("event_ramp") or {}).get("baseline_posts_per_day", 0)
