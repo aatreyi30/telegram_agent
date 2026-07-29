@@ -1,24 +1,33 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import {
+  Area, Bar, CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
+} from "recharts";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CheckmarkCircle01Icon, Cancel01Icon, ExternalLinkIcon, Note01Icon, Sent02Icon,
-  UserGroupIcon, BarChartIcon, Target02Icon, ChevronRightIcon,
+  UserGroupIcon, UserAdd01Icon, BarChartIcon, Target02Icon, ChevronRightIcon,
+  AnalyticsUpIcon, AnalyticsDownIcon,
 } from "@hugeicons/core-free-icons";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Dialog } from "@/components/ui/dialog";
+import { DateFilter } from "@/components/ui/date-range-picker";
 import { StatCard } from "@/components/StatCard";
 import { LivePulse } from "@/components/LivePulse";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusCounts } from "@/components/StatusPill";
 import { Async } from "@/components/Async";
-import { TimelineChart } from "@/components/charts";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
-import { useOverview, useGrowth, useInsights, useDrafts, useQueue, useActivity } from "@/queries/queries";
+import { useOverview, useGrowth, useInsights, useDrafts, useQueue, useActivity, useDataRange } from "@/queries/queries";
+import { useQueryParams } from "@/lib/use-search-params";
 import { titleCase, istDate } from "@/lib/format";
+import {
+  CHART_AXIS_COLOR as AXIS, CHART_GRID_COLOR as GRID,
+  CHART_PRIMARY_COLOR as C1, CHART_SECONDARY_COLOR as C2,
+} from "@/constants/charts";
 import type { OverviewResponse, GrowthRecommendation, GrowthDailyPoint, GrowthResponse } from "@/types/api";
 
 function fmtNum(n: number | null | undefined): string {
@@ -71,6 +80,58 @@ function growthStory(g: Extract<GrowthResponse, { available: true }>): { icon: s
       + `${g.net >= 0 ? "+" : ""}${fmtNum(g.net)} over this window${gap}. `
       + `Joined/left are inferred from the count's ups and downs between captures, not Telegram per-person events.`,
   };
+}
+
+function toISO(d?: Date): string | undefined {
+  return d ? d.toISOString().slice(0, 10) : undefined;
+}
+function minusDays(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** One chart instead of two — subscriber level (area) with joined/left (bars) underneath,
+ * so level and churn read together instead of needing two separate charts on the page.
+ * Opened from a StatCard click rather than always shown, to keep the page short by default. */
+function GrowthDetailDialog({ open, onClose, daily }: { open: boolean; onClose: () => void; daily: GrowthDailyPoint[] }) {
+  const data = daily.map((d) => ({
+    label: istDate(d.date), subs_end: d.subs_end ?? null, joined: d.joined, left: -d.left,
+  }));
+  return (
+    <Dialog open={open} onClose={onClose} title="Subscriber growth" className="sm:max-w-3xl">
+      <p className="-mt-2 text-xs text-muted-foreground">
+        Total subscribers (area, left axis) with daily joins/unsubscribes (bars, right axis) —
+        unsubscribes are shown below the line so a busy day is easy to spot either way.
+      </p>
+      <ResponsiveContainer width="100%" height={340}>
+        <ComposedChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id="fillGrowth" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={C1} stopOpacity={0.35} />
+              <stop offset="100%" stopColor={C1} stopOpacity={0.03} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
+          <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} />
+          <YAxis yAxisId="left" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={48} domain={["auto", "auto"]} />
+          <YAxis yAxisId="right" orientation="right" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+          <Tooltip
+            contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }}
+            labelStyle={{ color: "hsl(var(--foreground))", fontWeight: 500 }}
+            formatter={(value: number, name: string) => {
+              if (name === "left") return [Math.abs(value).toLocaleString(), "Unsubscribed"];
+              if (name === "joined") return [value.toLocaleString(), "Joined"];
+              return [value?.toLocaleString(), "Subscribers"];
+            }}
+          />
+          <Area yAxisId="left" type="monotone" dataKey="subs_end" stroke={C1} strokeWidth={2} fill="url(#fillGrowth)" name="subs_end" />
+          <Bar yAxisId="right" dataKey="joined" fill="#22c55e" radius={[2, 2, 0, 0]} name="joined" />
+          <Bar yAxisId="right" dataKey="left" fill={C2} radius={[0, 0, 2, 2]} name="left" />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </Dialog>
+  );
 }
 
 /** True when the agent has actually done something in the last 10 minutes —
@@ -188,8 +249,23 @@ function SessionDigest() {
 
 export default function OverviewPage() {
   const overview = useOverview();
-  const growth = useGrowth();
+  const range = useDataRange();
+  const min = range.data?.min ?? undefined;
+  const max = range.data?.max ?? undefined;
+  const { get, set } = useQueryParams();
+  const preset = get("preset", "30d");
+  const startParam = get("start", "");
+  const endParam = get("end", "");
+  const { start, end } = useMemo(() => {
+    if (preset === "custom") return { start: startParam || undefined, end: endParam || undefined };
+    if (!max || !min) return { start: undefined, end: undefined };
+    if (preset === "all") return { start: min, end: max };
+    const days: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+    return { start: minusDays(max, days[preset] ?? 30), end: max };
+  }, [preset, min, max, startParam, endParam]);
+  const growth = useGrowth(start, end, { enabled: !!range.data });
   const insights = useInsights();
+  const [growthDialogOpen, setGrowthDialogOpen] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -211,27 +287,34 @@ export default function OverviewPage() {
             <Card className="rounded-xl overflow-hidden">
               <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
               <CardHeader>
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <CardTitle>Growth</CardTitle>
                     <CardDescription>Subscriber growth over time</CardDescription>
                   </div>
-                  <Link href="/analytics" className="text-sm text-primary hover:underline inline-flex items-center gap-1">
-                    View details <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
-                  </Link>
+                  <div className="flex items-center gap-3">
+                    <DateFilter
+                      mode="range" preset={preset}
+                      onPresetChange={(p) => set({ preset: p === "custom" ? "90d" : p, start: null, end: null })}
+                      from={start} to={end}
+                      onRangeChange={(from, to) => set({ preset: "custom", start: from, end: to })}
+                      min={min} max={max}
+                    />
+                    <Link href="/analytics" className="text-sm text-primary hover:underline inline-flex items-center gap-1 whitespace-nowrap">
+                      View details <HugeiconsIcon icon={ExternalLinkIcon} className="h-3 w-3" />
+                    </Link>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent>
                 <Async q={growth} rows={4}>
                   {(g) => {
                     if (!g.available) return <p className="text-sm text-muted-foreground">{g.reason}</p>;
-                    const chartData = g.daily.map((d) => ({ label: istDate(d.date), subs_end: d.subs_end ?? 0 }));
-                    const churnData = g.daily.map((d) => ({ label: istDate(d.date), joined: d.joined, left: d.left }));
                     const subsTrend = periodTrend(g.daily, "subs_end", "avg");
                     const joinedTrend = periodTrend(g.daily, "joined", "sum");
                     const netTrend = periodTrend(g.daily, "net", "sum");
                     const gapDays = Math.max(1, ...g.daily.map((d) => d.spans_days));
-                    const gapNote = `covers ${gapDays} days, not just 1`;
+                    const gapNote = `${gapDays}-day total`;
                     return (
                       <div className="space-y-4">
                         {g.has_collection_gap && (
@@ -241,12 +324,15 @@ export default function OverviewPage() {
                           </p>
                         )}
                         <div className="grid grid-cols-3 gap-3">
-                          <StatCard label="Subscribers" value={fmtNum(g.current)}
+                          <StatCard label="Subscribers" value={fmtNum(g.current)} onClick={() => setGrowthDialogOpen(true)}
+                            icon={<HugeiconsIcon icon={UserGroupIcon} className="h-4 w-4" />}
                             trend={subsTrend ? { ...subsTrend, label: "vs prior period" } : undefined} />
-                          <StatCard label="Joined" value={`+${fmtNum(g.joined)}`}
+                          <StatCard label="Joined" value={`+${fmtNum(g.joined)}`} onClick={() => setGrowthDialogOpen(true)}
+                            icon={<HugeiconsIcon icon={UserAdd01Icon} className="h-4 w-4" />}
                             sub={g.has_collection_gap ? gapNote : undefined}
                             trend={joinedTrend ? { ...joinedTrend, label: "vs prior period" } : undefined} />
-                          <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)}
+                          <StatCard label="Net" value={g.net > 0 ? `+${fmtNum(g.net)}` : fmtNum(g.net)} onClick={() => setGrowthDialogOpen(true)}
+                            icon={<HugeiconsIcon icon={g.net >= 0 ? AnalyticsUpIcon : AnalyticsDownIcon} className="h-4 w-4" />}
                             sub={g.has_collection_gap ? gapNote : undefined}
                             trend={netTrend ? { ...netTrend, label: "vs prior period" } : undefined} />
                         </div>
@@ -259,20 +345,10 @@ export default function OverviewPage() {
                             </div>
                           );
                         })()}
-                        <div>
-                          <p className="mb-1 text-xs font-medium text-muted-foreground">Total subscribers, day by day</p>
-                          <TimelineChart data={chartData} dataKey="subs_end" unit="" />
-                        </div>
-                        <div>
-                          <p className="mb-1 text-xs font-medium text-muted-foreground">New joins vs unsubscribes</p>
-                          <TimelineChart data={churnData} dataKey="joined" secondaryKey="left" unit="" secondaryUnit="" />
-                          <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
-                            <span className="inline-block h-2 w-2 rounded-full align-middle" style={{ background: "hsl(var(--chart-1))" }} /> Joins (left axis)
-                            {" · "}
-                            <span className="inline-block h-2 w-2 rounded-full align-middle" style={{ background: "hsl(var(--chart-2))" }} /> Unsubscribes (right axis)
-                            {" — the two use different scales, so a tall dashed line still means far fewer people left than joined."}
-                          </p>
-                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Tap any number above for the day-by-day chart.
+                        </p>
+                        <GrowthDetailDialog open={growthDialogOpen} onClose={() => setGrowthDialogOpen(false)} daily={g.daily} />
                         {hasSourceBreakdown(g.view_sources, g.follower_sources) && (
                           <div className="border-t pt-4">
                             <SourceBreakdownSection viewSources={g.view_sources} followerSources={g.follower_sources} />
@@ -290,8 +366,8 @@ export default function OverviewPage() {
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <CardTitle>Now playing</CardTitle>
-                      <CardDescription>Top recommendations &amp; pipeline health</CardDescription>
+                      <CardTitle>Insights</CardTitle>
+                      <CardDescription>Top recommendations, based on your own posting data</CardDescription>
                     </div>
                   </div>
                 </CardHeader>
