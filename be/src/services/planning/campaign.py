@@ -192,7 +192,15 @@ class CampaignPlanningEngine(BaseCollector):
                 continue
             out.append({"deal_type": plain_label(m["post_type"]),
                         "post_type": m["post_type"], "target_posts": n,
-                        "avg_views_per_day": m.get("avg_views_per_day")})
+                        "avg_views_per_day": m.get("avg_views_per_day"),
+                        # WHY this share, for the Plan page's deal-type reasoning —
+                        # increase/decrease/maintain vs the current share, per
+                        # content_mix_from_rows' median-performance nudge. `current_share`
+                        # here comes from PostTypePerformance, which is learned over ALL
+                        # owned history (no date cutoff) — say so honestly rather than
+                        # implying a "recent" window like the 45-day fallback path does.
+                        "current_share": m.get("current_share"), "action": m.get("action"),
+                        "source_kind": "all_time"})
         return out
 
     def _allocate_from_recent(self, posts: int, recent: dict | None,
@@ -209,14 +217,17 @@ class CampaignPlanningEngine(BaseCollector):
         path so ``_expected_outcome`` and ``plain_label`` consumers keep working."""
         perf = perf or {}
         counts = dict((recent or {}).get("post_types") or {})
+        source_kind = "recent"
         if not counts:
             # no owned history — prefer the competitor-derived reference mix
             counts = {k: v for k, v in (reference or {}).items()
                       if k in ("single_deal", "loot_deal") and v}
+            source_kind = "reference"
         if not counts:
             # nothing to learn from at all — neutral default rather than an
             # empty allocation.
             counts = {"single_deal": 6, "loot_deal": 4}
+            source_kind = "default"
         total = sum(counts.values()) or 1
         # larger share first (deterministic tie-break by name) so any rounding
         # remainder lands in the largest bucket.
@@ -229,12 +240,16 @@ class CampaignPlanningEngine(BaseCollector):
             targets[pt] += 1
             remainder -= 1
         out = []
-        for pt, _c in ordered:
+        for pt, c in ordered:
             n = targets[pt]
             if n <= 0:
                 continue
             out.append({"deal_type": plain_label(pt), "post_type": pt,
-                        "target_posts": n, "avg_views_per_day": perf.get(pt)})
+                        "target_posts": n, "avg_views_per_day": perf.get(pt),
+                        "current_share": round(c / total, 3), "action": None,
+                        # "recent" here IS date-windowed (45 days, _recent_distribution's
+                        # cutoff) — unlike the growth_mix path's all-time share.
+                        "source_kind": source_kind})
         return out
 
     def _merchant_allocation(self, s: Session, recent: dict, now: datetime) -> list[dict]:
@@ -383,6 +398,25 @@ class CampaignPlanningEngine(BaseCollector):
                     or int(round(blueprint.get("posting_frequency_baseline") or 8)))
         else:
             posts = int(round(blueprint.get("posting_frequency_baseline") or 8))
+
+        # Automatic event ramp: a seeded sale event (Independence Day Sale, Big Billion
+        # Days, ...) whose date falls WITHIN this plan's week bumps the baseline cadence —
+        # same multiplier _event_plan() uses for its standalone EVENT campaign, so the two
+        # never disagree on how hard to ramp for the same event. Runs BEFORE any operator
+        # steer is applied (enforce_weekly_constraints, in service.py, later) so an
+        # explicit steer always overrides this automatic default, never the reverse.
+        week_end_date = today + timedelta(days=6)
+        active_event = next((e for e in events
+                             if e.get("next_date") and today <= e["next_date"] <= week_end_date), None)
+        event_ramp = None
+        if active_event:
+            baseline_posts = posts
+            mult = _RAMP.get(active_event.get("event_type"), 1.5)
+            posts = max(baseline_posts, round(baseline_posts * mult))
+            event_ramp = {"event": active_event["name"], "days_away": active_event.get("days_away"),
+                          "merchant_key": active_event.get("merchant_key"), "multiplier": mult,
+                          "baseline_posts_per_day": baseline_posts, "ramped_posts_per_day": posts}
+
         mix = [m for m in (blueprint.get("content_mix") or [])]
         # Same posting-window fallback as the daily plan: use the channel's own
         # historical posting-hours when the Growth blueprint has no posting_plan
@@ -416,7 +450,7 @@ class CampaignPlanningEngine(BaseCollector):
                                    "posts": p["recommended_posts_per_day"],
                                    "sample_size": p.get("sample_size")} for p in schedule],
               "deal_type_allocation": weekly_allocation,
-              "upcoming_events": evs}
+              "upcoming_events": evs, "event_ramp": event_ramp}
         return {"plan_type": PlanType.WEEKLY,
                 "title": f"Weekly plan — week of {today.isoformat()}",
                 "target_date": today, "end_date": today + timedelta(days=6),

@@ -19,6 +19,40 @@ def test_next_occurrence_rolls_to_next_year_when_past():
     assert _next_occurrence(today, 10, None) == date(2026, 10, 1)
 
 
+def test_weekly_plan_ramps_cadence_for_an_event_landing_this_week():
+    """A seeded sale event (Independence Day Sale, Big Billion Days, ...) whose date
+    falls within the plan's week must automatically bump posts_per_day/week by the same
+    _RAMP multiplier _event_plan() uses, bias merchant_priorities toward its merchant,
+    and record the ramp so the digest/UI can say WHY the numbers jumped."""
+    e = CampaignPlanningEngine()
+    today = date(2026, 8, 10)  # Monday
+    blueprint = {"posting_frequency_baseline": 10}
+    events_in_week = [{"name": "Flipkart Big Billion Days", "event_type": "merchant_sale",
+                       "merchant_key": "flipkart", "next_date": date(2026, 8, 13),
+                       "days_away": 3, "date_confidence": "approximate"}]
+    plan = e._weekly_plan(blueprint, perf=[], today=today, events=events_in_week)
+    bp = plan["blueprint"]
+    assert bp["event_ramp"] is not None
+    assert bp["event_ramp"]["baseline_posts_per_day"] == 10
+    assert bp["event_ramp"]["ramped_posts_per_day"] == 30       # merchant_sale -> 3.0x
+    assert bp["posts_per_day"] == 30
+    assert bp["posts_per_week"] == 210
+    assert all(d["posts_planned"] == 30 for d in bp["daily_themes"])
+
+
+def test_weekly_plan_no_ramp_when_event_is_outside_the_week():
+    e = CampaignPlanningEngine()
+    today = date(2026, 8, 10)
+    blueprint = {"posting_frequency_baseline": 10}
+    events_far = [{"name": "Independence Day Sale", "event_type": "festival",
+                  "merchant_key": None, "next_date": date(2026, 9, 1),
+                  "days_away": 22, "date_confidence": "exact"}]
+    plan = e._weekly_plan(blueprint, perf=[], today=today, events=events_far)
+    bp = plan["blueprint"]
+    assert bp["event_ramp"] is None
+    assert bp["posts_per_day"] == 10   # unramped baseline
+
+
 def test_allocate_posts_weights_by_growth_action():
     e = CampaignPlanningEngine()
     blueprint = {"content_mix": [
@@ -30,6 +64,10 @@ def test_allocate_posts_weights_by_growth_action():
     total = sum(a["target_posts"] for a in alloc)
     assert 17 <= total <= 22          # ~ the budget (independent rounding)
     by_type = {a["post_type"]: a["target_posts"] for a in alloc}
+    # each row carries WHY its share was chosen — the Plan page's deal-type reasoning
+    # reads this instead of a views tautology.
+    by_action = {a["post_type"]: a["action"] for a in alloc}
+    assert by_action["low-price"] == "decrease" and by_action["high-price"] == "maintain"
     # 'increase' type is boosted relative to its small base share; 'decrease' is trimmed
     assert by_type["many-links · multi-deal"] >= 1
 
@@ -53,6 +91,74 @@ def test_cold_start_allocation_neutral_default_when_nothing_known():
     by_type = {a["post_type"]: a["target_posts"] for a in alloc}
     assert sum(by_type.values()) == 10
     assert by_type.get("single_deal", 0) >= by_type.get("loot_deal", 0)
+
+
+def test_deal_type_reasoning_explains_the_pattern_not_percentages():
+    """The 'Why' column must state the WINDOW the split was learned from (all-time
+    history / last 45 days / competitor reference / neutral default) and the PATTERN
+    found there (outperforms / underperforms / about even) in plain language — no raw
+    share percentages, and no views-tie tautology restating the count."""
+    from src.controllers.service import _reason_deal_type_split
+
+    alloc = [
+        {"post_type": "single_deal", "target_posts": 18, "current_share": 0.514,
+         "action": "maintain", "source_kind": "all_time"},
+        {"post_type": "loot_deal", "target_posts": 17, "current_share": 0.486,
+         "action": "maintain", "source_kind": "all_time"},
+    ]
+    _reason_deal_type_split(alloc, history_days=240)   # 240 days -> months, not a vague "all-time"
+    for a in alloc:
+        assert "%" not in a["reasoning"]
+        assert "months of posting" in a["reasoning"]
+        assert "about the same" in a["reasoning"]
+    # tied counts differ by 1 (18 vs 17) — that's just rounding, not a contradiction of
+    # "about the same"; the Why must say so, or it reads as a single/loot mismatch.
+    assert "rounding" in alloc[0]["reasoning"]
+    assert "rounding" in alloc[1]["reasoning"]
+
+    # a short history (< 60 days) states days, not months
+    short = [{"post_type": "single_deal", "target_posts": 5, "current_share": 0.5,
+              "action": "maintain", "source_kind": "all_time"},
+             {"post_type": "loot_deal", "target_posts": 5, "current_share": 0.5,
+              "action": "maintain", "source_kind": "all_time"}]
+    _reason_deal_type_split(short, history_days=20)
+    assert "20 days of posting" in short[0]["reasoning"]
+    assert "evenly" in short[0]["reasoning"] and "rounding" not in short[0]["reasoning"]
+
+    inc = [{"post_type": "loot_deal", "target_posts": 12, "current_share": 0.2,
+            "action": "increase", "source_kind": "all_time"},
+           {"post_type": "single_deal", "target_posts": 8, "current_share": 0.8,
+            "action": "decrease", "source_kind": "all_time"}]
+    _reason_deal_type_split(inc)
+    assert "%" not in inc[0]["reasoning"] and "more views per post" in inc[0]["reasoning"]
+    assert "%" not in inc[1]["reasoning"] and "fewer views per post" in inc[1]["reasoning"]
+
+    # Regression: 'maintain' with a SKEWED recent share (64/36) but a near-even final
+    # split (18/17, because the AI plan / 30% variety floor pulled it there, not a
+    # rounding artifact of the share) must NOT claim "just rounding" — that blames
+    # rounding for a gap that's actually the AI/floor's doing, a false mechanism.
+    skewed = [{"post_type": "single_deal", "target_posts": 18, "current_share": 0.644,
+               "action": "maintain", "source_kind": "recent_30d"},
+              {"post_type": "loot_deal", "target_posts": 17, "current_share": 0.356,
+               "action": "maintain", "source_kind": "recent_30d"}]
+    _reason_deal_type_split(skewed)
+    for a in skewed:
+        assert "rounding" not in a["reasoning"]
+        assert "about the same" in a["reasoning"]
+        assert "18 of 35" in a["reasoning"] or "17 of 35" in a["reasoning"]
+
+    # The common case: the split was learned from the SAME 30-day window as the displayed
+    # avg-views figure — must say "last 30 days", never the longer all-time span, even
+    # when a real history_days is passed in (it must be ignored for this source_kind).
+    d30 = [{"post_type": "single_deal", "target_posts": 6, "current_share": 0.6,
+            "action": "maintain", "source_kind": "recent_30d"}]
+    _reason_deal_type_split(d30, history_days=400)
+    assert "last 30 days" in d30[0]["reasoning"] and "month" not in d30[0]["reasoning"]
+
+    rec = [{"post_type": "single_deal", "target_posts": 6, "current_share": 0.6,
+            "action": None, "source_kind": "recent"}]
+    _reason_deal_type_split(rec)
+    assert "%" not in rec[0]["reasoning"] and "last 45 days" in rec[0]["reasoning"]
 
 
 def test_risk_flags_merchant_overuse():
