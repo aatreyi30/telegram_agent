@@ -1029,7 +1029,15 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     # digest legitimately cites (e.g. a type's avg_views_per_day / a merchant's views)
     # were invisible to the pool and wrongly flagged as unverified, suppressing the
     # whole weekly narrative. Same flattening the daily plan already does.
-    facts.extend(facts_ctx.get("post_type_performance") or [])
+    _ptp = facts_ctx.get("post_type_performance") or []
+    facts.extend(_ptp)
+    # `share` is a 0-1 fraction (e.g. 0.647), but the narrative naturally cites it as
+    # a percentage ("single deals account for 65% of your posts") — without a
+    # percentage-scaled twin in the pool, that correct, grounded citation fails the
+    # numeric match (0.647 vs 65) and gets wrongly flagged as unverified, producing a
+    # `warn` on an otherwise fully-grounded digest.
+    facts.extend({"share_pct": round(p["share"] * 100, 1)} for p in _ptp
+                 if isinstance(p.get("share"), (int, float)))
     facts.extend(facts_ctx.get("merchant_opportunities") or [])
     # The 7-day per-day series + totals must be in the pool so the digest can cite a real
     # day's posts/views (e.g. "37 posts, 542 views on Wed") without being flagged.
