@@ -255,7 +255,7 @@ def test_weekly_brief_event_ramp_merchant_bias_survives_ai_merge(monkeypatch):
                         next_date=_date(2026, 10, 11), window_days=3,
                         date_confidence="approximate"))
 
-    def _fake_generate(s, week_start=None, directive=None, end_day=None, active_event=None):
+    def _fake_generate(s, week_start=None, directive=None, end_day=None, active_event=None, **_kw):
         assert active_event is not None and active_event["merchant_key"] == "flipkart"
         return {"available": True, "digest": "AI digest, no merchant priorities mentioned.",
                 "plan": {"merchant_priorities": None, "loot_deal_ratio": None,

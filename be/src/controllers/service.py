@@ -1407,7 +1407,8 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
         from src.ai.planner import generate_week_plan
         try:
             res = generate_week_plan(s, week_start, directive=directive, end_day=week_end,
-                                     active_event=blueprint.get("event_ramp"))
+                                     active_event=blueprint.get("event_ramp"),
+                                     context_events=blueprint.get("upcoming_events"))
             ai_summary = res.get("digest") or "" if res.get("available") else ""
             ai_ok = bool(ai_summary)
             if res.get("available"):

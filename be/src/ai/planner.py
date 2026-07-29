@@ -951,7 +951,8 @@ def _parse_week_plan(raw: str) -> dict:
 
 
 def generate_week_plan(s: Session, week_start=None, directive: str | None = None,
-                       end_day=None, active_event: dict | None = None) -> dict:
+                       end_day=None, active_event: dict | None = None,
+                       context_events: list[dict] | None = None) -> dict:
     """Grounded AI WEEKLY plan. Analyses last week's evidence — which post type (loot vs
     single) and which merchants drew traction — and sets THIS week's direction: the
     loot:deal ratio to aim for, merchant priorities, and a per-day theme_focus. The
@@ -962,6 +963,9 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     (see CampaignPlanningEngine._weekly_plan) when a seeded sale event (Independence
     Day Sale, Big Billion Days, ...) falls within THIS plan's week — grounds the
     narrative in a REAL event instead of leaving it blind to why cadence jumped.
+    ``context_events`` are other real calendar dates near this week (festivals,
+    holidays, observances) the AI may mention in the digest but that carry no
+    cadence change — see CampaignPlanningEngine's ``upcoming_events`` blueprint field.
     Returns the raw digest + parsed plan + grounding facts."""
     from datetime import timedelta
     from src.ai.context import full_briefing_context
@@ -1009,12 +1013,17 @@ def generate_week_plan(s: Session, week_start=None, directive: str | None = None
     # deterministic cadence jumped. The ramp numbers themselves are already computed
     # deterministically; the AI only gets told about it, never asked to invent the size.
     facts_ctx["active_event"] = active_event
+    # Non-ramp calendar context (festivals/holidays/observances near this week) — the AI
+    # may mention one in the digest but it carries no cadence signal, unlike active_event.
+    facts_ctx["upcoming_events"] = context_events or None
     # Flatten the new grounded signals into the fact-check pool as their own items so
     # cited style/follower/competitor numbers verify (nested lists inside facts_ctx are
     # otherwise invisible to check_cited_numbers, which flattens only one level).
     facts = [facts_ctx]
     if active_event:
         facts.append(active_event)
+    if context_events:
+        facts.extend(context_events)
     # Flatten the nested LISTS in the briefing into their own top-level fact items —
     # check_cited_numbers only descends one level, so per-type/merchant numbers the
     # digest legitimately cites (e.g. a type's avg_views_per_day / a merchant's views)
