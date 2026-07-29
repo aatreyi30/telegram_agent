@@ -1374,6 +1374,8 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
     from src.services.planning.campaign import CampaignPlanningEngine
     from src.services.generation.ai_execution import persist_weekly_plan
 
+    from src.services.analytics.periods import ist_today
+
     bp_growth = (ctx.growth_blueprint(s).get("blueprint") or {})
     perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
             for p in ctx.post_type_performance(s)}
@@ -1381,8 +1383,13 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
         events = upcoming_events(s, week_start, within_days=30)
     except Exception:
         events = []
+    # days_away must be relative to the REAL today, not week_start (the trailing
+    # evidence window's start — up to 6 days stale) — otherwise an event 4 real days
+    # out gets labeled "10 days away" in the AI's DATA and the fact-check pool treats
+    # the wrong number as verified.
+    _today = ist_today()
     event_data = [{"name": e.name, "next_date": e.next_date,
-                   "days_away": (e.next_date - week_start).days,
+                   "days_away": (e.next_date - _today).days,
                    "date_confidence": e.date_confidence,
                    # event_type/merchant_key/window_days: needed by _weekly_plan's event
                    # ramp (same fields the cron's CampaignPlanningEngine.run() already
@@ -1636,9 +1643,11 @@ def weekly_brief(end: str | None = None, directive: str | None = None,
 
         evs_out = []
         try:
+            from src.services.analytics.periods import ist_today
+            _today_evs = ist_today()
             for e in upcoming_events(s, week_end, within_days=30)[:3]:
                 evs_out.append({"name": e.name, "date": e.next_date.isoformat(),
-                                "days_away": (e.next_date - week_end).days,
+                                "days_away": (e.next_date - _today_evs).days,
                                 "date_confidence": e.date_confidence})
         except Exception:
             pass
