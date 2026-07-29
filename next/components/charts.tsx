@@ -16,6 +16,10 @@ function humanize(key?: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// "50000" -> "50K" — a fixed-width Y-axis has no room for 5-6 digit view counts
+// (they were clipping to garbage like "0000"). Tooltip keeps the exact number.
+const compactNum = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format;
+
 function Tip({ active, payload, label, unit, countKey, countLabel = "Posts", labelFormatter }: any) {
   if (!active || !payload?.length) return null;
   // The full data row is on payload[0].payload — use it to surface an extra
@@ -73,9 +77,9 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} tickFormatter={xTickFormatter} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} yAxisId="left" />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} yAxisId="left" tickFormatter={compactNum} />
         {secondaryKey && (
-          <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} yAxisId="right" orientation="right" />
+          <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} yAxisId="right" orientation="right" tickFormatter={compactNum} />
         )}
         <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} labelFormatter={xTickFormatter} />} />
         <Area yAxisId="left" type="monotone" dataKey={dataKey} stroke={C1} strokeWidth={2} fill="url(#fillC1)" name={humanize(dataKey)} unit={unit} />
@@ -100,7 +104,7 @@ export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false}
           interval={0} angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? "end" : "middle"}
           height={data.length > 8 ? 60 : 30} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} tickFormatter={compactNum} />
         <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
         <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit}>
           {mutedKey && data.map((row, i) => (
@@ -120,7 +124,7 @@ export function MultiLineChart({ data, series, unit = "", height = 280 }: {
       <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} tickFormatter={compactNum} />
         <Tooltip content={<Tip unit={unit} />} />
         <Legend wrapperStyle={{ fontSize: 11, color: AXIS }} />
         {series.map((s, i) => (
@@ -142,7 +146,7 @@ export function StackedBarsChart({ data, keys, unit = "", height = 280 }: {
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false}
           interval={0} angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? "end" : "middle"}
           height={data.length > 8 ? 60 : 30} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} tickFormatter={compactNum} />
         <Tooltip content={<Tip unit={unit} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
         <Legend wrapperStyle={{ fontSize: 11, color: AXIS }} />
         {keys.map((k, i) => (
