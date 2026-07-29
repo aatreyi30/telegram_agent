@@ -59,6 +59,15 @@ def unmeasurable_claims(plan: dict) -> list[str]:
 # (else "1."/"2." read as unverified numbers and can fail an otherwise-grounded plan).
 _LIST_MARKER_RE = re.compile(r"(?m)^\s*\d+[.)]\s+")
 
+# A calendar year (2000-2099) written ANY way — "August 9, 2026", "2026-07-23"
+# (as one of its 3 dashed parts), "in 2026" — is never a real cited METRIC (a view
+# count, post count, price, discount%...), so it must not be checked against the
+# report pool. Without this, every digest that names a specific day (the system
+# prompt REQUIRES this) leaks its year in as a spurious "unverified number" and can
+# fail an otherwise fully-grounded narrative — the model never claimed "2026" as a
+# fact, it just wrote the date the prompt told it to cite.
+_YEAR_RE = re.compile(r"^20\d{2}$")
+
 
 def _numbers_in(text) -> list[float]:
     if not text or not isinstance(text, str):
@@ -67,7 +76,7 @@ def _numbers_in(text) -> list[float]:
     out = []
     for m in _NUM_RE.findall(text):
         cleaned = m.replace(",", "").strip(".")
-        if not cleaned:
+        if not cleaned or _YEAR_RE.match(cleaned):
             continue
         try:
             out.append(float(cleaned))
