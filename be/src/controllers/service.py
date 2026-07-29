@@ -846,14 +846,17 @@ def _llm_allocation_reasoning(allocation: list[dict]) -> dict:
     if not rows:
         return {}
     system = (
-        "You explain a deals channel's deal-type mix to its operator for a 'Why' column. For "
-        "EACH deal type in DATA, write ONE short, plain, conversational sentence: what its "
-        "average views/post is and why it gets more or less emphasis (the type that leads on "
-        "views is favoured; both still run for variety). Use ONLY numbers present in DATA. "
-        "CRITICAL: do NOT state any post count or percentage — those live in another column "
-        "and would go stale here. No fluff, no unmeasurable claims (no conversion/CTR/revenue). "
-        "Output EXACTLY one JSON object mapping each post_type to its sentence, e.g. "
-        '{"single_deal":"...","loot_deal":"..."} — no text outside the JSON.')
+        "You explain to a deals-channel operator WHY the deal-type mix leans the way it does, "
+        "for a 'Why' column. For EACH deal type in DATA, write ONE short, plain, conversational "
+        "sentence that REASONS the choice — do NOT just restate 'gets more/less emphasis'. It "
+        "MUST: (1) state this type's avg views/post, (2) COMPARE it to the OTHER type by name "
+        "and number, (3) draw the conclusion (whichever LEADS on views gets the lean), and "
+        "(4) note both types still run so the day keeps variety. Example: 'Loot boards average "
+        "522 views/post — just ahead of single deals (521) — so the mix leans loot, with singles "
+        "kept in for variety.' Use ONLY numbers present in DATA. CRITICAL: never state a post "
+        "count or percentage (those live in another column and would go stale). No fluff, no "
+        "unmeasurable claims (conversion/CTR/revenue). Output EXACTLY one JSON object mapping "
+        'each post_type to its sentence, e.g. {"single_deal":"...","loot_deal":"..."} — JSON only.')
     try:
         raw = AIClient().complete("DATA:\n" + _json.dumps(rows), system_extra=system,
                                   max_tokens=400, trace_call="alloc_reason", provider="groq")
