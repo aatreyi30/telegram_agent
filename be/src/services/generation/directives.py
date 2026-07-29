@@ -193,14 +193,14 @@ def parse_target_posts(directive: str | None) -> int | None:
     """The desired post count from a quantity steer, or None when none is named. Handles
     a correction like 'I don't want 39, make it 30' — the REJECTED number (39) is dropped
     and the LAST remaining candidate wins (a correction comes later in the sentence).
-    Bounded to 1..200; a downstream safety clamp still caps it against recent cadence.
+    Bounded to 1..350; a downstream safety clamp still caps it against recent cadence.
     Parse the RAW ask, NEVER the composed blob ('N posts already live')."""
     if not directive:
         return None
     t = directive.lower()
     rejected = {int(x) for x in _REJECTED_COUNT_RE.findall(t)}
     cands = [int(g1 or g2) for g1, g2 in _TARGET_POSTS_RE.findall(t)]
-    cands = [n for n in cands if 1 <= n <= 200 and n not in rejected]
+    cands = [n for n in cands if 1 <= n <= 350 and n not in rejected]
     return cands[-1] if cands else None
 
 
@@ -250,6 +250,20 @@ _STEER_INTENT_SYSTEM = (
     "{\n"
     '  "target_posts": <int|null>,             // desired POST COUNT. For a correction like\n'
     '                                           //   "not 39, make it 10" use the NEW value (10).\n'
+    '  "target_posts_period": "day"|"week"|null,  // ONLY set "week" when the operator says the\n'
+    '                                              // number is a TOTAL for the whole week ("40\n'
+    '                                              // posts this week", "60 for the week") — NOT\n'
+    '                                              // when the number is per-day (default "day" for\n'
+    '                                              // a bare count like "post 20", "make it 10").\n'
+    '  "target_posts_mode": "total"|"additional"|null,  // "additional" ONLY when the operator\n'
+    '                                                    // clearly wants N NEW posts on top of\n'
+    '                                                    // whatever already went out today — cues\n'
+    '                                                    // like "from now", "more", "additional",\n'
+    '                                                    // "extra" ("20 posts from now", "5 more\n'
+    '                                                    // posts"). Default "total" (or null) for a\n'
+    '                                                    // bare count ("post 20 today") — that means\n'
+    '                                                    // 20 for the WHOLE day, already-posted ones\n'
+    '                                                    // included, NOT 20 additional.\n'
     '  "merchants_only": [<feed merchant slugs>],    // restrict to ONLY these merchants\n'
     '  "merchants_exclude": [<feed merchant slugs>], // avoid these merchants\n'
     '  "categories_only": [<feed category slugs>],\n'
@@ -263,10 +277,18 @@ _STEER_INTENT_SYSTEM = (
     '  "unsupported": ["<any ask that maps to NO field above, with a short why>"]\n'
     "}\n"
     "Rules: only set merchants_only/categories_only when the operator clearly wants ONLY "
-    "those; a bare mention ('push electronics') is a soft lean, not a hard filter — put a "
-    "soft lean in interpretation, not in the *_only fields. 'pause' is ONLY for stopping "
-    "posting, NEVER for 'don't post <category>' (that is categories_exclude). Caption "
-    "tone/wording, conversion/sales/CTR, or anything with no field above goes in 'unsupported'.")
+    "those for the WHOLE remaining day; a bare mention ('push electronics') is a soft lean, "
+    "not a hard filter — put a soft lean in interpretation, not in the *_only fields. This "
+    "still applies when a TIME is attached: 'post amazon at 9' / 'include an amazon post "
+    "this morning' / 'want to post amazon today morning 9' asks for ONE (or a few) extra "
+    "amazon post around that time, NOT amazon for every remaining slot — leave "
+    "merchants_only EMPTY and describe the single addition in interpretation instead (set "
+    "after_time only if a real time window was given). Only set merchants_only when the "
+    "operator says something like 'only amazon', 'just flipkart', 'nothing but ajio', or "
+    "'stick to X' — words that exclude every other merchant for the rest of the day. "
+    "'pause' is ONLY for stopping posting, NEVER for 'don't post <category>' (that is "
+    "categories_exclude). Caption tone/wording, conversion/sales/CTR, or anything with no "
+    "field above goes in 'unsupported'.")
 
 
 def _hhmm_to_min(s) -> int | None:
@@ -277,15 +299,45 @@ def _hhmm_to_min(s) -> int | None:
     return min(h, 24) * 60 + mi if 0 <= h <= 24 and 0 <= mi < 60 else None
 
 
+# A weekly-TOTAL cue ("this week", "for the week", "a week", "/week") beats a per-day
+# reading — used only when the AI intent call is unavailable (extract_steer_intent's
+# regex fallback); the AI path gets this distinction directly via target_posts_period.
+_PER_WEEK_CUE_RE = re.compile(r"\b(?:this week|for the week|a week|per week|/\s*week|weekly total)\b")
+
+# An "additional, not total" cue ("from now", "more", "additional", "extra") — the same
+# regex-fallback role as _PER_WEEK_CUE_RE, for when the AI intent call is unavailable.
+# "20 posts from now" / "5 more posts" / "make it 20 more" means N NEW ones on top of
+# what's already posted today, NOT N as the whole day's total (the default bare-count
+# reading). Only consulted alongside an already-detected target_posts number, so a loose
+# "more"/"extra" match is low-risk — it can't fire without a real count present too.
+_ADDITIONAL_CUE_RE = re.compile(r"\b(?:from now|more|additional|extra)\b")
+
+
 def _regex_intent(directive: str | None, available_merchants, available_categories) -> dict:
     """Deterministic fallback intent from the regex parsers — used when the AI intent call
     fails, so steering never breaks. Same shape as ``extract_steer_intent``."""
     cons = parse_directive_constraints(directive, available_merchants, available_categories)
+    tp = parse_target_posts(directive)
+    unsupported = []
+    # parse_target_posts silently drops a raw candidate outside 1..350 — recover it here
+    # (same regex, no clamp) so an ask like "400 posts this week" is surfaced as an
+    # honestly-unsupported count instead of vanishing with no trace. Same reasoning as
+    # extract_steer_intent's AI-path clamp note.
+    if tp is None and directive:
+        _raw = [int(g1 or g2) for g1, g2 in _TARGET_POSTS_RE.findall(directive.lower())]
+        _oor = [n for n in _raw if not (1 <= n <= 350)]
+        if _oor:
+            unsupported.append(f"{_oor[-1]} posts is outside the supported 1-350 range, "
+                               "so the count wasn't changed")
     return {**cons,
-            "target_posts": parse_target_posts(directive),
+            "target_posts": tp,
+            "target_posts_period": ("week" if tp is not None and directive
+                                    and _PER_WEEK_CUE_RE.search(directive.lower()) else None),
+            "target_posts_mode": ("additional" if tp is not None and directive
+                                  and _ADDITIONAL_CUE_RE.search(directive.lower()) else None),
             "pause": parse_pause(directive),
             "type_lean": None,
-            "interpretation": "", "unsupported": [], "source": "regex"}
+            "interpretation": "", "unsupported": unsupported, "source": "regex"}
 
 
 def extract_steer_intent(directive: str | None,
@@ -304,7 +356,8 @@ def extract_steer_intent(directive: str | None,
     if not directive or not directive.strip():
         return {"merchants": None, "categories": None, "exclude_merchants": None,
                 "exclude_categories": None, "after_min": None, "before_min": None,
-                "price_min": None, "price_max": None, "target_posts": None, "pause": False,
+                "price_min": None, "price_max": None, "target_posts": None,
+                "target_posts_period": None, "target_posts_mode": None, "pause": False,
                 "type_lean": None, "interpretation": "", "unsupported": [], "source": "empty"}
 
     from src.ai.client import AIClient, AIUnavailable
@@ -334,7 +387,15 @@ def extract_steer_intent(directive: str | None,
         tp = int(tp) if tp is not None else None
     except (TypeError, ValueError):
         tp = None
-    if tp is not None and not (1 <= tp <= 200):
+    # A count outside the supported range is DROPPED, not silently ignored — without a
+    # trace here, the deterministic count stays unchanged (e.g. "300 posts this week"
+    # fails this clamp -> target_posts=None -> posts_per_day never moves) while the AI's
+    # own free-text narrative still parrots "300" because it saw the raw directive text,
+    # producing a real contradiction between the prose and the actual numbers. Surfacing
+    # it in `unsupported` lets the caller tell the operator plainly instead.
+    tp_out_of_range_note = None
+    if tp is not None and not (1 <= tp <= 350):
+        tp_out_of_range_note = f"{tp} posts is outside the supported 1-350 range, so the count wasn't changed"
         tp = None
     pmin, pmax = parsed.get("price_min"), parsed.get("price_max")
     pmin = int(pmin) if isinstance(pmin, (int, float)) else None
@@ -343,7 +404,13 @@ def extract_steer_intent(directive: str | None,
         pmin, pmax = pmax, pmin
     lean = parsed.get("type_lean")
     lean = lean if lean in ("single", "loot") else None
+    tp_period = parsed.get("target_posts_period")
+    tp_period = tp_period if tp_period in ("day", "week") else None
+    tp_mode = parsed.get("target_posts_mode")
+    tp_mode = tp_mode if tp_mode in ("total", "additional") else None
     unsupported = [u for u in (parsed.get("unsupported") or []) if isinstance(u, str) and u.strip()]
+    if tp_out_of_range_note:
+        unsupported.append(tp_out_of_range_note)
     return {
         "merchants": _valid(parsed.get("merchants_only"), avail_m),
         "exclude_merchants": _valid(parsed.get("merchants_exclude"), avail_m),
@@ -352,7 +419,8 @@ def extract_steer_intent(directive: str | None,
         "after_min": _hhmm_to_min(parsed.get("after_time")),
         "before_min": _hhmm_to_min(parsed.get("before_time")),
         "price_min": pmin, "price_max": pmax,
-        "target_posts": tp, "pause": bool(parsed.get("pause")),
+        "target_posts": tp, "target_posts_period": tp_period, "target_posts_mode": tp_mode,
+        "pause": bool(parsed.get("pause")),
         "type_lean": lean,
         "interpretation": (parsed.get("interpretation") or "").strip(),
         "unsupported": unsupported, "source": "ai",
@@ -458,6 +526,73 @@ def apply_price_constraints(slots: list[dict], constraints: dict) -> list[str]:
                 "no loot slots — singles are single specific deals, not price-filtered, "
                 "so nothing was capped"]
     return [f"{len(loot)} loot slot(s) capped to {band} per your steer"]
+
+
+def enforce_weekly_constraints(blueprint: dict, intent: dict) -> list[str]:
+    """Apply a validated steer intent to the WEEKLY blueprint's direction-level knobs, IN
+    PLACE. The week has no per-post slots (those only exist in the daily plan), so only
+    what's genuinely weekly-scoped can be steered: which merchants this week prioritizes,
+    the loot/single lean, and the posts/day target the daily plans read as THIS_WEEK
+    direction. Returns honest notes — what changed, and what a weekly steer can't reach
+    (price/time/category are per-slot and have no weekly analogue) — so the operator is
+    never told a steer applied when it silently didn't."""
+    notes: list[str] = []
+    allowed_m, excl_m = intent.get("merchants"), intent.get("exclude_merchants")
+    priorities = blueprint.get("merchant_priorities") or []
+
+    def _name(p):
+        return p.get("merchant") if isinstance(p, dict) else p
+
+    if allowed_m or excl_m:
+        kept = [p for p in priorities
+                if (not allowed_m or _name(p) in allowed_m)
+                and (not excl_m or _name(p) not in excl_m)]
+        if kept or excl_m:
+            blueprint["merchant_priorities"] = kept
+        if allowed_m and kept:
+            notes.append(f"merchant priorities narrowed to {'/'.join(sorted(allowed_m))} per your steer")
+        elif allowed_m:
+            notes.append(f"none of your requested merchants ({'/'.join(sorted(allowed_m))}) were in "
+                         "this week's merchant priorities, so the list was left unchanged")
+        if excl_m:
+            notes.append(f"{'/'.join(sorted(excl_m))} dropped from this week's merchant priorities per your steer")
+
+    lean = intent.get("type_lean")
+    if lean in ("single", "loot"):
+        # Same 30–70 band the deterministic weekly split clamps to (_weekly_ai_generate) —
+        # a lean is a nudge within that band, never a hard 100/0 override.
+        loot_pct = 65 if lean == "loot" else 35
+        blueprint["loot_deal_ratio"] = {"loot": loot_pct, "deal": 100 - loot_pct}
+        for t in (blueprint.get("daily_themes") or []):
+            if isinstance(t, dict):
+                t["loot_share"], t["single_share"] = round(loot_pct / 100, 3), round((100 - loot_pct) / 100, 3)
+        notes.append(f"leaned this week's mix toward {'loot boards' if lean == 'loot' else 'single deals'} per your steer")
+
+    target = intent.get("target_posts")
+    if target:
+        # A bare count ("post 20", "make it 10") defaults to the per-day cadence —
+        # the same figure daily_brief's recommended_posts steers to. But when the
+        # operator explicitly frames it as a WEEKLY total ("40 posts this week"),
+        # target_posts_period says "week" and the per-day figure must be derived
+        # (40/week != 40/day, which would silently 7x the real ask to 280/week).
+        if intent.get("target_posts_period") == "week":
+            per_day = max(1, round(target / 7))
+            blueprint["posts_per_day"], blueprint["posts_per_week"] = per_day, target
+            notes.append(f"posts/week set to {target} (~{per_day}/day) per your steer")
+        else:
+            blueprint["posts_per_day"], blueprint["posts_per_week"] = target, target * 7
+            notes.append(f"posts/day set to {target} per your steer")
+        for t in (blueprint.get("daily_themes") or []):
+            if isinstance(t, dict):
+                t["posts_planned"] = blueprint["posts_per_day"]
+
+    if intent.get("price_min") is not None or intent.get("price_max") is not None:
+        notes.append("price bands apply per-slot, which only exist in the daily plan — steer a specific day for that")
+    if intent.get("after_min") is not None or intent.get("before_min") is not None:
+        notes.append("timing windows apply per-slot, which only exist in the daily plan — steer a specific day for that")
+    if intent.get("categories") or intent.get("exclude_categories"):
+        notes.append("category steers apply per-slot, which only exist in the daily plan — steer a specific day for that")
+    return notes
 
 
 def _demo() -> None:
