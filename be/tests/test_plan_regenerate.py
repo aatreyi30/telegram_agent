@@ -126,6 +126,7 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
     assert first["available"] is True
     assert first["operator_directive"] is None
     assert first["can_regenerate"] is True
+    assert first["can_revert"] is False  # never steered yet -> nothing to revert to
     assert len(calls) == 1
     assert calls[0] is None  # normal path never threads a directive
 
@@ -142,6 +143,12 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
     second = service.regenerate_daily(date=today_str, directive=directive)
     assert second["available"] is True
     assert second["operator_directive"] == directive
+    # can_revert must be True in the IMMEDIATE regenerate response, not just on a later
+    # refetch — regression for the bug where daily_brief() computed can_revert BEFORE
+    # regenerate_daily stashed _pre_steer a few lines later, so the mutation's own
+    # response under-reported it (the FE's Revert button silently missing right after
+    # a successful steer, until a background refetch happened to catch up).
+    assert second["can_revert"] is True
     assert len(calls) == 2
     # the raw directive reached generate_day_plan (now carried inside the composed
     # prompt, which also appends the already-posted-today context when the day is
@@ -178,16 +185,21 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
 
     calls = []
 
-    def fake_generate(s, week_start=None, directive=None, end_day=None):
+    def fake_generate(s, week_start=None, directive=None, end_day=None, **_kw):
         calls.append(directive)
         return {"available": True, "digest": f"weekly digest #{len(calls)}"}
 
     monkeypatch.setattr("src.ai.planner.generate_week_plan", fake_generate)
+    # Mock the universal-steer intent extractor so the test never hits the live AI
+    # (deterministic, no pause) — regenerate_weekly imports it from directives.
+    monkeypatch.setattr("src.services.generation.directives.extract_steer_intent",
+                        lambda *a, **k: _fake_intent())
 
     first = service.weekly_brief(end=anchor.isoformat())
     assert first["available"] is True
     assert first["operator_directive"] is None
     assert first["can_regenerate"] is True
+    assert first["can_revert"] is False  # never steered yet -> nothing to revert to
     assert len(calls) == 1
     assert calls[0] is None
 
@@ -195,8 +207,13 @@ def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch)
     second = service.regenerate_weekly(end=anchor.isoformat(), directive=directive)
     assert second["available"] is True
     assert second["operator_directive"] == directive
+    # Same immediate-response staleness regression as daily: can_revert must be True
+    # right away, not only after a later refetch catches up to the persisted _pre_steer.
+    assert second["can_revert"] is True
     assert len(calls) == 2
-    assert calls[1] == directive
+    # the raw directive reaches generate_week_plan (composed with the interpreted-intent
+    # framing, same as the daily path — see test_generate_day_plan_injects_operator_directive)
+    assert directive in calls[1]
 
     with session_scope() as s:
         rows = s.scalars(select(CampaignPlan).where(
