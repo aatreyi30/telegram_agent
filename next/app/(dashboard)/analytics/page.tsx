@@ -11,6 +11,7 @@ import { StatCard } from "@/components/StatCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DateFilter } from "@/components/ui/date-range-picker";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SourceBreakdownSection, hasSourceBreakdown } from "@/components/SourceBreakdown";
 import { useAnalytics, useDataRange } from "@/queries/queries";
 import { useQueryParams } from "@/lib/use-search-params";
@@ -54,16 +55,51 @@ function to12h(hhmm: string): string {
   return `${h12} ${period}`;
 }
 
-function ChartCard({ title, sub, children }: { title: string; sub?: string; children: React.ReactNode }) {
+function ChartCard({ title, sub, action, children }: { title: string; sub?: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <Card>
+    <Card className="overflow-hidden">
+      <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
       <CardHeader>
-        <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
-        <CardTitle className="text-base font-semibold">{title}</CardTitle>
-        {sub && <p className="text-xs text-muted-foreground">{sub}</p>}
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="text-base font-semibold">{title}</CardTitle>
+            {sub && <p className="text-xs text-muted-foreground">{sub}</p>}
+          </div>
+          {action}
+        </div>
       </CardHeader>
       <CardContent>{children}</CardContent>
     </Card>
+  );
+}
+
+const METRIC_OPTIONS = [
+  { value: "engagement_rate", label: "Engagement rate", unit: "%" },
+  { value: "total_views", label: "Views", unit: " views" },
+  { value: "total_reactions", label: "Reactions", unit: " reactions" },
+  { value: "total_forwards", label: "Forwards", unit: " forwards" },
+] as const;
+type MetricKey = (typeof METRIC_OPTIONS)[number]["value"];
+
+const HOUR_METRIC_OPTIONS = [
+  { value: "total_views", label: "Views", unit: " views" },
+  { value: "n", label: "Posts", unit: " posts" },
+  { value: "total_reactions", label: "Reactions", unit: " reactions" },
+  { value: "total_forwards", label: "Forwards", unit: " forwards" },
+] as const;
+type HourMetricKey = (typeof HOUR_METRIC_OPTIONS)[number]["value"];
+
+function MetricTabs<T extends string>({ value, onChange, options }: {
+  value: T; onChange: (v: T) => void; options: readonly { value: T; label: string; unit: string }[];
+}) {
+  return (
+    <Tabs value={value} onValueChange={(v) => onChange(v as T)}>
+      <TabsList>
+        {options.map((o) => (
+          <TabsTrigger key={o.value} value={o.value} className="text-xs">{o.label}</TabsTrigger>
+        ))}
+      </TabsList>
+    </Tabs>
   );
 }
 
@@ -81,6 +117,8 @@ export default function AnalyticsPage() {
   const min = range.data?.min ?? undefined;
   const max = range.data?.max ?? undefined;
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [segmentMetric, setSegmentMetric] = useState<MetricKey>("engagement_rate");
+  const [hourMetric, setHourMetric] = useState<HourMetricKey>("total_views");
 
   const { get, set } = useQueryParams();
   const preset = get("preset", "7d");
@@ -154,9 +192,9 @@ export default function AnalyticsPage() {
                 <StatCard label="Eng. rate" value={fmtPct(a.engagement_rate)} sub={`n=${win.n}`} />
               </div>
 
-              <Card>
+              <Card className="overflow-hidden">
+                <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
                 <CardHeader>
-                  <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
                   <CardTitle className="text-base font-semibold">Segment leaderboard</CardTitle>
                   <p className="text-xs text-muted-foreground">
                     Category / discount band / price band, ranked by engagement rate (reactions + forwards ÷ views).
@@ -167,17 +205,25 @@ export default function AnalyticsPage() {
                 <CardContent>
                   {(a.segments ?? []).length ? (
                     <div className="space-y-1.5">
-                      {a.segments.map((seg, i) => (
-                        <div key={`${seg.dimension}:${seg.label}`} className="flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2">
-                          {i === 0 && <span className="text-xs">⭐</span>}
-                          <span className="text-xs text-muted-foreground">{DIMENSION_LABEL[seg.dimension]}</span>
-                          <span className="text-sm font-semibold text-foreground">{segmentLabel(seg.dimension, seg.label)}</span>
-                          <span className="ml-auto text-xs text-muted-foreground">
-                            {fmtPct(seg.engagement_rate)} eng. rate · {seg.n} posts ·{" "}
-                            {coverageLabel(a.dimension_coverage?.[seg.dimension]?.categorized ?? 0, a.dimension_coverage?.[seg.dimension]?.total ?? 0)} tagged {DIMENSION_LABEL[seg.dimension].toLowerCase()}
-                          </span>
-                        </div>
-                      ))}
+                      {a.segments.map((seg, i) => {
+                        const cov = a.dimension_coverage?.[seg.dimension];
+                        const covPct = cov && cov.total > 0 ? Math.round((cov.categorized / cov.total) * 100) : 0;
+                        return (
+                          <div key={`${seg.dimension}:${seg.label}`} className="flex items-center gap-3 rounded-lg bg-primary/10 px-3 py-2">
+                            {i === 0 && <span className="text-xs">⭐</span>}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{DIMENSION_LABEL[seg.dimension]}</span>
+                              </div>
+                              <span className="text-sm font-semibold text-foreground">{segmentLabel(seg.dimension, seg.label)}</span>
+                            </div>
+                            <div className="ml-auto text-right">
+                              <p className="text-lg font-bold leading-none text-primary">{fmtPct(seg.engagement_rate)}</p>
+                              <p className="mt-1 text-[11px] text-muted-foreground">{seg.n} posts · {covPct}% of posts tagged</p>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : (
                     <p className="text-sm text-muted-foreground">
@@ -187,20 +233,31 @@ export default function AnalyticsPage() {
                 </CardContent>
               </Card>
 
-              <div className="grid gap-4 lg:grid-cols-3">
-                <ChartCard title="Engagement rate by category"
-                  sub={`Which product categories actually earn engagement · hover for post count · ${coverageLabel(a.dimension_coverage?.category?.categorized ?? 0, a.dimension_coverage?.category?.total ?? 0)} · faded bars are under the sample gate`}>
-                  <BarsChart data={(a.by_category || []).map((r) => ({ ...r, label: categoryLabel(r.label) }))} unit="%" dataKey="engagement_rate" countKey="n" countLabel="Posts" mutedKey="below_min_n" />
-                </ChartCard>
-                <ChartCard title="Engagement rate by discount band"
-                  sub={`Does a deeper discount actually move engagement · hover for post count · ${coverageLabel(a.dimension_coverage?.discount_band?.categorized ?? 0, a.dimension_coverage?.discount_band?.total ?? 0)} · faded bars are under the sample gate`}>
-                  <BarsChart data={(a.by_discount_band || []).map((r) => ({ ...r, label: titleCase(r.label) }))} unit="%" dataKey="engagement_rate" countKey="n" countLabel="Posts" mutedKey="below_min_n" />
-                </ChartCard>
-                <ChartCard title="Engagement rate by price band"
-                  sub={`Which price range earns engagement · hover for post count · ${coverageLabel(a.dimension_coverage?.price_band?.categorized ?? 0, a.dimension_coverage?.price_band?.total ?? 0)} · faded bars are under the sample gate`}>
-                  <BarsChart data={(a.by_price_band || []).map((r) => ({ ...r, label: titleCase(r.label) }))} unit="%" dataKey="engagement_rate" countKey="n" countLabel="Posts" mutedKey="below_min_n" />
-                </ChartCard>
-              </div>
+              {(() => {
+                const segMetric = METRIC_OPTIONS.find((o) => o.value === segmentMetric)!;
+                return (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-medium text-muted-foreground">By category / discount band / price band</p>
+                      <MetricTabs value={segmentMetric} onChange={setSegmentMetric} options={METRIC_OPTIONS} />
+                    </div>
+                    <div className="grid gap-4 lg:grid-cols-3">
+                      <ChartCard title={`Category — ${segMetric.label.toLowerCase()}`}
+                        sub={`Which categories bring the most ${segMetric.label.toLowerCase()} · hover for post count · ${coverageLabel(a.dimension_coverage?.category?.categorized ?? 0, a.dimension_coverage?.category?.total ?? 0)}`}>
+                        <BarsChart data={(a.by_category || []).map((r) => ({ ...r, label: categoryLabel(r.label) }))} unit={segMetric.unit} dataKey={segmentMetric} countKey="n" countLabel="Posts" mutedKey="below_min_n" />
+                      </ChartCard>
+                      <ChartCard title={`Discount band — ${segMetric.label.toLowerCase()}`}
+                        sub={`Does a deeper discount move ${segMetric.label.toLowerCase()} · hover for post count · ${coverageLabel(a.dimension_coverage?.discount_band?.categorized ?? 0, a.dimension_coverage?.discount_band?.total ?? 0)}`}>
+                        <BarsChart data={(a.by_discount_band || []).map((r) => ({ ...r, label: titleCase(r.label) }))} unit={segMetric.unit} dataKey={segmentMetric} countKey="n" countLabel="Posts" mutedKey="below_min_n" />
+                      </ChartCard>
+                      <ChartCard title={`Price band — ${segMetric.label.toLowerCase()}`}
+                        sub={`Which price range earns ${segMetric.label.toLowerCase()} · hover for post count · ${coverageLabel(a.dimension_coverage?.price_band?.categorized ?? 0, a.dimension_coverage?.price_band?.total ?? 0)}`}>
+                        <BarsChart data={(a.by_price_band || []).map((r) => ({ ...r, label: titleCase(r.label) }))} unit={segMetric.unit} dataKey={segmentMetric} countKey="n" countLabel="Posts" mutedKey="below_min_n" />
+                      </ChartCard>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <ChartCard title="Views & engagement over time"
                 sub={`Daily total views (area) + engagement rate (dashed) · hover for post count · click a day for detail · ${win.start ? isoSlash(win.start) : "?"} → ${win.end ? isoSlash(win.end) : "?"}`}>
@@ -228,7 +285,7 @@ export default function AnalyticsPage() {
                   <ChartCard title="Subscriber growth" sub="Follower count over time from collection snapshots.">
                     {(() => {
                       const gapDays = Math.max(1, ...a.growth.daily.map((d) => d.spans_days));
-                      const gapNote = `covers ${gapDays} days, not just 1`;
+                      const gapNote = `${gapDays}-day total`;
                       return (
                         <>
                           {a.growth.has_collection_gap && (
@@ -292,31 +349,33 @@ export default function AnalyticsPage() {
                 </>
               )}
 
-              <div className="grid gap-4 lg:grid-cols-2">
-                <ChartCard title="Total views by hour (IST)" sub="All 24 hours — empty slots show 0 · hover for post count">
-                  <BarsChart data={a.by_hour || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" />
-                </ChartCard>
-                <ChartCard title="Total views by weekday (IST)" sub="Within the selected range · hover for post count">
-                  <BarsChart data={a.by_weekday || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" />
-                </ChartCard>
-              </div>
-
-              <div className="grid gap-4 lg:grid-cols-2">
-                <ChartCard title="Posts by hour (IST)" sub="How many posts we publish in each hour of the day · all 24 hours">
-                  <BarsChart data={a.by_hour || []} unit=" posts" dataKey="n" countKey="total_views" countLabel="Views" />
-                </ChartCard>
-              </div>
+              {(() => {
+                const hm = HOUR_METRIC_OPTIONS.find((o) => o.value === hourMetric)!;
+                return (
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <ChartCard title={`Posting activity by hour (IST) — ${hm.label.toLowerCase()}`}
+                      sub="All 24 hours — empty slots show 0 · hover for post count"
+                      action={<MetricTabs value={hourMetric} onChange={setHourMetric} options={HOUR_METRIC_OPTIONS} />}>
+                      <BarsChart data={a.by_hour || []} unit={hm.unit} dataKey={hourMetric} countKey={hourMetric === "n" ? "total_views" : "n"} countLabel={hourMetric === "n" ? "Views" : "Posts"} />
+                    </ChartCard>
+                    <ChartCard title="Total views by weekday (IST)" sub="Within the selected range · hover for post count">
+                      <BarsChart data={a.by_weekday || []} unit=" views" dataKey="total_views" countKey="n" countLabel="Posts" />
+                    </ChartCard>
+                  </div>
+                );
+              })()}
 
               <div className="grid gap-4 lg:grid-cols-3">
-                <Card className="flex flex-col">
+                <Card className="flex flex-col overflow-hidden">
+                  <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
                   <CardHeader>
-                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
                     <CardTitle className="text-base font-semibold">Best times to post</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3 text-sm flex-1">
                     <p className="text-xs text-muted-foreground">
-                      Your strongest posting hours (IST), ranked by median views per post. Only hours with at
-                      least 3 posts are eligible, so this is self-auditing — small sample sizes never win.
+                      Your strongest posting hours (IST), ranked by typical views per post (a one-off viral
+                      post can't skew the ranking). Only hours with at least 3 posts are eligible, so this is
+                      self-auditing — small sample sizes never win.
                     </p>
                     {(a.golden_hours ?? []).length ? (
                       <div className="space-y-1.5">
@@ -326,7 +385,7 @@ export default function AnalyticsPage() {
                             <span className="text-sm font-semibold text-foreground">{to12h(gh.hour)}</span>
                             <span className="text-xs text-muted-foreground">— good to post</span>
                             <span className="ml-auto text-xs text-muted-foreground">
-                              {fmtNum(gh.median_views)} median views · {gh.n} posts
+                              ~{fmtNum(gh.median_views)} views typically · {gh.n} posts
                             </span>
                           </div>
                         ))}
@@ -337,9 +396,9 @@ export default function AnalyticsPage() {
                   </CardContent>
                 </Card>
 
-                <Card className="flex flex-col">
+                <Card className="flex flex-col overflow-hidden">
+                  <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
                   <CardHeader>
-                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
                     <CardTitle className="text-base font-semibold">Content signals</CardTitle>
                   </CardHeader>
                   <CardContent className="flex-1 flex flex-col gap-3">
@@ -359,9 +418,9 @@ export default function AnalyticsPage() {
                   </CardContent>
                 </Card>
 
-                <Card className="flex flex-col">
+                <Card className="flex flex-col overflow-hidden">
+                  <div className="h-1 bg-gradient-to-r from-primary to-primary/30" />
                   <CardHeader>
-                    <div className="h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50 mb-3" />
                     <CardTitle className="text-base font-semibold">Subscriber growth</CardTitle>
                   </CardHeader>
                   <CardContent className="flex-1 space-y-3">
@@ -399,15 +458,6 @@ export default function AnalyticsPage() {
                     )}
                   </CardContent>
                 </Card>
-              </div>
-
-              <div className="grid gap-4 lg:grid-cols-2">
-                <ChartCard title="Total reactions by hour (IST)" sub="How reactions distribute across the day · hover for post count">
-                  <BarsChart data={a.by_hour || []} unit=" reactions" dataKey="total_reactions" countKey="n" countLabel="Posts" />
-                </ChartCard>
-                <ChartCard title="Total forwards by hour (IST)" sub="How forwards distribute across the day · hover for post count · forwards are sparsely captured on this channel — not a reliable signal">
-                  <BarsChart data={a.by_hour || []} unit=" forwards" dataKey="total_forwards" countKey="n" countLabel="Posts" />
-                </ChartCard>
               </div>
 
               <div className="grid gap-4 lg:grid-cols-2">
