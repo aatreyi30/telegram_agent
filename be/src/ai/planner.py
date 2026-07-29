@@ -313,9 +313,39 @@ def parse_plan(raw: str, available_merchants: list[str] | None = None) -> dict:
     for _sl in data["post_slots"]:
         if isinstance(_sl, dict):
             _sl["type"] = "collection" if is_loot_type(_sl.get("type")) else "single"
-    _check_type_mix(data["post_slots"])
+    _enforce_type_floor(data["post_slots"])
     _check_merchants(data["post_slots"], available_merchants)
     return data
+
+
+def _enforce_type_floor(slots: list[dict]) -> None:
+    """Keep both deal types above the 30% variety floor by CONVERTING the fewest slots —
+    never by rejecting the whole plan. The model sometimes skews the mix (e.g. 32 single /
+    3 loot, an 8.6% loot share); rejecting that dropped an otherwise-good AI plan into the
+    deterministic fallback (whole day reads "FALLBACK PLAN"). Instead, nudge the minority
+    type up to the floor here. Only ONE type can sit below a <=50% floor, so at most one
+    conversion pass runs. The persist layer still re-locks UNSTEERED plans to the learned
+    ratio, so this only binds when a steer skipped that lock."""
+    total = len(slots)
+    if total < 4:
+        return
+    single = [s for s in slots if (s.get("type") or "single") == "single"]
+    loot = [s for s in slots if (s.get("type") or "single") == "collection"]
+    floor = max(int(round(total * _MIN_TYPE_SHARE)), 1)
+    if len(single) < floor:
+        minority, majority, deficit = "single", loot, floor - len(single)
+    elif len(loot) < floor:
+        minority, majority, deficit = "collection", single, floor - len(loot)
+    else:
+        return
+    # Convert the LAST `deficit` majority slots (disturb early, more-reasoned slots least).
+    for sl in majority[-deficit:]:
+        sl["type"] = minority
+        if minority == "single":
+            sl["max_price"] = sl["min_price"] = None
+        sl["why"] = (f"{sl.get('merchant') or 'Deal'} · {sl.get('theme') or 'general'} "
+                     f"{'single deal' if minority == 'single' else 'loot board'} — balanced so "
+                     "both deal types stay above the 30% variety floor.")
 
 
 def _check_merchants(slots: list[dict], available_merchants: list[str] | None) -> None:
@@ -693,6 +723,30 @@ def _fallback_day_plan(day, plan_ctx: dict) -> dict:
     }
 
 
+def _stash_directive_constraints(plan: dict, directive: str | None,
+                                 steer_intent: dict | None, plan_ctx: dict) -> None:
+    """Stash the steer's HARD constraints on the plan so persist_ai_plan's enforcers apply
+    them AFTER padding/reconciliation. Runs for BOTH a real AI plan and a deterministic
+    fallback — a fallback that ignored the steer would silently drop e.g. an 'only amazon'
+    pin. Prefers the AI-interpreted intent (universal steer); else the regex parse. Both
+    yield the same constraint keys, matched only against real feed values (nothing invented)."""
+    if not directive:
+        return
+    from src.services.generation.directives import parse_directive_constraints
+    _cons = steer_intent if steer_intent is not None else parse_directive_constraints(
+        directive, plan_ctx.get("available_merchants"), plan_ctx.get("available_categories"))
+    if any(_cons.get(k) is not None for k in ("merchants", "categories",
+           "exclude_merchants", "exclude_categories", "after_min", "before_min",
+           "price_min", "price_max")):
+        plan["_directive_constraints"] = {
+            "merchants": sorted(_cons["merchants"]) if _cons["merchants"] else None,
+            "categories": sorted(_cons["categories"]) if _cons["categories"] else None,
+            "exclude_merchants": sorted(_cons["exclude_merchants"]) if _cons["exclude_merchants"] else None,
+            "exclude_categories": sorted(_cons["exclude_categories"]) if _cons["exclude_categories"] else None,
+            "after_min": _cons["after_min"], "before_min": _cons["before_min"],
+            "price_min": _cons["price_min"], "price_max": _cons["price_max"]}
+
+
 def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
                        directive: str | None = None, steer_intent: dict | None = None) -> dict:
     """Grounded AI day plan for ``day`` (default: latest owned day). Returns the raw
@@ -813,6 +867,7 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         logger.warning("[ai.planner] AI unavailable for day plan (%s) — using "
                        "deterministic fallback", e)
         fallback = _fallback_day_plan(day, plan_ctx)
+        _stash_directive_constraints(fallback, directive, steer_intent, plan_ctx)
         return {"available": True, "digest": "AI planner unavailable "
                 f"({e}) — a deterministic fallback plan is active (covers every "
                 "posting window with a loot/single mix); regenerate once the AI "
@@ -831,6 +886,7 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         logger.warning("[ai.planner] day plan rejected (%s) — using deterministic fallback "
                        "(likely_truncation=%s, plan_text_len=%d)", _reason, _truncated, len(plan_text or ""))
         fallback = _fallback_day_plan(day, plan_ctx)
+        _stash_directive_constraints(fallback, directive, steer_intent, plan_ctx)
         return {"available": True, "digest": digest or (
                 "AI planner returned an unusable plan — a deterministic "
                 "fallback plan is active; regenerate for a grounded plan."),
@@ -842,29 +898,7 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     _repair_plan_diversity(plan.get("post_slots") or [], plan_ctx.get("available_merchants"),
                            plan_ctx.get("available_categories"),
                            available_pairs=_feed_pair_counts or None)
-    # Steer directive -> HARD constraints the diversity-repair can't express: PARSE the
-    # merchants/categories an operator restricted, plus any time window, and stash them
-    # on the plan. They're ENFORCED in persist_ai_plan AFTER all slot padding/
-    # reconciliation — enforcing here would be undone when persist pads the plan up to
-    # the cadence (the padding re-introduces dropped merchants). Constraints are matched
-    # only against real feed values, so nothing is invented.
-    if directive:
-        from src.services.generation.directives import parse_directive_constraints
-        # Prefer the AI-interpreted intent (universal steer) when the caller extracted one;
-        # else fall back to the regex parse. Both yield the same constraint keys the
-        # persist-time enforcers read, so downstream is identical.
-        _cons = steer_intent if steer_intent is not None else parse_directive_constraints(
-            directive, plan_ctx.get("available_merchants"), plan_ctx.get("available_categories"))
-        if any(_cons.get(k) is not None for k in ("merchants", "categories",
-               "exclude_merchants", "exclude_categories", "after_min", "before_min",
-               "price_min", "price_max")):
-            plan["_directive_constraints"] = {
-                "merchants": sorted(_cons["merchants"]) if _cons["merchants"] else None,
-                "categories": sorted(_cons["categories"]) if _cons["categories"] else None,
-                "exclude_merchants": sorted(_cons["exclude_merchants"]) if _cons["exclude_merchants"] else None,
-                "exclude_categories": sorted(_cons["exclude_categories"]) if _cons["exclude_categories"] else None,
-                "after_min": _cons["after_min"], "before_min": _cons["before_min"],
-                "price_min": _cons["price_min"], "price_max": _cons["price_max"]}
+    _stash_directive_constraints(plan, directive, steer_intent, plan_ctx)
     return {"available": True, "digest": digest, "plan": plan, "facts": facts,
             "feed_pairs": _feed_pair_counts}
 
@@ -1060,19 +1094,19 @@ def _demo() -> None:
     )
     assert len(tc["post_slots"]) == 1, tc
 
-    skewed_raw = (
-        '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x",'
-        '"post_slots":[{"type":"single","window_ist":"09:00-12:00","count":7,'
-        '"theme":"electronics","merchant":"amazon","max_price":null,"why":"x"},'
-        '{"type":"collection","window_ist":"18:00-21:00","count":1,'
-        '"theme":"fashion","merchant":"ajio","max_price":null,"why":"x"}],'
-        '"emphasis":"e","watch":"w","cited_numbers":[]}'
-    )
-    try:
-        parse_plan(skewed_raw)  # minority share 1/8=12.5%, below the 30% floor
-        raise AssertionError("expected a below-floor type skew to be rejected")
-    except ValueError:
-        pass
+    # A below-floor type skew is now CONVERTED up to the 30% floor, not rejected (which used
+    # to drop a good AI plan into the deterministic fallback). 7 single + 1 loot -> the loot
+    # count is nudged up to the floor.
+    _skew_slots = ",".join(
+        f'{{"type":"single","time_ist":"{9 + i:02d}:00","theme":"electronics",'
+        '"merchant":"amazon","why":"x"}' for i in range(7))
+    skewed = parse_plan(
+        '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x","post_slots":['
+        + _skew_slots + ',{"type":"collection","time_ist":"18:00","theme":"fashion",'
+        '"merchant":"ajio","why":"x"}],"emphasis":"e","watch":"w","cited_numbers":[]}')
+    assert len(skewed["post_slots"]) == 8
+    _loot_n = sum(1 for s in skewed["post_slots"] if s["type"] == "collection")
+    assert _loot_n >= round(8 * _MIN_TYPE_SHARE), _loot_n  # floor enforced by conversion, not fallback
 
     same_raw = (
         '{"date":"2026-07-21","recommended_posts":8,"cadence_why":"x",'
