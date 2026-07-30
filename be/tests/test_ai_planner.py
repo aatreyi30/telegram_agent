@@ -90,7 +90,10 @@ def test_build_plan_context_this_week_theme_present():
     with session_scope() as s:
         s.add(CampaignPlan(
             plan_type=PlanType.WEEKLY, title="Weekly plan", target_date=PREV,
-            end_date=PREV, blueprint={"daily_themes": [
+            # end_date must actually cover DAY — _current_week_plan is now scoped by
+            # date range (target_date <= day <= end_date), so a plan whose range
+            # doesn't include DAY correctly returns no theme for it.
+            end_date=DAY, blueprint={"daily_themes": [
                 {"day": "Wed", "date": DAY.isoformat(), "theme_focus": "electronics",
                  "posts_planned": 8},
             ]}, confidence=0.6, generated_at=datetime.now(timezone.utc)))
@@ -99,6 +102,46 @@ def test_build_plan_context_this_week_theme_present():
         ctx = build_plan_context(s, DAY)
     assert ctx["this_week_theme"] is not None
     assert ctx["this_week_theme"]["theme_focus"] == "electronics"
+
+
+def test_build_plan_context_ignores_a_stray_unrelated_week_row():
+    """_current_week_plan must be scoped by date range, not just "most recently
+    generated" — otherwise a leftover weekly plan for a totally unrelated week (e.g.
+    a stray future week regenerated during testing, sitting in the DB alongside the
+    real current week's row) can silently win the "most recent" lookup and leak its
+    direction/loot_deal_ratio/merchant_priorities onto a day it has nothing to do
+    with. Regression for a real gap found live: 11 leftover weekly rows spanning
+    unrelated weeks had accumulated in production before this fix."""
+    from src.db.models_campaign import CampaignPlan, PlanType
+    from src.db.session import session_scope
+    from src.ai.planner import build_plan_context
+    from datetime import timedelta
+
+    # Both rows must be more recent than test_build_plan_context_this_week_theme_present's
+    # leftover row in this shared module-scoped DB (that one uses real "now" as
+    # generated_at), or that unrelated row would win the generated_at ordering instead.
+    _now = datetime.now(timezone.utc)
+    with session_scope() as s:
+        # The REAL current week's plan, covering DAY, generated FIRST (older). A
+        # different target_date than the other tests' rows in this module (shared
+        # DB) — same campaign_version/plan_type/target_date/is_ai_generated is a
+        # unique key.
+        s.add(CampaignPlan(
+            plan_type=PlanType.WEEKLY, title="Real current week", target_date=PREV - timedelta(days=3),
+            end_date=DAY, blueprint={"direction": "correct direction for this week"},
+            confidence=0.6, generated_at=_now + timedelta(minutes=1)))
+        # A totally unrelated FUTURE week's plan (e.g. a stray regenerate during
+        # testing), generated MORE RECENTLY — but its date range does NOT cover DAY.
+        far_future = DAY + timedelta(days=90)
+        s.add(CampaignPlan(
+            plan_type=PlanType.WEEKLY, title="Unrelated stray week",
+            target_date=far_future, end_date=far_future + timedelta(days=6),
+            blueprint={"direction": "WRONG — unrelated week, must never leak"},
+            confidence=0.6, generated_at=_now + timedelta(minutes=2)))
+
+    with session_scope() as s:
+        ctx = build_plan_context(s, DAY)
+    assert ctx["this_week_direction"]["direction"] == "correct direction for this week"
 
 
 def test_build_plan_context_this_week_theme_absent():

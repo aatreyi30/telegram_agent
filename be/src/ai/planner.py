@@ -428,18 +428,25 @@ def _yesterday_ai_plan(s: Session, prev):
     )
 
 
-def _current_week_plan(s: Session) -> dict | None:
-    """The current week's WEEKLY CampaignPlan blueprint (most recent row for this
-    campaign version — the AI weekly plan when one exists, else the deterministic one)."""
+def _current_week_plan(s: Session, day=None) -> dict | None:
+    """The WEEKLY CampaignPlan blueprint whose date range actually CONTAINS ``day``
+    (the AI weekly plan when one exists, else the deterministic one) — same
+    range-scoped lookup service.py's ``_active_event_ramp_for`` uses, so a leftover
+    row for an unrelated week (a stray past/future week that never got cleaned up)
+    can't silently leak its direction/loot_deal_ratio/merchant_priorities onto a day
+    it doesn't cover. ``day`` is optional ONLY for backward compatibility with any
+    caller that genuinely has no date to scope by — omitting it falls back to
+    whichever weekly row was generated most recently, of ANY week, which is safe
+    only when at most one weekly plan row exists at a time. Pass ``day`` whenever
+    it's known."""
     from sqlalchemy import select
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
 
-    wk = s.scalar(
-        select(CampaignPlan)
-        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
-               CampaignPlan.plan_type == PlanType.WEEKLY)
-        .order_by(CampaignPlan.generated_at.desc())
-    )
+    q = select(CampaignPlan).where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                                   CampaignPlan.plan_type == PlanType.WEEKLY)
+    if day is not None:
+        q = q.where(CampaignPlan.target_date <= day, CampaignPlan.end_date >= day)
+    wk = s.scalar(q.order_by(CampaignPlan.generated_at.desc()))
     return (wk.blueprint or {}) if wk else None
 
 
@@ -493,7 +500,7 @@ def build_plan_context(s: Session, day, inputs: dict | None = None,
     # the full 3x pool for any normal day (up to ~40 posts) and only kicks in for the
     # steered/ramped extreme.
     available_deals = ctx.available_deals(s, limit=min(max(3 * (recommended_posts or 0), 9), 120))
-    week_bp = _current_week_plan(s)
+    week_bp = _current_week_plan(s, day)
     week_direction = ({k: week_bp.get(k) for k in ("direction", "loot_deal_ratio", "merchant_priorities")}
                       if week_bp else None)
     # The real vocabulary the live deal feed uses — the plan's slot `theme`/`merchant`

@@ -514,7 +514,7 @@ def _rescale_slot_counts(plan: dict, target_total: int,
 def persist_ai_plan(
     s: Session, result: dict,
     recent_median: int | None = None, recent_max_30d: int | None = None,
-    steered: bool = False, now_min: int | None = None,
+    steered: bool = False, now_min: int | None = None, day=None,
 ) -> CampaignPlan | None:
     """``recent_median``/``recent_max_30d`` are the same clamp bounds
     ``daily_brief`` uses for DISPLAY (``ctx.clamp_recommended_posts``) — passing
@@ -523,7 +523,9 @@ def persist_ai_plan(
     ``result["feed_pairs"]`` (``ai.planner.generate_day_plan``'s live-feed
     ``(merchant, category) -> deal count``, absent on older/synthetic ``result``
     dicts) is forwarded to the reconciliation so a duplicated slot can't be
-    scheduled onto a pairing the feed doesn't stock."""
+    scheduled onto a pairing the feed doesn't stock. ``day`` scopes the
+    unsteered loot/single lock's weekly-ratio lookup to the week that actually
+    covers it — see ``_current_week_plan``."""
     if not result.get("available") or not result.get("plan"):
         return None
     plan = result["plan"]
@@ -558,7 +560,7 @@ def persist_ai_plan(
         # overriding the operator and contradicting the narrative).
         if not steered:
             from src.ai.planner import _current_week_plan
-            _wk = _current_week_plan(s) or {}
+            _wk = _current_week_plan(s, day) or {}
             _r = _wk.get("loot_deal_ratio") or {}
             _lt, _dl = _r.get("loot"), _r.get("deal")
             _loot_share = _lt / (_lt + _dl) if (_lt is not None and _dl is not None and (_lt + _dl)) else None
