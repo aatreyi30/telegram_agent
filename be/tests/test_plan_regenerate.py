@@ -111,7 +111,7 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
 
     calls = []
 
-    def fake_generate_day_plan(s, day=None, inputs=None, directive=None, steer_intent=None):
+    def fake_generate_day_plan(s, day=None, inputs=None, directive=None, steer_intent=None, **_kw):
         calls.append(directive)
         return _fake_ai_result(day.isoformat(), digest=f"digest #{len(calls)}")
 
@@ -169,6 +169,47 @@ def test_regenerate_daily_replaces_cached_row_and_stores_directive(monkeypatch):
     third = service.daily_brief(date=today_str)
     assert third["operator_directive"] == directive
     assert len(calls) == 2, "reopening must reuse the cached row, not regenerate again"
+
+
+def test_revert_daily_restores_the_true_original_after_multiple_steers(monkeypatch):
+    """Regression for a real live confusion: after steering TWICE (A then B), "Revert"
+    must restore the day exactly as it was before the FIRST steer (never-steered
+    baseline) — not just undo the most recent steer back to state-after-A. Each
+    successive regenerate must carry the ORIGINAL snapshot forward, not overwrite it
+    with its own already-steered state."""
+    from src.controllers import service
+    from datetime import timedelta
+    from src.services.analytics.periods import ist_today
+
+    today = ist_today() + timedelta(days=2)  # a fresh future day, untouched by other tests
+    today_str = today.isoformat()
+
+    calls = []
+
+    def fake_generate_day_plan(s, day=None, inputs=None, directive=None, steer_intent=None, **_kw):
+        calls.append(directive)
+        return _fake_ai_result(day.isoformat(), digest=f"digest #{len(calls)}")
+
+    monkeypatch.setattr("src.ai.planner.generate_day_plan", fake_generate_day_plan)
+    monkeypatch.setattr("src.services.generation.directives.extract_steer_intent",
+                        lambda *a, **k: _fake_intent())
+
+    baseline = service.daily_brief(date=today_str)
+    assert baseline["available"] is True
+    assert baseline["operator_directive"] is None
+
+    after_a = service.regenerate_daily(date=today_str, directive="only amazon")
+    assert after_a["operator_directive"] == "only amazon"
+
+    after_b = service.regenerate_daily(date=today_str, directive="only flipkart")
+    assert after_b["operator_directive"] == "only flipkart"
+    assert after_b["can_revert"] is True
+
+    reverted = service.revert_daily(date=today_str)
+    assert reverted["available"] is True
+    # Back to the NEVER-steered baseline (operator_directive None) — not "only amazon"
+    # (state-after-A), which a one-level-only undo would have wrongly restored.
+    assert reverted["operator_directive"] is None
 
 
 def test_regenerate_weekly_replaces_cached_row_and_stores_directive(monkeypatch):
