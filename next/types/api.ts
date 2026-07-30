@@ -10,11 +10,18 @@ export interface OverviewResponse {
 }
 
 export interface GrowthDailyPoint {
-  date: string; subs_end: number | null; joined: number; left: number; net: number;
+  date: string; subs_end: number | null;
+  joined: number | null; left: number | null; net: number | null;
   /** >1 means this row's joined/left/net is NOT one day's growth — it's the
    * accumulated total across a collection gap this many days wide (the scheduler
    * was off), bucketed onto this date because that's when observation resumed. */
   spans_days: number;
+  /** True only for a synthetic leading point: the real last-known subscriber count
+   * BEFORE a collection gap, prepended so the chart can show the actual jump across
+   * the gap instead of starting mid-jump (which reads as a flat/stagnant line).
+   * joined/left/net are null here — it's not part of any window's totals, just a
+   * real historical anchor for chart continuity. */
+  is_gap_anchor?: boolean;
 }
 
 // Telegram's admin-only "views by source" / "joins by source" breakdown (requires

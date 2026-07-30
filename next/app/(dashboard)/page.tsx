@@ -44,14 +44,17 @@ function fmtNum(n: number | null | undefined): string {
 // activity, so a row-count-based "older half vs recent half" split would compare a real
 // period against a gap-inflated one and produce a wildly bogus %.
 function periodTrend(daily: GrowthDailyPoint[], key: "subs_end" | "joined" | "left" | "net", mode: "sum" | "avg" = "sum"): { value: number } | null {
-  const n = daily.length;
+  // The synthetic pre-gap anchor point (real historical subs_end, but no joined/left/net
+  // of its own) isn't a comparable day — exclude it from the trend split entirely.
+  const rows0 = daily.filter((d) => !d.is_gap_anchor);
+  const n = rows0.length;
   if (n < 4) return null;
-  if (daily.some((d) => d.spans_days > 1)) return null;
+  if (rows0.some((d) => d.spans_days > 1)) return null;
   const half = Math.floor(n / 2);
-  const older = daily.slice(0, half);
-  const recent = daily.slice(n - half);
+  const older = rows0.slice(0, half);
+  const recent = rows0.slice(n - half);
   const aggregate = (rows: GrowthDailyPoint[]) => {
-    const sum = rows.reduce((acc, d) => acc + (key === "subs_end" ? d.subs_end ?? 0 : d[key]), 0);
+    const sum = rows.reduce((acc, d) => acc + (key === "subs_end" ? d.subs_end ?? 0 : d[key] ?? 0), 0);
     return mode === "avg" ? sum / rows.length : sum;
   };
   const olderVal = aggregate(older);
@@ -96,7 +99,8 @@ function minusDays(iso: string, days: number): string {
  * Opened from a StatCard click rather than always shown, to keep the page short by default. */
 function GrowthDetailDialog({ open, onClose, daily }: { open: boolean; onClose: () => void; daily: GrowthDailyPoint[] }) {
   const data = daily.map((d) => ({
-    label: istDate(d.date), subs_end: d.subs_end ?? null, joined: d.joined, left: -d.left,
+    label: istDate(d.date), subs_end: d.subs_end ?? null,
+    joined: d.joined ?? null, left: d.left != null ? -d.left : null,
   }));
   return (
     <Dialog open={open} onClose={onClose} title="Subscriber growth" className="sm:max-w-3xl">

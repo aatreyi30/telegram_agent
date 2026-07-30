@@ -183,7 +183,7 @@ export default function AnalyticsPage() {
 
           return (
             <div className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-4 xl:grid-cols-7">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
                 <StatCard label="Posts" value={fmtNum(a.total_posts)} sub={`${win.days} days`} />
                 <StatCard variant="hero" label="Views" value={fmtNum(a.total_views)} />
                 <StatCard label="Total reactions" value={fmtNum(a.total_reactions)} />
@@ -310,7 +310,14 @@ export default function AnalyticsPage() {
                       <TimelineChart
                         data={(a.growth.daily || []).map((d) => ({ label: isoSlash(d.date), subs_end: d.subs_end ?? 0 }))}
                         dataKey="subs_end"
+                        yDomain={["auto", "auto"]}
                       />
+                      {a.growth.daily?.[0]?.is_gap_anchor && (
+                        <p className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
+                          The first point ({isoSlash(a.growth.daily[0].date)}) is the last known count before the
+                          tracking gap — that opening jump is the gap catching up, not a single day's growth.
+                        </p>
+                      )}
                     </div>
                   </ChartCard>
 
