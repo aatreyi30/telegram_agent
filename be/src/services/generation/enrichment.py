@@ -209,7 +209,13 @@ class DealEnrichmentEngine:
         if current is not None:
             tags.append("budget" if current <= 499 else "high-value" if current >= 3000 else "mid")
 
-        deal_id = content_hash(rd.url or rd.title, current, mrp)[:24]
+        # The source's OWN id is the stable identity of a deal. The content hash below
+        # mixes in price+mrp, so a ₹1 price move minted a brand-new deal_id for the same
+        # product — and since the 3-day repeat guard keys on deal_id, the same product
+        # could be posted again the next day at a slightly different price. Deal prices
+        # move constantly, so that was not an edge case. The hash stays as the fallback
+        # for sources that supply no id (manual/CLI RawDeals).
+        deal_id = rd.external_id or content_hash(rd.url or rd.title, current, mrp)[:24]
         clean = _clean_url(rd.url)
 
         # snapshot raw input immutably (never modify raw)

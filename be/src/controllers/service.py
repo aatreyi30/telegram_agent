@@ -256,6 +256,7 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
     ``window_days`` when set filters basic stats to the last N days (like comparison).
     """
     from src.services.analytics import comparison as cmp
+    from src.services.analytics import deal_gap
     from src.services.intelligence.competitor import latest_profiles
 
     with session_scope() as s:
@@ -308,6 +309,7 @@ def competitor_dashboard(window_days: int | None = None) -> dict:
             "note": note,
             "metrics": metrics,
             "applied_window": window_days,
+            "deal_gap": deal_gap.compute(s, window_days=window_days or 30),
         }
 
 
@@ -696,10 +698,65 @@ def _plan_date_bounds(s):
     return mn, mx
 
 
-def _today_details(s, recommended_posts: int):
+def _active_event_ramp_for(s, day):
+    """The event_ramp dict (see CampaignPlanningEngine._weekly_plan) from the persisted
+    WEEKLY plan whose date range actually CONTAINS ``day`` — None if there's no weekly
+    plan for that week, or it has no active event this week.
+
+    This is the single source of truth the weekly page's banner already reads
+    (weekly_brief's ``event_ramp`` field) — daily reads the SAME persisted value rather
+    than re-deriving its own event-window logic, so the two pages can never disagree
+    about which days are ramped or by how much. Read-only: never regenerates a plan,
+    never falls back to a differently-scoped weekly row (the explicit target_date/
+    end_date range check is what keeps this safe — an unrelated week's leftover ramp
+    can't leak onto a day it doesn't cover)."""
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    wk = s.scalar(
+        select(CampaignPlan)
+        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+               CampaignPlan.plan_type == PlanType.WEEKLY,
+               CampaignPlan.target_date <= day,
+               CampaignPlan.end_date >= day)
+        .order_by(CampaignPlan.generated_at.desc()))
+    return (wk.blueprint or {}).get("event_ramp") if wk else None
+
+
+def _weekly_posts_per_day_for(s, day):
+    """The weekly plan's ``posts_per_day`` (see CampaignPlanningEngine._weekly_plan)
+    from the persisted WEEKLY plan whose date range actually CONTAINS ``day`` — None
+    if there's no weekly plan for that week.
+
+    Same range-scoped read-only lookup as ``_active_event_ramp_for``, applied to the
+    BASE cadence instead of the event ramp: daily and weekly compute posts/day with
+    the exact same formula (the 14-day active-day median), but independently and at
+    whatever moment each was last generated — normally harmless since it's the same
+    math over the same data, but a stale weekly regenerate (or vice versa) used to
+    leave the two pages silently showing different numbers for the same day (seen
+    live: daily 39, weekly 35). Daily now reads weekly's number as the single source
+    of truth once a weekly plan exists, falling back to its own live computation only
+    when none does (cold start / no weekly plan generated yet)."""
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    wk = s.scalar(
+        select(CampaignPlan)
+        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+               CampaignPlan.plan_type == PlanType.WEEKLY,
+               CampaignPlan.target_date <= day,
+               CampaignPlan.end_date >= day)
+        .order_by(CampaignPlan.generated_at.desc()))
+    return (wk.blueprint or {}).get("posts_per_day") if wk else None
+
+
+def _today_details(s, recommended_posts: int, day=None):
     """Deterministic 'today' details (posting windows, deal-type allocation, merchant
     mix, risks) sized to ``recommended_posts``, reusing the campaign engine's pure
-    helpers so the plan stays consistent with the recommended cadence."""
+    helpers so the plan stays consistent with the recommended cadence.
+
+    ``day`` (the plan date) windows BOTH the deal-type SPLIT and the displayed 'avg
+    views/post' to the same 30 days ending the day before ``day`` — the split used to
+    stay on the all-time learning snapshot while only the shown per-post figure moved,
+    which let the table cite "13 months" for a number the operator expected to be "30
+    days" like the views column beside it. Falls back to the all-time snapshot only when
+    there's no posting activity in that 30-day window (or ``day`` is None)."""
     from datetime import datetime, timezone
     from src.services.planning.campaign import CampaignPlanningEngine
 
@@ -742,27 +799,110 @@ def _today_details(s, recommended_posts: int):
                     # number for WHY this window instead of generic "peak hours" filler.
                     "avg_views_per_day": p.get("avg_views_per_day")}
                    for i, p in enumerate(raw)]
-    perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
-            for p in ctx.post_type_performance(s)}
-    allocation = eng._allocate_posts(bp, recommended_posts, recent, perf)
+    _ptp = ctx.post_type_performance(s)
+    perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0) for p in _ptp}
+    # Genuine, intuitive per-post figure (real average of real view counts, ~780/577
+    # here) as opposed to the age-confounded views/day velocity (~10/31), which
+    # divides lifetime views by post age and so understates older post types. This is
+    # what the Plan page displays; see AVG-VIEWS note. Windowed to the selected date
+    # (30 days ending yesterday) when ``day`` is given, so the number moves per date
+    # instead of always showing the all-time snapshot; the split/target above stays on
+    # the stable all-time snapshot. A type with no posts that window falls to "—".
+    _disp = _ptp
+    _window_30d = False
+    if day is not None:
+        from datetime import timedelta
+        from src.services.analytics.periods import ist_day_bounds_utc
+        prev = day - timedelta(days=1)
+        w_start, _ = ist_day_bounds_utc(prev - timedelta(days=29))
+        _, w_end = ist_day_bounds_utc(prev)
+        _ranged = ctx.post_type_performance_range(s, w_start, w_end)
+        if _ranged:
+            _disp, _window_30d = _ranged, True
+    views_per_post = {p["post_type"]: p.get("avg_views") for p in _disp}
+    # Sample size behind each avg — surfaced beside the number so the Plan page can
+    # show "measured across N posts", making the figure self-evidently real (not an
+    # estimate). Deterministic provenance, not a new signal.
+    views_sample = {p["post_type"]: p.get("posts") for p in _disp}
+    # The SPLIT itself now learns from the same 30-day window as the displayed views
+    # (when that window has posts) — not the all-time growth-engine snapshot — so the
+    # 'Why' column can honestly cite "your last 30 days" instead of a much longer,
+    # unexpected span. Falls back to the all-time blueprint mix only when the 30-day
+    # window is empty (no recent posts of either type).
+    bp_for_alloc = bp
+    if _window_30d:
+        from src.services.intelligence.growth import content_mix_from_rows
+        _mix30 = content_mix_from_rows(_disp)
+        if _mix30:
+            bp_for_alloc = {**bp, "content_mix": _mix30}
+    allocation = eng._allocate_posts(bp_for_alloc, recommended_posts, recent, perf)
+    # Unify the displayed numbers to the canonical PostTypePerformance values (the
+    # learning engine's output the rest of the app uses) so the Plan page can't show
+    # a divergent GrowthEngine figure. Split (target_posts) is left exactly as
+    # _allocate_posts computed it — only the displayed metrics are set here.
+    for a in allocation:
+        canon = perf.get(a.get("post_type"))
+        if canon is not None:
+            a["avg_views_per_day"] = canon
+        vpp = views_per_post.get(a.get("post_type"))
+        if vpp is not None:
+            a["avg_views_per_post"] = vpp
+        n = views_sample.get(a.get("post_type"))
+        if n is not None:
+            a["views_sample"] = n
+        if _window_30d and bp_for_alloc is not bp and a.get("source_kind") == "all_time":
+            a["source_kind"] = "recent_30d"
+    # Deterministic per-type reasoning for the Plan page's "Why" column — explains the
+    # split and the views figure straight from the real numbers that produced them, so
+    # it's guaranteed to match the computed allocation. (Not an LLM rationalization,
+    # which could contradict the deterministic split — the whole point is trust.)
+    # Count-free on purpose: daily_brief rebuckets target_posts from the ACTUAL slots
+    # afterwards, so hardcoding a count here could drift from the number shown. The count
+    # is its own column; this explains the VIEWS figure and WHY the split leans as it does.
+    _vpp = {a.get("post_type"): a.get("avg_views_per_post") for a in allocation}
+    _sv, _lv = _vpp.get("single_deal"), _vpp.get("loot_deal")
+    for a in allocation:
+        pt = a.get("post_type")
+        vpp = a.get("avg_views_per_post")
+        mine = _sv if pt == "single_deal" else _lv
+        other = _lv if pt == "single_deal" else _sv
+        other_label = "loot boards" if pt == "single_deal" else "single deals"
+        bits: list[str] = []
+        if vpp is not None:
+            samp = f" across {a['views_sample']:,} posts" if a.get("views_sample") else ""
+            bits.append(f"averages {round(vpp)} views/post over the last 30 days{samp}")
+        if mine is not None and other is not None:
+            if mine >= other:
+                bits.append(f"ahead of {other_label} ({round(other)}/post), so the mix leans this type")
+            else:
+                bits.append(f"just behind {other_label} ({round(other)}/post), but kept in the mix so "
+                            "both types keep running (30% variety floor)")
+        a["reasoning"] = ("This type " + "; ".join(bits) + "." if bits
+                          else "Set by the channel's learned single/loot mix.")
     merchants = eng._merchant_allocation(s, recent, now)
     risks = eng._risks(recent, recommended_posts)
     return windows, allocation, merchants, (risks or None)
 
 
 def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
-                        directive: str | None = None, recent_max_30d: int | None = None) -> dict:
+                        directive: str | None = None, recent_max_30d: int | None = None,
+                        steer_intent: dict | None = None,
+                        constraint_directive: str | None = None) -> dict:
     """The cache-miss generation path for the daily AI plan: call the planner
     (honoring ``directive`` if given), fact-check its cited numbers against the same
     facts it was grounded on, and persist a `CampaignPlan` row pinned to ``day``.
     ``recent_max_30d`` (when the caller has it) feeds the G10 persist-time clamp —
-    ``recommended`` doubles as the clamp's recent-median bound.
+    ``recommended`` doubles as the clamp's recent-median bound. ``constraint_directive``
+    — see ``generate_day_plan`` — is the operator's RAW steer text, when ``directive``
+    has been decorated with extra prompt-only context that must never itself be
+    mistaken for a steer.
 
     Shared by `daily_brief` (normal first-request-of-the-day miss) and
     `regenerate_daily` (forced fresh generation after deleting the stale cache row)
     so the two paths can never drift apart."""
     from src.ai.planner import generate_day_plan
-    from src.ai.factcheck import check_cited_numbers, extract_prose_numbers, plan_structural_numbers
+    from src.ai.factcheck import (check_cited_numbers, extract_prose_numbers,
+                                   plan_structural_numbers, unmeasurable_claims)
     from src.services.generation.ai_execution import persist_ai_plan
 
     # Only pass `directive` through when set — keeps the call signature identical
@@ -770,6 +910,10 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
     # generate_day_plan with a fixed `(s, day=None, inputs=None)` signature) on the
     # normal, non-regenerate path.
     directive_kwargs = {"directive": directive} if directive is not None else {}
+    if steer_intent is not None:
+        directive_kwargs["steer_intent"] = steer_intent
+    if constraint_directive is not None:
+        directive_kwargs["constraint_directive"] = constraint_directive
     ai_res = generate_day_plan(s, day, inputs={
         "recommended_posts": recommended,
         "posting_windows": windows,
@@ -798,8 +942,32 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
             fc = check_cited_numbers(extract_prose_numbers({**plan, "digest": digest}), facts_pool)
             fc_status = ("pass" if fc["status"] == "passed"
                         else "failed" if fc["status"] == "failed" else "warn")
+            # Qualitative guard the number-check can't do: prose asserting an outcome
+            # we don't track (conversion/CTR/revenue — no click/affiliate data exists)
+            # is ungrounded. Downgrade a clean plan to 'warn' and record the terms so
+            # it's visible rather than silently trusted.
+            bad_claims = unmeasurable_claims({**plan, "digest": digest})
+            if bad_claims:
+                # Record the offending terms and never let such a plan read as fully
+                # trusted — downgrade a clean 'pass' to 'warn' (a real 'failed' stays).
+                fc = {**fc, "unmeasurable": bad_claims}
+                if fc_status == "pass":
+                    fc_status = "warn"
+        # (The deal-type 'Why' is computed deterministically from the FINAL split in
+        # daily_brief — see _reason_deal_type_split — so it can never contradict the
+        # Target-posts column, which an LLM views-comparison did.)
+        # Current IST minute-of-day when planning TODAY — lets persist floor a hard time
+        # window at "now" so a partial-future steer ("after 6pm" sent at 8pm) places all
+        # its slots in the remaining window instead of thinning into already-past minutes.
+        from datetime import datetime as _dt, timezone as _tz
+        from src.services.analytics.periods import ist_today, to_ist
+        _now_min = None
+        if day == ist_today():
+            _n = to_ist(_dt.now(_tz.utc))
+            _now_min = _n.hour * 60 + _n.minute
         row = persist_ai_plan(s, {**ai_res, "factcheck": fc},
-                              recent_median=recommended, recent_max_30d=recent_max_30d)
+                              recent_median=recommended, recent_max_30d=recent_max_30d,
+                              steered=bool(directive), now_min=_now_min, day=day)
         if row is not None:
             # Pin the cache key to the day we actually planned for — the AI's
             # self-reported "date" inside the plan JSON isn't reliable enough
@@ -838,14 +1006,18 @@ def ensure_daily_ai_plan(s, day):
     # back to the lifetime average so the plan isn't empty. Truly-zero only when there
     # is no posting history at all.
     recommended = _traj["recent_cadence"] or round(_traj["lifetime_baseline"] or 0)
-    windows, allocation, merchants, _ = _today_details(s, recommended)
+    windows, allocation, merchants, _ = _today_details(s, recommended, day=day)
     # Same clamp ceiling `daily_brief` uses (G10) — computed here too so the cron
     # path clamps at persist time exactly like the dashboard path does.
     traj30 = ctx.posting_trajectory(s, days=30, end_day=day - timedelta(days=1))
     recent_max_30d = max((d["posts"] for d in traj30["days"]), default=0)
     evt = None
     try:
-        evs = upcoming_events(s, day, within_days=14)
+        from src.services.planning.campaign import _RAMP
+        # Only a sale-flavored event (type in _RAMP) belongs in the "consider ramping"
+        # callout — a plain observance/holiday (e.g. "Friendship Day") isn't a shopping
+        # event and shouldn't tell the operator to ramp frequency for it.
+        evs = [e for e in upcoming_events(s, day, within_days=14) if e.event_type in _RAMP]
         if evs:
             e = evs[0]
             evt = {"name": e.name, "days_away": (e.next_date - day).days,
@@ -856,7 +1028,83 @@ def ensure_daily_ai_plan(s, day):
                               recent_max_30d=recent_max_30d).get("row")
 
 
-def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
+def _reason_deal_type_split(allocation: list[dict], history_days: int = 0) -> None:
+    """Deterministic 'Why' for the deal-type table: a plain-language reason, no percentages —
+    which data WINDOW it was learned from and the PATTERN found there (this type
+    outperforms, underperforms, or is about even with the other). The split is now learned
+    from the same 30-day window as the displayed avg-views figure beside it (``recent_30d``)
+    whenever that window has posts; it only falls back to the longer all-time history (a
+    real span in days/months, not the word "recent") when the last 30 days are empty for
+    both types. NOT a views tie-breaker restating the count, and not a raw share number —
+    the operator wants the reasoning behind the recommendation, not its arithmetic.
+    Computed from the FINAL split so it can never contradict the Target-posts column."""
+    if history_days >= 60:
+        all_time_window = f"your last {round(history_days / 30.44)} months of posting"
+    elif history_days > 0:
+        all_time_window = f"your last {history_days} days of posting"
+    else:
+        all_time_window = "your posting history"
+
+    by_type = {a.get("post_type"): a for a in allocation}
+    for a in allocation:
+        pt = a.get("post_type")
+        other_pt = "loot_deal" if pt == "single_deal" else "single_deal"
+        other = by_type.get(other_pt)
+        other_label = "loot boards" if pt == "single_deal" else "single deals"
+        action = a.get("action")
+        source_kind = a.get("source_kind")
+        share = a.get("current_share")
+
+        if source_kind == "recent_30d":
+            window = "your last 30 days of posts"
+        elif source_kind == "all_time":
+            window = f"{all_time_window} (no posts in the last 30 days)"
+        elif source_kind == "recent":
+            window = "your last 45 days of posting"
+        elif source_kind == "reference":
+            a["reasoning"] = ("You don't have posting history of your own yet, so today's "
+                               "split follows comparable competitor channels.")
+            continue
+        elif source_kind == "default":
+            a["reasoning"] = ("You don't have posting history yet, so today's split uses "
+                               "a neutral starting mix.")
+            continue
+        else:
+            a["reasoning"] = "Based on the planned mix for today."
+            continue
+
+        if action == "increase":
+            pattern = f"it's been getting more views per post than {other_label}"
+        elif action == "decrease":
+            pattern = f"it's been getting fewer views per post than {other_label}"
+        elif other is not None:
+            # Target-posts is the FINAL, actually-scheduled split (rebucketed from the
+            # real slots — see daily_brief), which the AI and the 30%-variety floor can
+            # both nudge away from the deterministic `current_share` recommendation. So
+            # "close to evenly, just rounding" is only true when the recommended SHARE
+            # was itself near 50/50 — claiming it whenever the final counts happen to be
+            # close (e.g. 18/17 off a 64/36 recommended share) would blame rounding for
+            # a gap that's actually the AI/variety-floor's doing, a false mechanism.
+            my_p, other_p = a.get("target_posts") or 0, other.get("target_posts") or 0
+            near_even_share = share is not None and abs(share - 0.5) <= 0.1
+            if near_even_share and my_p != other_p:
+                pattern = (f"it performs about the same as {other_label}, so today's plan splits "
+                           f"them close to evenly ({my_p} vs {other_p} — the +1 is just rounding)")
+            elif near_even_share:
+                pattern = f"it performs about the same as {other_label}, so today's plan splits them evenly"
+            else:
+                pattern = (f"it performs about the same as {other_label} — today's plan gives it "
+                           f"{my_p} of {my_p + other_p} slots today, keeping both types in the mix")
+            a["reasoning"] = f"Based on {window}, {pattern}."
+            continue
+        else:
+            pattern = "this is the pattern found there"
+        a["reasoning"] = f"Based on {window}, {pattern} — so today's plan is set this way."
+
+
+def daily_brief(date: str | None = None, directive: str | None = None,
+                target_posts: int | None = None, steer_intent: dict | None = None,
+                constraint_directive: str | None = None) -> dict:
     """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
     recommendation grounded in the recent posting trajectory (not the stale lifetime
     baseline). AI writes the narrative + slots best-effort; the numbers are
@@ -897,15 +1145,48 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
         yesterday = ctx.daily_report_or_live(s, prev)
         traj = ctx.posting_trajectory(s, days=14, end_day=prev)
         recommended = traj["recent_cadence"]
+        # The TRUE observed baseline (never realigned/ramped) — kept separate so the
+        # cadence explanation ("your last N active days ran ~X/day") always states a
+        # real historical fact about what actually happened, never a target number.
+        # See _det_why below.
+        baseline_recommended = recommended
+        # Align to the weekly plan's posts_per_day (single source of truth) once one
+        # exists, so the two pages can never silently disagree on today's count —
+        # same "daily reads weekly's persisted value, never re-derives" principle as
+        # event_ramp below. Falls back to daily's own live computation (`recommended`,
+        # already set above) only when no weekly plan covers this day yet.
+        weekly_aligned = False
+        _weekly_ppd = _weekly_posts_per_day_for(s, day)
+        if _weekly_ppd is not None and _weekly_ppd != recommended:
+            recommended = _weekly_ppd
+            weekly_aligned = True
+        # A seeded sale event landing THIS week (Independence Day Sale, Big Billion Days,
+        # ...) floors today's count up to the SAME ramped figure the weekly page already
+        # shows — reads the persisted weekly plan (single source of truth), never
+        # re-derives its own event-window logic, so daily and weekly can't disagree. A
+        # MAX floor: never lowers the normal count, only raises it when a real event
+        # applies to this exact day.
+        event_ramp = _active_event_ramp_for(s, day)
+        if event_ramp:
+            recommended = max(recommended, event_ramp["ramped_posts_per_day"])
+        # Explicit quantity steer ("post 20 today") overrides the learned cadence (and any
+        # event ramp) as the target count — an operator's ask for THIS day always wins.
+        # Still safety-clamped at persist (G10) against 3x the recent max, so an extreme
+        # ask is capped + flagged rather than trusted blindly.
+        if target_posts:
+            recommended = target_posts
         traj30 = ctx.posting_trajectory(s, days=30, end_day=prev)
         recent_max_30d = max((d["posts"] for d in traj30["days"]), default=0)
-        windows, allocation, merchants, risks = _today_details(s, recommended)
+        windows, allocation, merchants, risks = _today_details(s, recommended, day=day)
         scheduled_count = ctx.scheduled_count_today(s, day)
         gap = max(recommended - scheduled_count, 0)
 
         evt = None
         try:
-            evs = upcoming_events(s, day, within_days=14)
+            from src.services.planning.campaign import _RAMP
+            # Same ramp-type-only filter as ensure_daily_ai_plan — a context-only
+            # observance/holiday must never surface a "consider ramping" callout.
+            evs = [e for e in upcoming_events(s, day, within_days=14) if e.event_type in _RAMP]
             if evs:
                 e = evs[0]
                 evt = {"name": e.name, "days_away": (e.next_date - day).days,
@@ -915,20 +1196,46 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
 
         active = [d["posts"] for d in traj["days"] if d["posts"] > 0]
         lo, hi = (min(active), max(active)) if active else (0, 0)
-        det_why = (
-            f"Your last {len(active)} active days ran ~{recommended} posts/day "
-            f"(range {lo}–{hi}); holding ~{recommended} matches that pace."
-            + (f" The old {traj['lifetime_baseline']}/day baseline is a lifetime average "
-               "dragged down by early low-activity days — don't plan against it."
-               if traj.get("lifetime_baseline") else "")
-        )
 
+        def _det_why(n: int) -> str:
+            """The cadence explanation, keyed to the ACTUAL displayed count ``n`` so the
+            headline number and this sentence can never name different figures. Only
+            claims "matches that pace" when ``n`` sits inside the observed active-day
+            range; otherwise it states the plan plainly (the historical ~median is still
+            shown as the descriptive baseline, which is a true, separate fact). Uses
+            ``baseline_recommended`` (never the event-ramped value) for the "ran ~X/day"
+            clause — that sentence describes what actually HAPPENED historically, and
+            must stay true even on a ramped day; the ramp itself gets its own honest
+            clause instead of being folded into a false historical claim."""
+            ran = (f"Your last {len(active)} active days ran ~{baseline_recommended} posts/day "
+                   f"(range {lo}–{hi})")
+            if event_ramp and not target_posts and n >= event_ramp["ramped_posts_per_day"]:
+                pace = f"; ramped to ~{n} this week for {event_ramp['event']}."
+            elif weekly_aligned and not target_posts and n == recommended:
+                pace = f"; aligned to ~{n}/day to match this week's plan."
+            else:
+                pace = (f"; holding ~{n} matches that pace." if lo <= n <= hi
+                        else f"; planning ~{n} today.")
+            tail = (f" The old {traj['lifetime_baseline']}/day baseline is a lifetime average "
+                    "dragged down by early low-activity days — don't plan against it."
+                    if traj.get("lifetime_baseline") else "")
+            return ran + pace + tail
+
+        from sqlalchemy import or_
         cached = s.scalars(
             select(CampaignPlan)
             .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
                    CampaignPlan.plan_type == PlanType.DAILY,
                    CampaignPlan.target_date == day,
-                   CampaignPlan.is_ai_generated == True)  # noqa: E712
+                   CampaignPlan.is_ai_generated == True,  # noqa: E712
+                   # Never cache-serve a deterministic FALLBACK row: it was written
+                   # because the AI was down at the time, so serving it freezes the
+                   # whole day on the outage. Skipping it means the next page load
+                   # re-attempts the AI and auto-heals once it (or the groq failover)
+                   # is back. ponytail: re-attempts per refresh during an outage — a
+                   # model call each; fine, it's the "keep trying" behavior we want.
+                   or_(CampaignPlan.factcheck_status.is_(None),
+                       CampaignPlan.factcheck_status != "fallback"))
             .order_by(CampaignPlan.generated_at.desc())
         ).first()
 
@@ -946,7 +1253,9 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
             plan_row = cached
         else:
             gen = _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
-                                      directive=directive, recent_max_30d=recent_max_30d)
+                                      directive=directive, recent_max_30d=recent_max_30d,
+                                      steer_intent=steer_intent,
+                                      constraint_directive=constraint_directive)
             ai_ok, plan, digest, fc_status, plan_row = (
                 gen["ai_ok"], gen["plan"], gen["digest"], gen["fc_status"], gen["row"])
 
@@ -964,14 +1273,65 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
             # as in-range and report was_clamped=False). Also survives the cache-hit path.
             recommended_final = plan.get("recommended_posts")
             was_clamped = bool(plan.get("plan_clamped"))
-            ai_why = plan.get("cadence_why")
-            cadence_why = ai_why if (not was_clamped and ai_why) else det_why
+            # Always the deterministic, data-driven cadence line, keyed to the DISPLAYED
+            # count so headline and explanation can't disagree. The AI's own cadence_why
+            # drifts (it once said "19 posts/day" when the number was 38); _det_why is
+            # computed from the real trajectory, so it stays accurate AND adapts.
+            cadence_why = _det_why(recommended_final)
         else:
             recommended_final, was_clamped = recommended, False
-            cadence_why = det_why
+            cadence_why = _det_why(recommended_final)
         slots = plan.get("post_slots", []) if ai_ok else []
         emphasis = plan.get("emphasis") if ai_ok else None
         watch = plan.get("watch") if ai_ok else None
+
+        # The displayed deal-type allocation must reflect the plan ACTUALLY produced.
+        # The AI can deviate from the deterministic split (e.g. lean loot per the
+        # week direction), which showed the table as 30/8 while the schedule posted
+        # 23/15. Recompute target_posts from the real slots (the avg_views_per_post
+        # figure stays as the canonical metric). `allocation` was already handed to
+        # the generator above, so this only corrects the DISPLAY, not the AI input.
+        if slots and allocation:
+            # Bucket by loot-vs-single MEANING, not a literal type string — the model
+            # drifts across single|collection|loot_deal|single_deal (see constants.py),
+            # so a string map alone splits loot across keys and mis-tallies the table.
+            from src.services.generation.constants import is_loot_type
+            _actual: dict = {}
+            for _sl in slots:
+                _k = "loot_deal" if is_loot_type(_sl.get("type")) else "single_deal"
+                _actual[_k] = _actual.get(_k, 0) + 1
+            for _a in allocation:
+                _a["target_posts"] = _actual.get(_a.get("post_type"), 0)
+            allocation = [_a for _a in allocation if (_a.get("target_posts") or 0) > 0]
+
+        # Compute the deal-type 'Why' from the FINAL split (post-rebucket) so it always
+        # agrees with the Target-posts column — the fix for "loot gets more emphasis" while
+        # loot has FEWER posts. Deterministic: measured views + honest tie/lead comparison +
+        # the actual slot conclusion. "all-time" is a real span, not a vague word — pull the
+        # actual owned-history length (days -> months once it's long enough) so the Why can
+        # say e.g. "your last 6 months of posting" instead of leaving the window unstated.
+        from src.services.analytics.periods import owned_window as _owned_window
+        _hist_days = _owned_window(s).get("days") or 0
+        _reason_deal_type_split(allocation, history_days=_hist_days)
+
+        # Same alignment for posting windows: they're built from the deterministic
+        # recent cadence, so when the AI plans fewer posts (e.g. 15) the windows still
+        # summed to the raw cadence (38 as 1/5/18/14). Rebucket the ACTUAL slots into
+        # the day-parts so the window counts always sum to the real plan.
+        if slots and windows:
+            def _part_of(hr: int) -> str:
+                return ("Late night" if hr < 6 else "Morning" if hr < 12
+                        else "Afternoon" if hr < 18 else "Evening")
+            _wc: dict = {}
+            for _sl in slots:
+                _h = (_sl.get("time_ist") or "").split(":")[0]
+                if not _h.isdigit():
+                    continue
+                _p = _part_of(int(_h) % 24)
+                _wc[_p] = _wc.get(_p, 0) + 1
+            for _w in windows:
+                _w["posts"] = _wc.get(_w.get("part"), 0)
+            windows = [_w for _w in windows if (_w.get("posts") or 0) > 0]
 
         return {
             "available": True,
@@ -1001,15 +1361,79 @@ def daily_brief(date: str | None = None, directive: str | None = None) -> dict:
             "upcoming_event": evt,
             "operator_directive": plan_row.operator_directive if plan_row is not None else None,
             "can_regenerate": day >= ist_today(),
+            # True when a pre-steer snapshot exists to undo to — the FE shows a "Revert" action.
+            "can_revert": (day >= ist_today()
+                           and bool((plan_row.blueprint or {}).get("_pre_steer"))
+                           if plan_row is not None else False),
         }
 
 
-def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = None):
+def _grounded_weekly_summary(s, end_day=None) -> str:
+    """Honest, deterministic weekly retro from REAL data only — used when the AI
+    narrative fails fact-check (it cited self-computed/unverifiable figures). No LLM,
+    no derived numbers: the week's actual posts/views, its strongest day, and the
+    measured per-post views per deal type, so the operator gets a genuinely useful
+    grounded read instead of an apology. Ends with a stable 'Grounded summary' marker
+    the Plan page keys on to suppress the redundant 'failed — regenerate' warning."""
+    traj = ctx.posting_trajectory(s, days=7, end_day=end_day)
+    days = traj.get("days") or []
+    total_posts = sum(d["posts"] for d in days)
+    total_views = sum((d.get("views") or 0) for d in days)
+    active = [d for d in days if d["posts"]]
+    # SAME 30-day window ending at end_day that the rest of the weekly plan (mix
+    # override, narrative grounding) reads — an all-time snapshot here previously
+    # produced a DIFFERENT per-post comparison than the plan's own mix decision, and
+    # this fallback also used to conclude "so the mix leans X" from that comparison,
+    # which could contradict an operator steer (e.g. "lean into loot") that had
+    # already set a DIFFERENT mix for a different reason. State the measured
+    # per-post numbers only — never assert a mix conclusion this function didn't
+    # actually decide.
+    if end_day is not None:
+        from datetime import timedelta as _td
+        from src.services.analytics.periods import ist_day_bounds_utc as _ib
+        _w_start, _ = _ib(end_day - _td(days=29))
+        _, _w_end = _ib(end_day)
+        ptp = {p["post_type"]: p for p in (ctx.post_type_performance_range(s, _w_start, _w_end)
+                                           or ctx.post_type_performance(s))}
+    else:
+        ptp = {p["post_type"]: p for p in ctx.post_type_performance(s)}
+    sv = (ptp.get("single_deal") or {}).get("avg_views")
+    lv = (ptp.get("loot_deal") or {}).get("avg_views")
+
+    parts: list[str] = []
+    if total_posts:
+        line = f"Last 7 days: {total_posts} posts drawing {total_views:,} views"
+        if active:
+            best = max(active, key=lambda d: d.get("views_avg") or 0)
+            line += (f", strongest on {best['date']} at {round(best.get('views_avg') or 0)} "
+                     "avg views/post")
+        parts.append(line)
+    if sv and lv:
+        if sv >= lv:
+            parts.append(f"per post, single deals averaged {round(sv)} views vs loot boards' "
+                         f"{round(lv)}")
+        else:
+            parts.append(f"per post, loot boards averaged {round(lv)} views vs single deals' "
+                         f"{round(sv)}")
+    body = ". ".join(parts) if parts else "there isn't enough measured post data yet to summarise the week"
+    return (f"{body}. (Grounded summary — the AI's own weekly narrative was withheld "
+            "because some figures it cited couldn't be verified against the data.)")
+
+
+def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = None,
+                        steer_intent: dict | None = None):
     """The cache-miss generation path for the weekly AI narrative: (re)compute the
     deterministic blueprint fresh, call the briefing generator once (honoring
     ``directive`` if given), and persist — updating ``wk`` in place if it already
     exists (blueprint-only row from a CampaignPlanningEngine run) or inserting a
     fresh row otherwise. Returns ``(ai_summary, ai_ok, themes, row)``.
+
+    ``steer_intent`` is the validated, AI-interpreted steer (only ever passed by
+    `regenerate_weekly`, same contract as `generate_day_plan`'s) — it drives the
+    weekly-scoped enforcement (merchants, loot/single lean, posts/day) applied AFTER
+    the AI's own narrative/merge, so the operator's ask always wins over the model's
+    free-floating suggestion. Falls back to the plain regex exclusion parse when no
+    validated intent is given (the un-steered / plain-directive path).
 
     Shared by `weekly_brief` (normal first-request-of-the-week miss, ``wk`` may be
     an existing blueprint-only row) and `regenerate_weekly` (forced fresh
@@ -1019,6 +1443,8 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
     from src.services.planning.campaign import CampaignPlanningEngine
     from src.services.generation.ai_execution import persist_weekly_plan
 
+    from src.services.analytics.periods import ist_today
+
     bp_growth = (ctx.growth_blueprint(s).get("blueprint") or {})
     perf = {p["post_type"]: (p["avg_views_per_day"] or 0.0)
             for p in ctx.post_type_performance(s)}
@@ -1026,9 +1452,19 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
         events = upcoming_events(s, week_start, within_days=30)
     except Exception:
         events = []
+    # days_away must be relative to the REAL today, not week_start (the trailing
+    # evidence window's start — up to 6 days stale) — otherwise an event 4 real days
+    # out gets labeled "10 days away" in the AI's DATA and the fact-check pool treats
+    # the wrong number as verified.
+    _today = ist_today()
     event_data = [{"name": e.name, "next_date": e.next_date,
-                   "days_away": (e.next_date - week_start).days,
-                   "date_confidence": e.date_confidence} for e in events]
+                   "days_away": (e.next_date - _today).days,
+                   "date_confidence": e.date_confidence,
+                   # event_type/merchant_key/window_days: needed by _weekly_plan's event
+                   # ramp (same fields the cron's CampaignPlanningEngine.run() already
+                   # passes) — omitting them here silently skipped the ramp on this path.
+                   "event_type": e.event_type, "merchant_key": e.merchant_key,
+                   "window_days": e.window_days} for e in events]
     from datetime import datetime, timezone
     eng = CampaignPlanningEngine()
     now = datetime.now(timezone.utc)
@@ -1046,7 +1482,9 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
         from src.ai.client import AIUnavailable
         from src.ai.planner import generate_week_plan
         try:
-            res = generate_week_plan(s, week_start, directive=directive)
+            res = generate_week_plan(s, week_start, directive=directive, end_day=week_end,
+                                     active_event=blueprint.get("event_ramp"),
+                                     context_events=blueprint.get("upcoming_events"))
             ai_summary = res.get("digest") or "" if res.get("available") else ""
             ai_ok = bool(ai_summary)
             if res.get("available"):
@@ -1059,8 +1497,16 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
             # still merged below — only the narrative prose is withheld.
             wk_fc_status = (res.get("factcheck") or {}).get("status")
             if wk_fc_status == "failed":
-                ai_summary = ("This week's summary could not be verified against the "
-                              "data (some cited numbers are unsupported) — regenerate it.")
+                # Only a `failed` check (a SUBSTANTIAL fraction unverified => likely a
+                # fabricated %/MoM/mislabelled-velocity figure) withholds the narrative
+                # in favour of the honest grounded summary. A `warn` is a small minority
+                # unverified — per check_cited_numbers' own contract, "a mostly-grounded
+                # plan is safe to act on" (usually a rounding artifact or clock-hour
+                # token) — so we SHOW the AI narrative, with the FE's amber "some numbers
+                # couldn't be verified" caveat. This matches the daily path (which also
+                # only falls back on `failed`); withholding on `warn` too meant the
+                # operator effectively never saw a weekly narrative.
+                ai_summary = _grounded_weekly_summary(s, end_day=week_end)
         except AIUnavailable:
             ai_summary = ""
     except Exception:
@@ -1079,7 +1525,80 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
         blueprint["direction"] = ai_plan.get("direction")
         if ai_plan.get("daily_themes"):
             blueprint["daily_themes"] = ai_plan["daily_themes"]
+        # Deterministic loot/single split from per-post performance. gpt-5-mini does
+        # NOT reliably follow the "rank by avg_views_per_post" instruction — it kept
+        # returning a loot-heavy ratio off the confounded per-day velocity, which
+        # contradicts the daily plan (the weekly↔daily conflict). Compute the split
+        # from the honest per-post averages (proportional, clamped to a 30% floor so
+        # both types keep variety) and override the model's ratio AND the per-day
+        # shares, so the weekly direction and the daily plan agree and lean the
+        # correct way.
+        #
+        # SAME 30-day window ending at week_end that the narrative's own grounding data
+        # uses (full_briefing_context's weekly branch, via post_type_performance_range) —
+        # NOT the all-time snapshot. Using a DIFFERENT window here than the narrative
+        # reads is exactly how the digest cited "loot 521 vs single 520, lean into loot"
+        # while this override's mix showed single as the majority (57/43) — two windows
+        # disagreeing on the same plan. Falls back to the all-time snapshot only when the
+        # 30-day window has no data, same fallback context.py already uses.
+        from datetime import timedelta as _td
+        from src.services.analytics.periods import ist_day_bounds_utc as _ib
+        _w_start, _ = _ib(week_end - _td(days=29))
+        _, _w_end = _ib(week_end)
+        _pw = ctx.post_type_performance_range(s, _w_start, _w_end) or ctx.post_type_performance(s)
+        _pp = {p["post_type"]: (p.get("avg_views") or 0.0) for p in _pw}
+        _lv, _sv = _pp.get("loot_deal", 0.0), _pp.get("single_deal", 0.0)
+        if _lv or _sv:
+            _ls = min(max(_lv / (_lv + _sv), 0.3), 0.7) if (_lv + _sv) else 0.4
+            blueprint["loot_deal_ratio"] = {"loot": round(_ls * 100), "deal": round((1 - _ls) * 100)}
+            for _t in (blueprint.get("daily_themes") or []):
+                if isinstance(_t, dict):
+                    _t["loot_share"], _t["single_share"] = round(_ls, 3), round(1 - _ls, 3)
         themes = blueprint.get("daily_themes") or []
+
+    _weekly_notes: list[str] = []
+    # Event ramp — reapplied here (AFTER the AI merge above, which unconditionally
+    # overwrites merchant_priorities from ai_plan.get(...) even when that's None/empty,
+    # silently discarding any deterministic default set earlier). Puts the event's
+    # merchant first without wiping other priorities, and always states the cadence
+    # jump plainly — this runs whether or not the operator steered anything, and BEFORE
+    # the steer block below so an explicit operator ask still wins over it.
+    _evr = blueprint.get("event_ramp")
+    if _evr:
+        _mk = _evr.get("merchant_key")
+        if _mk:
+            _mp = [p for p in (blueprint.get("merchant_priorities") or [])
+                  if (p.get("merchant") if isinstance(p, dict) else p) != _mk]
+            blueprint["merchant_priorities"] = [
+                {"merchant": _mk, "why": f"{_evr['event']} is on this week"}] + _mp
+        _weekly_notes.append(
+            f"cadence ramped from {_evr['baseline_posts_per_day']} to "
+            f"{_evr['ramped_posts_per_day']}/day for {_evr['event']} "
+            f"({_evr['days_away']} day(s) away)")
+
+    # Weekly steer: the week is direction-level (no per-post slots to pin), so only
+    # merchants/lean/posts-per-day are enforceable — see enforce_weekly_constraints. Uses
+    # the validated AI intent when given (regenerate_weekly's contract); falls back to the
+    # plain regex exclusion parse for the un-steered path (a bare `directive` with no
+    # pre-extracted intent, e.g. from a caller that hasn't adopted the universal steer).
+    if steer_intent is not None:
+        from src.services.generation.directives import enforce_weekly_constraints
+        _weekly_notes += enforce_weekly_constraints(blueprint, steer_intent)
+    elif directive:
+        from src.services.generation.directives import parse_directive_constraints
+        _avail_m = sorted({d.get("merchant_key") for d in ctx.available_deals(s, limit=40)
+                           if d.get("merchant_key")})
+        _wex = parse_directive_constraints(directive, _avail_m, None).get("exclude_merchants")
+        if _wex and blueprint.get("merchant_priorities"):
+            blueprint["merchant_priorities"] = [
+                m for m in blueprint["merchant_priorities"]
+                if (m.get("merchant") if isinstance(m, dict) else m) not in _wex]
+
+    # Surface what the steer actually did/couldn't reach in the digest itself — the
+    # weekly card has no separate "watch" line the way daily slots do, so this is the
+    # one place the operator sees it (never a silent partial no-op).
+    if ai_ok and _weekly_notes:
+        ai_summary = (ai_summary + "\n\n" + " ".join(n[:1].upper() + n[1:] + "." for n in _weekly_notes)).strip()
 
     if wk is not None:
         # Row already exists for this week (e.g. blueprint-only from a legitimate
@@ -1097,7 +1616,7 @@ def _weekly_ai_generate(s, week_start, week_end, wk, directive: str | None = Non
             wk.operator_directive = directive
     if wk is not None and wk_fc_status is not None:
         wk.factcheck_status = wk_fc_status
-    return ai_summary, ai_ok, themes, wk
+    return ai_summary, ai_ok, themes, wk, _weekly_notes
 
 
 def ensure_weekly_ai_plan(s, week_start, week_end, directive: str | None = None):
@@ -1115,11 +1634,12 @@ def ensure_weekly_ai_plan(s, week_start, week_end, directive: str | None = None)
                CampaignPlan.target_date == week_start)
         .order_by(CampaignPlan.generated_at.desc())
     ).first()
-    _summary, _ok, _themes, wk = _weekly_ai_generate(s, week_start, week_end, wk, directive=directive)
+    _summary, _ok, _themes, wk, _notes = _weekly_ai_generate(s, week_start, week_end, wk, directive=directive)
     return wk
 
 
-def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
+def weekly_brief(end: str | None = None, directive: str | None = None,
+                 steer_intent: dict | None = None) -> dict:
     """The weekly view: last 7 days of actual posting + this week's themes + an AI
     weekly narrative (best-effort).
 
@@ -1133,11 +1653,10 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
     once set, every later request for that week reuses it, no matter how many
     times the page is reopened.
 
-    ``directive`` is only ever passed by `regenerate_weekly` (never by the plain
-    `/api/plan/weekly` route) — same contract as `daily_brief`'s ``directive``."""
+    ``directive``/``steer_intent`` are only ever passed by `regenerate_weekly` (never by
+    the plain `/api/plan/weekly` route) — same contract as `daily_brief`'s."""
     from datetime import date as date_cls, timedelta
     from src.services.analytics.day import latest_owned_date
-    from src.services.analytics.daily_report import _owned_channel
     from src.services.analytics.periods import ist_today
     from src.services.planning.calendar import upcoming_events
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
@@ -1154,17 +1673,25 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
         if anchor is None:
             return {"available": False, "reason": "No owned posts yet."}
 
-        # Monday->Sunday IST calendar week containing `anchor`.
-        week_start = anchor - timedelta(days=anchor.weekday())
-        week_end = week_start + timedelta(days=6)
+        # TRAILING 7-day window ENDING at `anchor` (the latest day with data / today) —
+        # "the last week up to today", so the card shows real recent activity instead of
+        # a Mon->Sun calendar week that runs into empty future days early in the week.
+        week_end = anchor
+        week_start = anchor - timedelta(days=6)
 
         traj = ctx.posting_trajectory(s, days=7, end_day=week_end)
-        ch = _owned_channel(s)
-        deltas = ctx.follower_deltas_by_day(s, ch.id if ch else None, week_start, week_end)
+        # Per-day follower deltas are intentionally NOT surfaced here: Telegram exposes
+        # only the live subscriber count (no history), so joined/left/net can't be
+        # captured reliably day-by-day. Posts/views below are real per-day.
         days = [{"date": d["date"],
                  "weekday": date_cls.fromisoformat(d["date"]).strftime("%a"),
                  "posts": d["posts"], "views_avg": d["views_avg"],
-                 **(deltas.get(d["date"]) or {"joined": 0, "left": 0, "net": 0})}
+                 # Posts keep accruing views until ~day 4 (measured curve: day0 ~35%,
+                 # day1 ~65%, day2 ~85%, day3 ~90%, day4+ settled), so the last ~3 days'
+                 # avg understates and must NOT be read as a performance dip vs older,
+                 # fully-matured days. Flag for the UI. ponytail: 3-day cutoff from the
+                 # current maturation curve; revisit if view velocity changes.
+                 "views_maturing": (week_end - date_cls.fromisoformat(d["date"])).days <= 3}
                 for d in traj["days"]]
         posts_total = sum(d["posts"] for d in traj["days"])
         # true sum of daily view totals (not posts x rounded-avg, which drifts)
@@ -1185,9 +1712,11 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
 
         evs_out = []
         try:
+            from src.services.analytics.periods import ist_today
+            _today_evs = ist_today()
             for e in upcoming_events(s, week_end, within_days=30)[:3]:
                 evs_out.append({"name": e.name, "date": e.next_date.isoformat(),
-                                "days_away": (e.next_date - week_end).days,
+                                "days_away": (e.next_date - _today_evs).days,
                                 "date_confidence": e.date_confidence})
         except Exception:
             pass
@@ -1203,19 +1732,78 @@ def weekly_brief(end: str | None = None, directive: str | None = None) -> dict:
             # prior attempt didn't get a usable AI response) — compute the
             # deterministic blueprint fresh (cheap, and doesn't depend on
             # CampaignPlanningEngine's Monday cron ever having run) and try AI once.
-            ai_summary, ai_ok, themes, wk = _weekly_ai_generate(
-                s, week_start, week_end, wk, directive=directive)
+            ai_summary, ai_ok, themes, wk, _ = _weekly_ai_generate(
+                s, week_start, week_end, wk, directive=directive, steer_intent=steer_intent)
 
-        current_week_start = ist_today() - timedelta(days=ist_today().weekday())
+        _bp = (wk.blueprint or {}) if wk is not None else {}
         return {"available": True,
                 "week_start": week_start.isoformat(),
                 "week_end": week_end.isoformat(),
                 "days": days, "totals": totals, "themes": themes,
-                "recommended_posts_per_day": traj["recent_cadence"],
+                # The weekly PLAN's strategic recommendations (what guides the daily
+                # plans): this week's one-line direction, the loot/single target, and
+                # which merchants to feature. Surfaced so the weekly page shows the
+                # strategy, not just the retro + data.
+                "direction": _bp.get("direction"),
+                "loot_deal_ratio": _bp.get("loot_deal_ratio"),
+                "merchant_priorities": _bp.get("merchant_priorities") or [],
+                # Match the blueprint / daily-themes / daily-plan count (the 14-day
+                # median) instead of a separate this-week trajectory, so the card's
+                # "Recommended/day" agrees with the 38 shown everywhere else.
+                "recommended_posts_per_day": (((wk.blueprint or {}).get("posts_per_day")
+                                               if wk is not None else None)
+                                              or traj["recent_cadence"]),
                 "upcoming_events": evs_out, "digest": ai_summary, "ai_available": ai_ok,
+                # A seeded sale event (Independence Day Sale, Big Billion Days, ...) landing
+                # THIS week auto-ramps the cadence (see CampaignPlanningEngine._weekly_plan) —
+                # surfaced so the FE can show WHY the numbers jumped, not just that they did.
+                "event_ramp": _bp.get("event_ramp"),
                 "factcheck_status": (wk.factcheck_status if wk is not None else None),
                 "operator_directive": wk.operator_directive if wk is not None else None,
-                "can_regenerate": week_start >= current_week_start}
+                # Regenerable only while this is the CURRENT trailing window (its end is
+                # within the last 7 days) — matches regenerate_weekly's guard.
+                "can_regenerate": week_end >= ist_today() - timedelta(days=6),
+                "can_revert": (week_end >= ist_today() - timedelta(days=6)
+                              and bool(_bp.get("_pre_steer")))}
+
+
+def _past_future_split(slots, now_min):
+    """Split a plan's slots into (already-elapsed, still-upcoming) by an IST
+    minute-of-day cutoff. now_min=None (not today) -> everything is upcoming."""
+    from src.ai.planner import _slot_minute
+    past, future = [], []
+    for sl in slots or []:
+        m = _slot_minute(sl)
+        (past if (now_min is not None and m is not None and m < now_min) else future).append(sl)
+    return past, future
+
+
+def _splice_past_over(past, fresh, now_min, recommended=None):
+    """Keep the already-posted PAST slots and take the FRESH plan's FUTURE slots, in
+    chronological order — so a mid-day steer rewrites only the remaining day and never
+    posts that already went out (they are immutable — already live in ScheduledPost).
+
+    CAPPED to ``recommended``: a mid-day regen's fresh plan carries a FULL day's slots,
+    all timed after "now" (the AI was told to plan the remaining day). Without a cap the
+    splice ADDS those onto the already-posted past slots — e.g. 26 posted + 41 fresh = 67
+    slots crammed into the evening (a real bug). Keep the past (immutable) and only as
+    many fresh future slots as the recommended total leaves room for, re-spread evenly
+    across [now, end-of-day] so they never stack one-per-minute. ``recommended=None``
+    keeps the old uncapped behaviour (callers that don't know the target)."""
+    from src.ai.planner import _slot_minute
+    _, fresh_future = _past_future_split(fresh, now_min)
+    fresh_future = sorted(fresh_future, key=lambda x: (_slot_minute(x) is None, _slot_minute(x) or 0))
+    if recommended is not None:
+        room = max(int(recommended) - len(past), 0)
+        fresh_future = fresh_future[:room]
+        if fresh_future and now_min is not None:
+            # Even, off-grid spread across the remaining window (reuses the same placement
+            # the hard-time-window steer uses) so the kept slots don't collide into a
+            # 1/min pile. Only on the capped path — recommended=None keeps AI-chosen times.
+            from src.services.generation.ai_execution import _ACTIVE_END_MIN, _place_in_window
+            _place_in_window(fresh_future, now_min, _ACTIVE_END_MIN)
+    return sorted(list(past) + fresh_future,
+                  key=lambda x: (_slot_minute(x) is None, _slot_minute(x) or 0))
 
 
 def regenerate_daily(date: str | None = None, directive: str | None = None) -> dict:
@@ -1227,6 +1815,244 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
     day would take — just with ``directive`` threaded into the planner prompt and
     persisted on the new row."""
     from datetime import date as date_cls
+    from sqlalchemy import delete
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    from src.services.ai_outputs import record_ai_output
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_today
+    from src.services.generation.directives import extract_steer_intent
+
+    intent = None
+    with session_scope() as s:
+        day = None
+        if date:
+            try:
+                day = date_cls.fromisoformat(date)
+            except ValueError:
+                day = None
+        if day is None:
+            day = latest_owned_date(s)
+        if day is None:
+            return {"available": False, "reason": "No owned posts yet."}
+        if day < ist_today():
+            return {"available": False,
+                    "reason": "This day has already elapsed — regenerating it has no effect."}
+
+        # UNIVERSAL STEER: interpret the free-text ONCE (AI on Groq, regex fallback) into a
+        # validated structured intent, against today's real feed vocabulary. This drives the
+        # whole regeneration — count, pause, and the hard merchant/category/price/time
+        # constraints — so any phrasing works and each steer is independent.
+        if directive:
+            _feed = ctx.available_deals(s, limit=40)
+            _feed_m = sorted({d.get("merchant_key") for d in _feed if d.get("merchant_key")})
+            _feed_c = sorted({d.get("category") for d in _feed if d.get("category")})
+            # openai (not groq's default) — same quota-relief reasoning as regenerate_weekly.
+            intent = extract_steer_intent(directive, _feed_m, _feed_c, provider="openai")
+            # A PAUSE request isn't a content steer — steering can't stop the live queue,
+            # and auto-cancelling from free text would be destructive on a misparse. Answer
+            # honestly and leave the plan intact (before deleting anything).
+            if intent.get("pause"):
+                return {"available": False, "paused_intent": True,
+                        "reason": "This reads as a request to PAUSE posting. Steering reshapes "
+                                  "the plan but doesn't stop the queue, so I left your current "
+                                  "plan unchanged. To actually pause, clear today's queued posts "
+                                  "or turn off the scheduler. For a posting change (merchants, "
+                                  "timing, mix, price, count), tell me that and I'll steer it."}
+
+        # Load the current plan (for the pre-steer snapshot + mid-day freeze below). Each
+        # steer is independent now, so we do NOT accumulate a steering history.
+        old = s.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day).order_by(CampaignPlan.generated_at.desc()))
+        # Snapshot the old plan (all cols but id) so we can RESTORE it if regeneration
+        # fails — otherwise a failed regen (e.g. AI at quota) destroys the good plan.
+        old_snap = ({c.name: getattr(old, c.name) for c in CampaignPlan.__table__.columns
+                     if c.name != "id"} if old is not None else None)
+        # A JSON-safe snapshot of the TRUE ORIGINAL (never-steered) plan, stored on the
+        # new row so "Revert" always restores the day exactly as it was before ANY
+        # steer — not just before the most recent one. If `old` is ITSELF already a
+        # steered plan (it carries its own `_pre_steer`), that nested snapshot IS the
+        # true original — reuse it as-is rather than overwriting it with `old`'s own
+        # (already-steered) state, which would make each successive steer erase how
+        # to get back to the real starting point. Only when `old` is itself unsteered
+        # do we snapshot `old` directly.
+        pre_steer_snap = None
+        if old is not None:
+            _existing_pre_steer = (old.blueprint or {}).get("_pre_steer")
+            if _existing_pre_steer is not None:
+                pre_steer_snap = _existing_pre_steer
+            else:
+                pre_steer_snap = {
+                    "title": old.title, "blueprint": old.blueprint or {},
+                    "expected_outcome": old.expected_outcome, "confidence": old.confidence,
+                    "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
+                    "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
+                    "report_ids": old.report_ids, "operator_directive": old.operator_directive}
+        # For a mid-day steer of TODAY, freeze what already went out: slots whose IST
+        # time has passed are already posted (immutable). Capture them so (a) the AI is
+        # told not to replan them, and (b) we splice them back over the fresh plan so a
+        # steer rewrites only the REMAINING day.
+        from datetime import datetime as _dt, timezone as _tz
+        from src.services.analytics.periods import to_ist
+        _now_ist = to_ist(_dt.now(_tz.utc))
+        now_min = (_now_ist.hour * 60 + _now_ist.minute) if day == ist_today() else None
+        _old_slots = (old.blueprint or {}).get("post_slots") if old else []
+        past_slots, _future_slots = _past_future_split(_old_slots, now_min)
+        # FULLY-POSTED DAY: today, and every slot in the current plan has already fired.
+        # There's nothing left to change — steering would only regenerate a fresh plan and
+        # then splice the immutable already-posted slots back over it, producing a confusing
+        # plan whose enforcement notes describe slots that never actually change. Refuse
+        # cleanly and point at a future date, instead of that mess.
+        if now_min is not None and _old_slots and not _future_slots:
+            return {"available": False, "fully_posted": True,
+                    "reason": f"Today is fully posted — all {len(past_slots)} posts already went "
+                              "out, so steering can't change anything today. Pick a future date "
+                              "to plan and steer a fresh day."}
+        s.execute(delete(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day,
+        ))
+
+    # Each steer is INDEPENDENT: the plan is restructured from THIS directive ALONE, never
+    # an accumulation of past asks. Accumulating them made an old, unrelated steer (e.g.
+    # "deals under ₹1000") keep re-applying to a new one (e.g. "make it 30"). Both the
+    # prompt AND the hard-constraint parsing now see ONLY the latest directive; to combine
+    # asks the operator writes one combined directive.
+    composed = directive
+    # The desired post count comes from the AI-interpreted intent (or its regex fallback).
+    _target = intent.get("target_posts") if intent else None
+    # "20 posts FROM NOW" / "5 more posts" (target_posts_mode == "additional") means N NEW
+    # slots on top of what's already gone out today — NOT N as the day's whole total (the
+    # default reading for a bare count like "post 20 today"). Recompute the final total
+    # here: already-posted + N. `past_slots` was already computed above (mid-day freeze),
+    # so this reuses the SAME immutable-past count the splice itself uses — no separate,
+    # possibly-inconsistent count.
+    if intent and intent.get("target_posts_mode") == "additional" and _target:
+        _target = len(past_slots) + _target
+    # Surface what the AI understood + any ask it can't enforce, appended to the prompt so
+    # the narrative addresses them honestly (also returned to the FE below). NOT gated on
+    # source=="ai" — the regex fallback can carry its own unsupported notes too (e.g. an
+    # out-of-range count), which must reach the operator just as much as the AI path's do.
+    _intent_note = ""
+    if intent:
+        if intent.get("interpretation"):
+            _intent_note += f"\n\nHOW I READ YOUR STEER: {intent['interpretation']}"
+        if intent.get("unsupported"):
+            _intent_note += ("\n\nPARTS I CANNOT ENFORCE IN THE PLAN (say so plainly in the "
+                             "narrative, don't pretend): " + "; ".join(intent["unsupported"]))
+    composed = (composed or "") + _intent_note
+    # Mid-day you can't un-send what already went out, so a request to REDUCE below the
+    # already-posted count can't be honored today — say so plainly instead of showing a
+    # lower headline over a higher real count.
+    if _target and past_slots and _target < len(past_slots):
+        composed = (composed or "") + (
+            f"\n\nNOTE: {len(past_slots)} posts already went out today — MORE than the {_target} "
+            f"requested, and they can't be un-sent. State plainly that today already exceeded "
+            f"{_target}; the lower count applies to FUTURE days, not retroactively.")
+    # Tell the AI what already went out today so it plans the REST of the day coherently
+    # (doesn't re-suggest a merchant/theme just used, and knows how many slots remain)
+    # rather than replanning the whole day blind.
+    if past_slots:
+        _posted = "; ".join(f"{sl.get('time_ist')} {sl.get('type')} {sl.get('merchant')}/{sl.get('theme')}"
+                            for sl in past_slots[:40])
+        composed = (composed or directive or "") + (
+            f"\n\nALREADY POSTED TODAY — {len(past_slots)} posts are already live and CANNOT change: "
+            f"{_posted}.\nPlan ONLY the remaining slots for AFTER {_now_ist.strftime('%H:%M')} IST today; "
+            "do not replan the posts above. In your narrative, briefly acknowledge that these "
+            "already went out and can't be changed. If my request only affects times/windows that "
+            "have ALREADY passed today (e.g. asking to change the morning when it's afternoon), say "
+            "so plainly — there's nothing left to reschedule for that window today.")
+    # constraint_directive is the operator's RAW steer text (possibly None/empty) —
+    # NEVER `composed`, which gets decorated with the "ALREADY POSTED TODAY" note
+    # above (listing real merchant names purely for the AI's awareness). Without this
+    # split, an EMPTY steer box still produced a non-empty `composed` string once that
+    # note was appended, which the regex fallback then misread as "the operator wants
+    # only <merchant>" — permanently re-pinning the day to whatever merchant history
+    # happened to contain, even though nothing was actually steered.
+    result = daily_brief(date=day.isoformat(), directive=composed, target_posts=_target,
+                         steer_intent=intent, constraint_directive=directive)
+    # Success is measured by an actual AI plan being PERSISTED — not result["available"]
+    # (daily_brief still returns available=True with the deterministic fallback when the
+    # AI is down). If no AI row landed, the regeneration failed: restore the old plan.
+    with session_scope() as s2:
+        row = s2.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.DAILY,
+            CampaignPlan.target_date == day,
+            CampaignPlan.is_ai_generated == True).order_by(CampaignPlan.generated_at.desc()))  # noqa: E712
+        if row is not None:
+            # Each steer stands alone now (no steering_history accumulation) — operator_directive
+            # is just the latest raw ask, which is what the FE shows as "Steered by".
+            _bp = {**(row.blueprint or {})}
+            # Stash the pre-steer plan so a "Revert" restores it exactly (one level of undo).
+            if pre_steer_snap is not None:
+                _bp["_pre_steer"] = pre_steer_snap
+            # Splice the already-posted PAST slots back over the fresh plan: a mid-day
+            # steer only rewrites the remaining day; posts that already went out stay
+            # exactly as they were. Also reflect it in the response the UI renders now.
+            if past_slots:
+                _spliced = _splice_past_over(past_slots, _bp.get("post_slots") or [], now_min,
+                                             recommended=_bp.get("recommended_posts"))
+                _bp["post_slots"] = _spliced
+                # Honesty: if the steer produced NO new future slots (e.g. it targeted a
+                # window that's already elapsed today), the spliced plan is just what
+                # already posted — say so plainly instead of silently returning an
+                # unchanged plan. `_splice_past_over` returns the SAME past objects, so a
+                # slot not among them by identity is genuinely new/future.
+                _past_ids = {id(p) for p in past_slots}
+                if not any(id(sl) not in _past_ids for sl in _spliced):
+                    _note = ("Your steer only affects times that have already passed today, so "
+                             "there's nothing left to reschedule — the posts above already went "
+                             "out and can't change. Regenerate for a future day, or steer a later "
+                             "window, to apply it.")
+                    _bp["watch"] = ((_bp.get("watch") or "") + " " + _note).strip()
+                    if result.get("today"):
+                        result["today"]["watch"] = _bp["watch"]
+                if result.get("today"):
+                    result["today"]["slots"] = _spliced
+            row.blueprint = _bp
+            row.operator_directive = directive
+            # Surface the RAW operator ask, not the composed blob (history + the
+            # already-posted context) that daily_brief persisted as it generated.
+            result["operator_directive"] = directive
+            # can_revert was computed by daily_brief() BEFORE _pre_steer was stashed above
+            # (a few lines up) — so the response daily_brief() built is now stale on this
+            # one field. Fix it here rather than relying on the FE's post-mutation refetch
+            # to self-correct it (which works, but only after a race with query-invalidation
+            # timing — the immediate response should just be right).
+            if pre_steer_snap is not None:
+                result["can_revert"] = True
+            # Surface what the AI understood + anything it couldn't enforce, so the FE can
+            # show it (the plan is honest about the parts of a free-text ask it can't apply)
+            # — not gated on source=="ai", the regex fallback carries its own notes too.
+            if intent:
+                result["steer_interpretation"] = intent.get("interpretation") or None
+                result["steer_unsupported"] = intent.get("unsupported") or None
+        elif old_snap is not None:
+            # regeneration produced no AI plan (AI unavailable) — restore the previous one
+            # so the day is never left plan-less with an orphaned queue.
+            s2.add(CampaignPlan(**old_snap))
+    if row is None and old_snap is not None:
+        return {"available": False, "restored": True,
+                "reason": f"Regeneration failed ({result.get('reason') or 'AI unavailable'}) "
+                          "— kept your existing plan."}
+    if row is not None:
+        note = f"daily {day.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
+        record_ai_output("plan_regenerated", note, get_settings().ai_model)
+    return result
+
+
+def revert_daily(date: str | None = None) -> dict:
+    """Undo ALL steering for ``date`` — restore the plan exactly as it was before the
+    FIRST steer/regenerate, from the snapshot `regenerate_daily` stashed under
+    blueprint._pre_steer (each successive steer carries the same original snapshot
+    forward rather than overwriting it with its own already-steered state, so this
+    always reaches the true starting point regardless of how many steers happened in
+    between). No AI call: rebuilds the exact original row. Refuses when there's no
+    snapshot (the day was never steered) or the day has already elapsed."""
+    from datetime import date as date_cls, datetime, timezone
     from sqlalchemy import delete
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
     from src.services.ai_outputs import record_ai_output
@@ -1246,69 +2072,41 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             return {"available": False, "reason": "No owned posts yet."}
         if day < ist_today():
             return {"available": False,
-                    "reason": "This day has already elapsed — regenerating it has no effect."}
-
-        # Capture the FULL steering trace before deleting the old plan, so repeated
-        # regenerations accumulate (the AI sees every prior ask, not just the latest),
-        # and gather today's available merchants so it can explain a request it can't
-        # satisfy (e.g. "diversify merchants" when the feed is single-merchant).
-        old = s.scalar(select(CampaignPlan).where(
+                    "reason": "This day has already elapsed — reverting it has no effect."}
+        cur = s.scalar(select(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.DAILY,
             CampaignPlan.target_date == day).order_by(CampaignPlan.generated_at.desc()))
-        # Snapshot the old plan (all cols but id) so we can RESTORE it if regeneration
-        # fails — otherwise a failed regen (e.g. AI at quota) destroys the good plan.
-        old_snap = ({c.name: getattr(old, c.name) for c in CampaignPlan.__table__.columns
-                     if c.name != "id"} if old is not None else None)
-        trace = list((old.blueprint or {}).get("steering_history") or []) if old else []
-        if directive:
-            trace.append(directive)
-        avail = sorted({d.get("merchant_key") for d in ctx.available_deals(s, limit=30)
-                        if d.get("merchant_key")})
+        snap = (cur.blueprint or {}).get("_pre_steer") if cur is not None else None
+        if not snap:
+            return {"available": False,
+                    "reason": "No earlier plan to revert to — this day hasn't been steered."}
+        # Replace the current steered row with an exact rebuild of the pre-steer one.
         s.execute(delete(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.DAILY,
-            CampaignPlan.target_date == day,
-        ))
-
-    # Compose a directive that carries the whole steering history + what's actually
-    # available, so the AI addresses the repeated ask instead of silently repeating.
-    composed = directive
-    if len(trace) > 1:  # only when there ARE prior asks — the "you've been asked N times" framing
-        composed = (
-            f"You have been asked to adjust THIS day's plan {len(trace)} time(s). Address the "
-            "LATEST request and acknowledge the earlier ones — do NOT silently reproduce the "
-            "same plan.\nSTEERING HISTORY (oldest first):\n"
-            + "\n".join(f"  {i + 1}. {d}" for i, d in enumerate(trace))
-            + f"\n\nMerchants with deals in today's feed: {avail or 'none'}."
-        )
-    result = daily_brief(date=day.isoformat(), directive=composed)
-    # Success is measured by an actual AI plan being PERSISTED — not result["available"]
-    # (daily_brief still returns available=True with the deterministic fallback when the
-    # AI is down). If no AI row landed, the regeneration failed: restore the old plan.
-    with session_scope() as s2:
-        row = s2.scalar(select(CampaignPlan).where(
-            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
-            CampaignPlan.plan_type == PlanType.DAILY,
-            CampaignPlan.target_date == day,
-            CampaignPlan.is_ai_generated == True).order_by(CampaignPlan.generated_at.desc()))  # noqa: E712
-        if row is not None:
-            # success — persist the RAW trace so the next regeneration accumulates it;
-            # keep operator_directive as just the latest raw ask (not the composed blob).
-            row.blueprint = {**(row.blueprint or {}), "steering_history": trace}
-            row.operator_directive = directive
-        elif old_snap is not None:
-            # regeneration produced no AI plan (AI unavailable) — restore the previous one
-            # so the day is never left plan-less with an orphaned queue.
-            s2.add(CampaignPlan(**old_snap))
-    if row is None and old_snap is not None:
-        return {"available": False, "restored": True,
-                "reason": f"Regeneration failed ({result.get('reason') or 'AI unavailable'}) "
-                          "— kept your existing plan."}
-    if row is not None:
-        note = f"daily {day.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
-        record_ai_output("plan_regenerated", note, get_settings().ai_model)
-    return result
+            CampaignPlan.target_date == day))
+        s.add(CampaignPlan(
+            plan_type=PlanType.DAILY, campaign_version=CAMPAIGN_VERSION,
+            target_date=day, generated_at=datetime.now(timezone.utc),
+            title=snap.get("title") or f"AI day plan {day.isoformat()}",
+            blueprint=snap.get("blueprint") or {},
+            expected_outcome=snap.get("expected_outcome"),
+            confidence=snap.get("confidence"),
+            is_ai_generated=bool(snap.get("is_ai_generated")),
+            ai_digest=snap.get("ai_digest") or "",
+            cited_numbers=snap.get("cited_numbers") or [],
+            factcheck_status=snap.get("factcheck_status"),
+            report_ids=snap.get("report_ids") or [],
+            operator_directive=snap.get("operator_directive")))
+    # AUDIT LOG *after* the restore session commits — record_ai_output opens its OWN
+    # session, so calling it inside the block above self-locks (the outer write lock
+    # blocks the inner write) and rolls back the whole restore. That deadlock is exactly
+    # why revert silently "did nothing" before.
+    record_ai_output("plan_reverted",
+                     f"daily {day.isoformat()} — reverted to pre-steer plan",
+                     get_settings().ai_model)
+    return daily_brief(date=day.isoformat())
 
 
 def regenerate_weekly(end: str | None = None, directive: str | None = None) -> dict:
@@ -1317,9 +2115,155 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
     operator ``directive``. Refuses to regenerate a week that has already fully
     elapsed (its Monday is before the current IST week's Monday) — the guidance
     would land after the fact. Deletes the stale cached `CampaignPlan` row first so
-    `weekly_brief` takes its normal cache-miss path, with ``directive`` threaded
-    into the briefing prompt and persisted on the new row."""
+    `weekly_brief` takes its normal cache-miss path, with the directive interpreted
+    through the SAME universal steer as the daily path (``extract_steer_intent``,
+    validated against the real feed) and enforced deterministically on the weekly
+    blueprint's direction-level knobs (see ``enforce_weekly_constraints``) — never a
+    free-floating AI suggestion the operator's words can't actually move."""
     from datetime import date as date_cls, timedelta
+    from sqlalchemy import delete
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    from src.services.ai_outputs import record_ai_output
+    from src.services.analytics.day import latest_owned_date
+    from src.services.analytics.periods import ist_today
+    from src.services.generation.directives import extract_steer_intent
+
+    intent = None
+    with session_scope() as s:
+        anchor = None
+        if end:
+            try:
+                anchor = date_cls.fromisoformat(end)
+            except ValueError:
+                anchor = None
+        if anchor is None:
+            anchor = latest_owned_date(s)
+        if anchor is None:
+            return {"available": False, "reason": "No owned posts yet."}
+
+        # Trailing 7-day window ending at the anchor. Only the CURRENT window (anchor
+        # within the last 7 days) is regenerable — an old historical anchor is elapsed.
+        if anchor < ist_today() - timedelta(days=6):
+            return {"available": False,
+                    "reason": "This week has already elapsed — regenerating it has no effect."}
+        week_end = anchor
+        week_start = anchor - timedelta(days=6)
+
+        # UNIVERSAL STEER: same interpret-once-against-the-real-feed pipeline the daily
+        # path uses — so any phrasing works here too, and merchants it names must be
+        # real feed slugs (never invented).
+        if directive:
+            _feed = ctx.available_deals(s, limit=40)
+            _feed_m = sorted({d.get("merchant_key") for d in _feed if d.get("merchant_key")})
+            _feed_c = sorted({d.get("category") for d in _feed if d.get("category")})
+            # openai (not groq's default) — same quota-relief reasoning as generate_week_plan.
+            intent = extract_steer_intent(directive, _feed_m, _feed_c, provider="openai")
+            if intent.get("pause"):
+                return {"available": False, "paused_intent": True,
+                        "reason": "This reads as a request to PAUSE posting, which steering can't "
+                                  "do — it reshapes the plan but doesn't stop the queue. Your "
+                                  "weekly plan was left unchanged. To pause, clear the queue or "
+                                  "turn off the scheduler; for a posting change, tell me the "
+                                  "merchants/mix to steer."}
+
+        # Snapshot the old weekly row (all cols but id) BEFORE deleting — used BOTH to
+        # restore-on-failure (a bad regen never blanks the week) AND, on success, as the
+        # snapshot "Revert steer" restores (same contract as daily's blueprint._pre_steer
+        # — see the daily regenerate for why this always points at the TRUE original,
+        # not just the state one steer back).
+        old = s.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.WEEKLY,
+            CampaignPlan.target_date == week_start).order_by(CampaignPlan.generated_at.desc()))
+        old_snap = ({c.name: getattr(old, c.name) for c in CampaignPlan.__table__.columns
+                     if c.name != "id"} if old is not None else None)
+        pre_steer_snap = None
+        if old is not None:
+            _existing_pre_steer = (old.blueprint or {}).get("_pre_steer")
+            if _existing_pre_steer is not None:
+                pre_steer_snap = _existing_pre_steer
+            else:
+                pre_steer_snap = {
+                    "title": old.title, "blueprint": old.blueprint or {},
+                    "expected_outcome": old.expected_outcome, "confidence": old.confidence,
+                    "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
+                    "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
+                    "report_ids": old.report_ids, "operator_directive": old.operator_directive}
+
+        s.execute(delete(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.WEEKLY,
+            CampaignPlan.target_date == week_start,
+        ))
+
+    # Surface what the AI understood + anything it can't enforce, in the prompt itself —
+    # same composition the daily path uses — so the narrative addresses them honestly. NOT
+    # gated on source=="ai" — the regex fallback's own unsupported notes (e.g. an
+    # out-of-range count) need to reach the operator too.
+    composed = directive
+    if intent:
+        if intent.get("interpretation"):
+            composed = (composed or "") + f"\n\nHOW I READ YOUR STEER: {intent['interpretation']}"
+        if intent.get("unsupported"):
+            composed = (composed or "") + ("\n\nPARTS I CANNOT ENFORCE IN THE PLAN (say so plainly, "
+                                           "don't pretend): " + "; ".join(intent["unsupported"]))
+
+    # Pass the anchor (window END) so weekly_brief re-derives the SAME trailing window.
+    result = weekly_brief(end=week_end.isoformat(), directive=composed, steer_intent=intent)
+    # Success = an AI-generated weekly row actually landed. weekly_brief still persists a
+    # deterministic (is_ai_generated=False) blueprint row when the AI is down, so checking
+    # is_ai_generated (not just row-exists) is what distinguishes a real regen from a
+    # silent fallback that would otherwise replace the good narrative.
+    restored = False
+    with session_scope() as s2:
+        row = s2.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.WEEKLY,
+            CampaignPlan.target_date == week_start,
+            CampaignPlan.is_ai_generated == True).order_by(CampaignPlan.generated_at.desc()))  # noqa: E712
+        if row is not None:
+            # Stash the pre-steer plan so "Revert steer" restores it exactly (one level
+            # of undo, no AI call) — same mechanism revert_daily reads.
+            if pre_steer_snap is not None:
+                _bp = {**(row.blueprint or {}), "_pre_steer": pre_steer_snap}
+                row.blueprint = _bp
+            row.operator_directive = directive
+            result["operator_directive"] = directive
+            # Same staleness fix as regenerate_daily: weekly_brief() computed can_revert
+            # BEFORE _pre_steer was stashed a few lines up, so the immediate response is
+            # stale on this one field — fix it here instead of depending on the FE's
+            # post-mutation refetch to self-correct it.
+            if pre_steer_snap is not None:
+                result["can_revert"] = True
+            # Not gated on source=="ai" — the regex fallback carries its own notes too.
+            if intent:
+                result["steer_interpretation"] = intent.get("interpretation") or None
+                result["steer_unsupported"] = intent.get("unsupported") or None
+        elif old_snap is not None:
+            # Drop the deterministic stand-in the failed regen left, restore the prior good row.
+            s2.execute(delete(CampaignPlan).where(
+                CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+                CampaignPlan.plan_type == PlanType.WEEKLY,
+                CampaignPlan.target_date == week_start))
+            s2.add(CampaignPlan(**old_snap))
+            restored = True
+    if restored:
+        return {"available": False, "restored": True,
+                "reason": f"Regeneration failed ({result.get('reason') or 'AI unavailable'}) "
+                          "— kept your existing weekly plan."}
+    if result.get("available"):
+        note = f"weekly {week_start.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
+        record_ai_output("plan_regenerated", note, get_settings().ai_model)
+    return result
+
+
+def revert_weekly(end: str | None = None) -> dict:
+    """Undo ALL steering for the week containing ``end`` — restore the plan exactly as
+    it was before the FIRST steer/regenerate, from the snapshot `regenerate_weekly`
+    stashed under blueprint._pre_steer. No AI call: rebuilds the exact original row.
+    Same contract as `revert_daily` (always the true original, not one step back),
+    scoped to the weekly plan_type/target_date."""
+    from datetime import date as date_cls, datetime, timezone, timedelta
     from sqlalchemy import delete
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
     from src.services.ai_outputs import record_ai_output
@@ -1337,25 +2281,40 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
             anchor = latest_owned_date(s)
         if anchor is None:
             return {"available": False, "reason": "No owned posts yet."}
-
-        week_start = anchor - timedelta(days=anchor.weekday())
-        today = ist_today()
-        current_week_start = today - timedelta(days=today.weekday())
-        if week_start < current_week_start:
+        if anchor < ist_today() - timedelta(days=6):
             return {"available": False,
-                    "reason": "This day has already elapsed — regenerating it has no effect."}
-
+                    "reason": "This week has already elapsed — reverting it has no effect."}
+        week_end = anchor
+        week_start = anchor - timedelta(days=6)
+        cur = s.scalar(select(CampaignPlan).where(
+            CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+            CampaignPlan.plan_type == PlanType.WEEKLY,
+            CampaignPlan.target_date == week_start).order_by(CampaignPlan.generated_at.desc()))
+        snap = (cur.blueprint or {}).get("_pre_steer") if cur is not None else None
+        if not snap:
+            return {"available": False,
+                    "reason": "No earlier plan to revert to — this week hasn't been steered."}
         s.execute(delete(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.WEEKLY,
-            CampaignPlan.target_date == week_start,
-        ))
-
-    result = weekly_brief(end=week_start.isoformat(), directive=directive)
-    if result.get("available"):
-        note = f"weekly {week_start.isoformat()} — directive: {directive[:200] if directive else '(none)'}"
-        record_ai_output("plan_regenerated", note, get_settings().ai_model)
-    return result
+            CampaignPlan.target_date == week_start))
+        s.add(CampaignPlan(
+            plan_type=PlanType.WEEKLY, campaign_version=CAMPAIGN_VERSION,
+            target_date=week_start, end_date=week_end, generated_at=datetime.now(timezone.utc),
+            title=snap.get("title") or f"Weekly plan — week of {week_start.isoformat()}",
+            blueprint=snap.get("blueprint") or {},
+            expected_outcome=snap.get("expected_outcome"),
+            confidence=snap.get("confidence"),
+            is_ai_generated=bool(snap.get("is_ai_generated")),
+            ai_digest=snap.get("ai_digest") or "",
+            cited_numbers=snap.get("cited_numbers") or [],
+            factcheck_status=snap.get("factcheck_status"),
+            report_ids=snap.get("report_ids") or [],
+            operator_directive=snap.get("operator_directive")))
+    record_ai_output("plan_reverted",
+                     f"weekly {week_start.isoformat()} — reverted to pre-steer plan",
+                     get_settings().ai_model)
+    return weekly_brief(end=week_end.isoformat())
 
 
 def queue(page: int = 1, page_size: int = 20, date: str | None = None,

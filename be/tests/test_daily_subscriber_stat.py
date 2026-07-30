@@ -122,6 +122,52 @@ def test_upsert_flags_a_collection_gap_instead_of_hiding_it():
         assert gap_row["spans_days"] == 14
 
 
+def test_get_growth_prepends_the_real_pre_gap_anchor_point():
+    """When the SELECTED window's first row is itself a gap catch-up (spans_days > 1),
+    the chart would otherwise start mid-jump — subs_end already at its post-gap level,
+    with no visible climb, reading as flat/stagnant even though a real, large change
+    happened just before the window. get_growth must prepend the real historical row
+    from before the gap (not an inferred value) so the chart can show the actual jump.
+    Regression for a live example: 26,506 -> 28,468 across an untracked 14-day gap,
+    with the analytics page's selected range starting AFTER the gap's first endpoint."""
+    _fresh_db()
+    from sqlalchemy import select
+    from src.db.models import Channel
+    from src.db.session import session_scope
+    from src.services.collection.telegram_owned import _upsert_daily_subscriber_stat
+    from src.services.analytics.growth import get_growth
+
+    with session_scope() as s:
+        ch = Channel(tg_channel_id=304, username="gapch2", title="Gap2", kind="owned")
+        s.add(ch)
+        s.flush()
+        channel_id = ch.id
+
+    day1 = date(2026, 7, 10)
+    day2 = date(2026, 7, 24)  # 14 days later — a real collection gap
+    t1 = datetime(2026, 7, 10, 6, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 7, 24, 6, 0, tzinfo=timezone.utc)
+
+    with session_scope() as s:
+        _upsert_daily_subscriber_stat(s, channel_id, day1, 26506, t1)
+        _upsert_daily_subscriber_stat(s, channel_id, day2, 28468, t2)
+
+    with session_scope() as s:
+        # Window starts AFTER day1 (excludes it from the normal row query) but still
+        # includes day2 (the gap catch-up row) — mirrors "Last 7 days" on the analytics
+        # page landing right on the gap's resumption day.
+        g = get_growth(s, start=date(2026, 7, 20), end=date(2026, 8, 1))
+        assert g["daily"][0]["date"] == "2026-07-10"
+        assert g["daily"][0]["subs_end"] == 26506
+        assert g["daily"][0]["is_gap_anchor"] is True
+        assert g["daily"][0]["joined"] is None
+        assert g["daily"][1]["date"] == "2026-07-24"
+        assert g["daily"][1]["spans_days"] == 14
+        # The anchor is for chart continuity only — it must NOT inflate this window's
+        # own totals (joined/left/net still only sum the real in-window rows).
+        assert g["joined"] == 1962
+
+
 def test_get_growth_shape_and_date_filter():
     _fresh_db()
     from datetime import date as date_cls

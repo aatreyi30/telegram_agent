@@ -4,11 +4,14 @@ import { useEffect, useState, type ReactNode } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert01Icon,
-  Calendar03Icon,
   Clock01Icon,
+  InformationCircleIcon,
 } from "@hugeicons/core-free-icons";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Async, Empty } from "@/components/Async";
 import { AiBadge } from "@/components/AiBadge";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { Reveal } from "@/components/Reveal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,12 +21,24 @@ import { PageHeader } from "@/components/PageHeader";
 import { useQueryParams } from "@/lib/use-search-params";
 import { cn } from "@/lib/utils";
 import { postTypeLabel, merchantLabel, categoryLabel, titleCase, statusLabel, isoSlash } from "@/lib/format";
-import { useRegenerateDailyPlan, useRegenerateWeeklyPlan } from "@/queries/mutations";
+import { useRegenerateDailyPlan, useRegenerateWeeklyPlan, useRevertDailyPlan, useRevertWeeklyPlan } from "@/queries/mutations";
 import { useDailyBrief, useLatestRetro, useWeeklyBrief } from "@/queries/queries";
 import type {
-  DailyBrief, DailyPlanToday, PlanRisk, RetroLatest, WeeklyBrief,
+  DailyBrief, DailyPlanToday, DailySlot, PlanRisk, RetroLatest, WeeklyBrief,
   WeeklyBriefDay, YesterdayBrief,
 } from "@/types/api";
+
+/** A slot's price intent, as the planner expressed it: a cap ("≤ ₹999"), a floor
+ * ("≥ ₹500"), or a band. Blank when the slot set no price constraint — most don't,
+ * and an em dash says that more honestly than a fabricated range. */
+function priceIntent(s: DailySlot): string {
+  const lo = s.min_price ?? null;
+  const hi = s.max_price ?? null;
+  if (lo != null && hi != null) return `₹${lo}–₹${hi}`;
+  if (hi != null) return `≤ ₹${hi}`;
+  if (lo != null) return `≥ ₹${lo}`;
+  return "—";
+}
 
 /** Compact "Steer this plan" control shared by the daily TodayCard and the weekly
  * card: a directive textarea (prefilled with whatever's already persisted on the
@@ -31,11 +46,25 @@ import type {
  * steering the past has no effect. */
 function SteerPanel({
   operatorDirective, canRegenerate, isPending, onRegenerate,
+  canRevert, revertPending, onRevert, status,
+  placeholder = "Steer the AI — e.g. 'Push electronics harder today' or 'avoid the same merchant twice'…",
 }: {
   operatorDirective?: string | null;
   canRegenerate?: boolean;
   isPending: boolean;
   onRegenerate: (directive: string) => void;
+  // Revert (undo the last steer) is shown only when a pre-steer snapshot exists — both
+  // the daily and weekly cards pass this once their brief reports can_revert.
+  canRevert?: boolean;
+  revertPending?: boolean;
+  onRevert?: () => void;
+  // Feedback after a regenerate/revert settles: applied, refused (with the reason
+  // the backend gave — elapsed day, pause, already-over-count…), or errored.
+  status?: { kind: "success" | "refused" | "error"; message: string } | null;
+  // Defaults to the daily example — the weekly card passes its own (merchants/mix/
+  // posts-per-day are what a weekly steer can actually reach; there are no per-day
+  // slots at this granularity, so "today"/time-of-day examples don't fit).
+  placeholder?: string;
 }) {
   const [directive, setDirective] = useState(operatorDirective || "");
   useEffect(() => setDirective(operatorDirective || ""), [operatorDirective]);
@@ -51,21 +80,46 @@ function SteerPanel({
       )}
       <textarea
         className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
-        placeholder="Steer the AI — e.g. 'Push electronics harder today' or 'avoid the same merchant twice'…"
+        placeholder={placeholder}
         value={directive}
         onChange={(e) => setDirective(e.target.value)}
         disabled={disabled}
       />
+      {(isPending || revertPending) && (
+        <div className="flex items-center gap-2 rounded-md bg-primary/5 px-3 py-2 text-xs text-primary">
+          <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-primary/30 border-t-primary" aria-hidden />
+          {revertPending ? "Restoring your previous plan…" : "Applying your steer — regenerating the plan (this calls the AI, a few seconds)…"}
+        </div>
+      )}
+      {!isPending && !revertPending && status && (
+        <div className={"rounded-md px-3 py-2 text-xs " + (
+          status.kind === "success" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+          : status.kind === "refused" ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+          : "bg-destructive/10 text-destructive")}>
+          {(status.kind === "success" ? "✓ " : status.kind === "refused" ? "⚠ " : "✕ ") + status.message}
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         {disabled && (
           <span className="text-xs text-muted-foreground" title="This day has elapsed">
             This day has elapsed — regenerating it has no effect.
           </span>
         )}
+        {canRevert && onRevert && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={disabled || isPending || revertPending}
+            title="Restore the plan from before the last steer"
+            onClick={onRevert}
+          >
+            {revertPending ? "Reverting…" : "Revert steer"}
+          </Button>
+        )}
         <Button
           size="sm"
           variant="outline"
-          disabled={disabled || isPending}
+          disabled={disabled || isPending || revertPending}
           title={disabled ? "This day has elapsed" : undefined}
           onClick={() => onRegenerate(directive.trim())}
         >
@@ -78,9 +132,9 @@ function SteerPanel({
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md bg-muted/50 px-2.5 py-1.5">
+    <div className="rounded-lg bg-muted/50 px-2.5 py-1.5 transition-colors duration-200 hover:bg-muted tabular-nums">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="text-sm font-semibold">{value}</p>
+      <p className="text-sm font-semibold"><AnimatedNumber value={value} /></p>
     </div>
   );
 }
@@ -166,7 +220,7 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
   const noActivity = !y || y.source === "none";
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">Yesterday — {prevDate}</CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base">Yesterday — {isoSlash(prevDate)}</CardTitle></CardHeader>
       <CardContent className="space-y-3 text-sm">
         {noActivity ? (
           <p className="text-sm text-muted-foreground">No activity recorded.</p>
@@ -184,11 +238,9 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
               <p className="text-xs text-muted-foreground">Top post: #{y!.top_post_id}</p>
             )}
             <TypeMixBadges mix={y!.type_mix} />
-            {(y!.best_category || y!.worst_category) && (
+            {y!.best_category && (
               <p className="text-xs text-muted-foreground">
-                {y!.best_category && <>Best merchant: <span className="font-medium text-foreground">{merchantLabel(y!.best_category)}</span></>}
-                {y!.best_category && y!.worst_category && " · "}
-                {y!.worst_category && <>Worst: <span className="font-medium text-foreground">{merchantLabel(y!.worst_category)}</span></>}
+                Best merchant: <span className="font-medium text-foreground">{merchantLabel(y!.best_category)}</span>
               </p>
             )}
             {y!.source === "live" && (
@@ -204,6 +256,31 @@ function YesterdayCard({ y, prevDate }: { y: YesterdayBrief | null; prevDate: st
 function TodayCard({ brief }: { brief: DailyBrief }) {
   const t: DailyPlanToday = brief.today;
   const regenerate = useRegenerateDailyPlan();
+  const revert = useRevertDailyPlan();
+  // Translate the last settled mutation into an operator-facing banner. A backend
+  // `available:false` is a REFUSAL (elapsed day, pause intent, already over count) — show
+  // its reason rather than a false "applied".
+  const steerStatus: { kind: "success" | "refused" | "error"; message: string } | null =
+    regenerate.isPending || revert.isPending ? null
+    : revert.isSuccess && revert.data
+      ? (revert.data.available === false
+          ? { kind: "refused" as const, message: revert.data.reason || "Nothing to revert to." }
+          : { kind: "success" as const, message: "Reverted to your previous plan." })
+    : regenerate.isError
+      ? { kind: "error" as const, message: (regenerate.error as Error)?.message || "Something went wrong — try again." }
+    : regenerate.isSuccess && regenerate.data
+      ? (regenerate.data.available === false
+          ? { kind: "refused" as const, message: regenerate.data.reason || "That steer couldn't be applied." }
+          : { kind: "success" as const, message:
+                "Plan updated — " + (regenerate.data.steer_interpretation || "your steer was applied.")
+                + (regenerate.data.steer_unsupported?.length
+                    ? "  ·  Couldn't apply in the plan: " + regenerate.data.steer_unsupported.join("; ")
+                    : "") })
+    : null;
+  // A day whose slots have ALL already posted can't be re-steered (you can't un-send) —
+  // flag it prominently so steering here isn't mistaken for "nothing happened".
+  const plannedCount = (t.slots || []).reduce((a, s) => a + (s.count ?? 1), 0);
+  const fullyPosted = plannedCount > 0 && (t.scheduled_count ?? 0) >= plannedCount;
   return (
     <Card>
       <CardHeader><CardTitle className="text-base">Today — {isoSlash(brief.date)}</CardTitle></CardHeader>
@@ -219,17 +296,31 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             </p>
           )}
           {(() => {
+            // A fully-posted day is HISTORY — the forward-looking "planned / short-of-target"
+            // numbers are meaningless (and can contradict the actual posted count when a late
+            // steer rewrote the plan record). Show only what actually happened.
+            if (fullyPosted) {
+              return (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <Badge variant="outline">{t.scheduled_count} posted today</Badge>
+                  <span className="text-xs text-muted-foreground">this day is done — see tomorrow to plan ahead</span>
+                </div>
+              );
+            }
             // Under just-in-time filling the plan's SLOTS are the schedule — each is
             // rendered into a real post only ~3 min before it fires. So "planned" is the
             // sum of slot counts, NOT how many rows have materialised yet (that would
             // always read as a deficit all day). Only a genuine plan shortfall is a gap.
-            const planned = (t.slots || []).reduce((a, s) => a + (s.count ?? 1), 0);
+            const planned = plannedCount;
             const short = Math.max(t.recommended_posts - planned, 0);
+            const over = Math.max(planned - t.recommended_posts, 0);
             return (
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <Badge variant="outline">{planned} planned across {t.slots?.length || 0} slots</Badge>
                 {short > 0 ? (
                   <Badge variant="warning">{short} short of target</Badge>
+                ) : over > 0 ? (
+                  <Badge variant="warning">{over} over target</Badge>
                 ) : (
                   <Badge variant="success">On target</Badge>
                 )}
@@ -239,11 +330,10 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
               </div>
             );
           })()}
-          {t.cadence_why && <p className="mt-1.5 text-sm text-foreground">{t.cadence_why}</p>}
         </div>
 
         {brief.digest ? (
-          <div className="space-y-1.5">
+          <div className="ai-surface ai-sheen relative overflow-hidden space-y-1.5 rounded-xl border bg-gradient-to-b from-violet-500/[0.04] to-transparent p-3.5">
             <div className="flex items-center gap-2">
               <span className="text-xs font-medium text-muted-foreground">Narrative</span>
               <AiBadge />
@@ -285,25 +375,58 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
           </div>
         )}
 
-        {t.deal_type_allocation?.length > 0 && (
+        {t.deal_type_allocation?.length > 0 && (() => {
+          const totalPosts = t.deal_type_allocation.reduce((sum, a) => sum + (a.target_posts || 0), 0);
+          return (
           <div>
             <p className="mb-1.5 text-xs font-medium text-muted-foreground">Deal-type allocation</p>
             <Table>
               <TableHeader>
-                <TableRow><TableHead>Deal type</TableHead><TableHead>Target posts</TableHead><TableHead>Views/day</TableHead></TableRow>
+                <TableRow>
+                  <TableHead>Deal type</TableHead>
+                  <TableHead>
+                    <span className="inline-flex items-center gap-1">
+                      Target posts
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <HugeiconsIcon icon={InformationCircleIcon} className="h-3.5 w-3.5 cursor-help text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          Today&apos;s {totalPosts} recommended posts, split across deal types by each type&apos;s measured performance — with a 30% floor so neither type ever drops out.
+                        </TooltipContent>
+                      </Tooltip>
+                    </span>
+                  </TableHead>
+                  <TableHead>
+                    <span className="inline-flex items-center gap-1">
+                      Avg views/post
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <HugeiconsIcon icon={InformationCircleIcon} className="h-3.5 w-3.5 cursor-help text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          The real average of actual view counts across every post of this type — measured from your history, not an estimate.
+                        </TooltipContent>
+                      </Tooltip>
+                    </span>
+                  </TableHead>
+                  <TableHead>Why</TableHead>
+                </TableRow>
               </TableHeader>
               <TableBody>
                 {t.deal_type_allocation.map((a, i) => (
                   <TableRow key={i}>
                     <TableCell>{postTypeLabel(a.deal_type)}</TableCell>
-                    <TableCell>{a.target_posts}</TableCell>
-                    <TableCell>{a.avg_views_per_day != null ? Math.round(a.avg_views_per_day) : "—"}</TableCell>
+                    <TableCell className="tabular-nums">{a.target_posts}</TableCell>
+                    <TableCell className="tabular-nums">{a.avg_views_per_post != null ? Math.round(a.avg_views_per_post) : "—"}</TableCell>
+                    <TableCell className="max-w-md text-xs leading-snug text-muted-foreground">{a.reasoning || "—"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </div>
-        )}
+          );
+        })()}
 
         {t.slots?.length > 0 && (
           <div>
@@ -313,16 +436,18 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Window (IST)</TableHead><TableHead>Posts</TableHead>
+                  <TableHead className="w-8">#</TableHead><TableHead>Time (IST)</TableHead><TableHead>Posts</TableHead>
                   <TableHead>Type</TableHead><TableHead>Theme</TableHead>
-                  <TableHead>Merchant</TableHead><TableHead>Why</TableHead>
+                  <TableHead>Merchant</TableHead>
+                  <TableHead>Why</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {t.slots.map((s, i) => (
                   <TableRow key={i}>
-                    <TableCell className="font-medium tabular-nums">{s.window_ist}</TableCell>
-                    <TableCell className="tabular-nums">{s.count ?? 1}</TableCell>
+                    <TableCell className="tabular-nums text-muted-foreground">{i + 1}</TableCell>
+                    <TableCell className="font-medium tabular-nums">{s.time_ist || s.window_ist || "—"}</TableCell>
+                    <TableCell className="tabular-nums">{s.time_ist ? 1 : (s.count ?? 1)}</TableCell>
                     <TableCell><Badge variant="secondary" className="font-medium">{postTypeLabel(s.type)}</Badge></TableCell>
                     <TableCell className="text-muted-foreground">{categoryLabel(s.theme) || "—"}</TableCell>
                     <TableCell className="text-muted-foreground">{merchantLabel(s.merchant)}</TableCell>
@@ -336,6 +461,14 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
 
         <RiskList risks={t.risks} />
 
+        {fullyPosted && (
+          <div className="rounded-md border border-amber-400/40 bg-amber-500/10 px-3 py-2.5 text-xs leading-snug text-amber-800 dark:text-amber-200">
+            ⚠ This day is fully posted — all {plannedCount} posts already went out and can&apos;t be changed.
+            Steering can only rewrite <em>unposted</em> slots, so it won&apos;t change today.
+            {" "}<strong>Pick a future date</strong> (top-right) to plan and steer a fresh day.
+          </div>
+        )}
+
         <SteerPanel
           operatorDirective={brief.operator_directive}
           canRegenerate={brief.can_regenerate}
@@ -343,6 +476,10 @@ function TodayCard({ brief }: { brief: DailyBrief }) {
           onRegenerate={(directive) =>
             regenerate.mutate({ date: brief.date, directive: directive || undefined })
           }
+          canRevert={brief.can_revert}
+          revertPending={revert.isPending}
+          onRevert={() => revert.mutate({ date: brief.date })}
+          status={steerStatus}
         />
 
       </CardContent>
@@ -366,9 +503,9 @@ function DailyView({ q }: { q: ReturnType<typeof useDailyBrief> }) {
           <Empty>{brief.reason || "No plan available."}</Empty>
         ) : (
           <div className="space-y-4">
-            <YesterdayCard y={brief.yesterday} prevDate={brief.prev_date} />
-            <TodayCard brief={brief} />
-            {brief.upcoming_event && <UpcomingEventCallout event={brief.upcoming_event} />}
+            <Reveal index={0}><YesterdayCard y={brief.yesterday} prevDate={brief.prev_date} /></Reveal>
+            <Reveal index={1}><TodayCard brief={brief} /></Reveal>
+            {brief.upcoming_event && <Reveal index={2}><UpcomingEventCallout event={brief.upcoming_event} /></Reveal>}
           </div>
         )
       }
@@ -382,20 +519,23 @@ function WeekDaysTable({ days }: { days: WeeklyBriefDay[] }) {
       <TableHeader>
         <TableRow>
           <TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Posts</TableHead><TableHead>Avg views</TableHead>
-          <TableHead>Joined</TableHead><TableHead>Left</TableHead><TableHead>Net</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
+        {/* Joined/Left/Net columns removed: Telegram exposes only the LIVE subscriber
+            count (no history), so per-day follower deltas can't be captured reliably. */}
         {days.map((d) => (
           <TableRow key={d.date}>
             <TableCell className="font-medium">{d.weekday}</TableCell>
             <TableCell className="text-muted-foreground tabular-nums">{isoSlash(d.date)}</TableCell>
             <TableCell className="tabular-nums">{d.posts}</TableCell>
-            <TableCell className="tabular-nums">{Math.round(d.views_avg).toLocaleString()}</TableCell>
-            <TableCell className="text-emerald-600 tabular-nums dark:text-emerald-400">+{d.joined}</TableCell>
-            <TableCell className="text-red-600 tabular-nums dark:text-red-400">-{d.left}</TableCell>
-            <TableCell className={cn("tabular-nums", d.net < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
-              {d.net > 0 ? "+" : ""}{d.net}
+            <TableCell className="tabular-nums">
+              {Math.round(d.views_avg).toLocaleString()}
+              {d.views_maturing && (
+                <span className="ml-1 text-xs text-muted-foreground" title="Posts from the last few days are still accumulating views — this average will keep rising and isn't a dip.">
+                  · still rising
+                </span>
+              )}
             </TableCell>
           </TableRow>
         ))}
@@ -414,12 +554,17 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
       {(r: RetroLatest) => {
         if (!r.available) return null;
         const { prediction, plan_adherence, engagement, churn_vs_frequency, adjustments, top_over, top_under } = r.metrics;
+        // The retro reviews prediction accuracy + plan adherence. Until the predict->
+        // outcome->score loop has produced data, all of that is empty — so hide the card
+        // rather than show a stale, all-"—" panel (it reappears once there's real data).
+        if (prediction.n_posts === 0 && plan_adherence.planned === 0 && plan_adherence.published === 0)
+          return null;
         const pct = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${Math.round(v * 100)}%`);
         return (
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
-                <CardTitle className="text-base">Weekly retro — week of {r.week_start}</CardTitle>
+                <CardTitle className="text-base">Weekly retro — week of {isoSlash(r.week_start)}</CardTitle>
                 <AiBadge />
               </div>
             </CardHeader>
@@ -443,9 +588,9 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
               {(churn_vs_frequency.high_leave_days_posts_per_day != null || churn_vs_frequency.low_leave_days_posts_per_day != null) && (
                 <p className="text-xs text-muted-foreground">
                   Posts/day on high-churn days:{" "}
-                  <span className="font-medium text-foreground">{churn_vs_frequency.high_leave_days_posts_per_day ?? "—"}</span>
+                  <span className="font-medium text-foreground">{churn_vs_frequency.high_leave_days_posts_per_day != null ? Math.round(churn_vs_frequency.high_leave_days_posts_per_day) : "—"}</span>
                   {" "}vs low-churn days:{" "}
-                  <span className="font-medium text-foreground">{churn_vs_frequency.low_leave_days_posts_per_day ?? "—"}</span>
+                  <span className="font-medium text-foreground">{churn_vs_frequency.low_leave_days_posts_per_day != null ? Math.round(churn_vs_frequency.low_leave_days_posts_per_day) : "—"}</span>
                 </p>
               )}
 
@@ -504,58 +649,67 @@ function RetroCard({ q }: { q: ReturnType<typeof useLatestRetro> }) {
 }
 
 function WeekCard({ w }: { w: WeeklyBrief }) {
-  const regenerate = useRegenerateWeeklyPlan();
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">This week — {w.week_start} to {w.week_end}</CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base">Last 7 days — {isoSlash(w.week_start)} to {isoSlash(w.week_end)}</CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Stat label="Posts" value={String(w.totals.posts)} />
           <Stat label="Total views" value={w.totals.views_total.toLocaleString()} />
-          <Stat label="Posts/day so far (actual)" value={w.totals.avg_posts_per_day.toFixed(1)} />
+          <Stat label="Posts/day so far (actual)" value={String(Math.round(w.totals.avg_posts_per_day))} />
           <Stat label="Recommended/day" value={String(w.recommended_posts_per_day)} />
         </div>
 
+        {/* A seeded sale event (Independence Day Sale, Big Billion Days, ...) landing
+            this week auto-ramps the cadence — say so plainly, with the real before/after
+            numbers, so a jump in Recommended/day is never a silent surprise. */}
+        {w.event_ramp && (
+          <div className="rounded-md border border-blue-400/40 bg-blue-500/10 px-3 py-2.5 text-xs leading-snug text-blue-800 dark:text-blue-200">
+            ⚡ <strong>{w.event_ramp.event}</strong> is {w.event_ramp.days_away === 0 ? "today" : `${w.event_ramp.days_away} day(s) away`} —
+            cadence auto-ramped from {w.event_ramp.baseline_posts_per_day} to{" "}
+            <strong>{w.event_ramp.ramped_posts_per_day}/day</strong> ({w.event_ramp.multiplier}x)
+            {w.event_ramp.merchant_key && <> and leaning into {merchantLabel(w.event_ramp.merchant_key)}</>}.
+          </div>
+        )}
+
+        {/* The weekly PLAN's strategy — the recommendations that steer the daily plans. */}
+        {(w.direction || w.loot_deal_ratio || (w.merchant_priorities?.length ?? 0) > 0) && (
+          <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+            <p className="text-xs font-medium text-muted-foreground">This week&apos;s direction</p>
+            {w.direction && <p className="text-sm font-medium text-foreground">{w.direction}</p>}
+            {w.loot_deal_ratio && (() => {
+              const { loot, deal } = w.loot_deal_ratio!;
+              const lootPct = Math.round((loot / ((loot || 0) + (deal || 0) || 1)) * 100);
+              return (
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <span className="text-muted-foreground">Recommended mix going forward:</span>
+                  <Badge variant="outline">Single {100 - lootPct}%</Badge>
+                  <Badge variant="outline">Loot {lootPct}%</Badge>
+                  {/* Distinct from any "X% of posts" figure the narrative cites above —
+                      that's the ACTUAL recent split; this is what to aim for next, based
+                      on per-post view performance, not a restatement of current share. */}
+                  <span className="text-muted-foreground">— not this week&apos;s actual split so far</span>
+                </div>
+              );
+            })()}
+            {(w.merchant_priorities?.length ?? 0) > 0 && (
+              <div>
+                <p className="mb-1 text-xs text-muted-foreground">Feature these merchants:</p>
+                <ul className="space-y-1">
+                  {w.merchant_priorities!.map((m, i) => (
+                    <li key={i} className="text-xs">
+                      <span className="font-medium text-foreground">{merchantLabel(m.merchant)}</span>
+                      {m.why && <span className="text-muted-foreground"> — {m.why}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
         {w.days?.length > 0 && <WeekDaysTable days={w.days} />}
 
-        {w.themes?.length > 0 && (
-          <div>
-            <p className="mb-1.5 text-xs font-medium text-muted-foreground">Daily themes</p>
-            <Table>
-              <TableHeader>
-                <TableRow><TableHead>Day</TableHead><TableHead>Date</TableHead><TableHead>Theme focus</TableHead></TableRow>
-              </TableHeader>
-              <TableBody>
-                {w.themes.map((t, i) => (
-                  <TableRow key={i}>
-                    <TableCell className="font-medium">{t.day}</TableCell>
-                    <TableCell className="text-muted-foreground">{isoSlash(t.date)}</TableCell>
-                    <TableCell>{t.theme_focus}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-
-        {!!w.upcoming_events?.length && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <HugeiconsIcon icon={Calendar03Icon} size={14} className="text-muted-foreground" />
-            <span className="text-xs text-muted-foreground">Upcoming events:</span>
-            {w.upcoming_events.map((e) => (
-              <Badge key={e.name} variant="outline">{e.name} ({e.days_away}d, {e.date_confidence})</Badge>
-            ))}
-          </div>
-        )}
-
-        <SteerPanel
-          operatorDirective={w.operator_directive}
-          canRegenerate={w.can_regenerate}
-          isPending={regenerate.isPending}
-          onRegenerate={(directive) =>
-            regenerate.mutate({ end: w.week_start, directive: directive || undefined })
-          }
-        />
       </CardContent>
     </Card>
   );
@@ -563,6 +717,25 @@ function WeekCard({ w }: { w: WeeklyBrief }) {
 
 function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
   const retroQ = useLatestRetro();
+  const regenerate = useRegenerateWeeklyPlan();
+  const revert = useRevertWeeklyPlan();
+  const weekStatus: { kind: "success" | "refused" | "error"; message: string } | null =
+    regenerate.isPending || revert.isPending ? null
+    : revert.isSuccess && revert.data
+      ? (revert.data.available === false
+          ? { kind: "refused" as const, message: revert.data.reason || "Nothing to revert to." }
+          : { kind: "success" as const, message: "Reverted to your previous weekly plan." })
+    : regenerate.isError
+      ? { kind: "error" as const, message: (regenerate.error as Error)?.message || "Something went wrong — try again." }
+    : regenerate.isSuccess && regenerate.data
+      ? (regenerate.data.available === false
+          ? { kind: "refused" as const, message: regenerate.data.reason || "That steer couldn't be applied." }
+          : { kind: "success" as const, message:
+                "Weekly plan updated — " + (regenerate.data.steer_interpretation || "your steer was applied.")
+                + (regenerate.data.steer_unsupported?.length
+                    ? "  ·  Couldn't apply in the plan: " + regenerate.data.steer_unsupported.join("; ")
+                    : "") })
+    : null;
   return (
     <Async q={q} rows={3}>
       {(w: WeeklyBrief) =>
@@ -570,11 +743,12 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
           <Empty>{w.reason || "No weekly plan available."}</Empty>
         ) : (
           <div className="space-y-4">
-            <RetroCard q={retroQ} />
-            <WeekCard w={w} />
+            <Reveal index={0}><RetroCard q={retroQ} /></Reveal>
+            <Reveal index={1}><WeekCard w={w} /></Reveal>
 
             {w.digest ? (
-              <Card>
+              <Reveal index={2} as="div">
+              <Card className="ai-surface ai-sheen overflow-hidden bg-gradient-to-b from-violet-500/[0.04] to-transparent">
                 <CardHeader>
                   <div className="flex items-center gap-2">
                     <CardTitle className="text-base">Weekly narrative</CardTitle>
@@ -583,7 +757,11 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                 </CardHeader>
                 <CardContent>
                   <DigestBlock text={w.digest} />
-                  {w.factcheck_status === "failed" ? (
+                  {/* When the honest grounded fallback is already shown, it explains
+                      itself — don't also show the contradictory "failed, regenerate"
+                      warning (regenerating usually just fails again). */}
+                  {w.digest?.includes("Grounded summary") ? null
+                    : w.factcheck_status === "failed" ? (
                     <p className="mt-1.5 text-xs font-medium text-red-600 dark:text-red-400">
                       ⚠ This plan failed verification — the numbers aren't grounded in the data. Regenerate it.
                     </p>
@@ -594,9 +772,30 @@ function WeeklyView({ q }: { q: ReturnType<typeof useWeeklyBrief> }) {
                   ) : null}
                 </CardContent>
               </Card>
+              </Reveal>
             ) : !w.ai_available ? (
               <p className="text-xs text-muted-foreground">AI narrative unavailable — relying on the numbers above.</p>
             ) : null}
+
+            <Reveal index={3} as="div">
+            <Card>
+              <CardContent className="pt-6">
+                <SteerPanel
+                  operatorDirective={w.operator_directive}
+                  canRegenerate={w.can_regenerate}
+                  isPending={regenerate.isPending}
+                  onRegenerate={(directive) =>
+                    regenerate.mutate({ end: w.week_end, directive: directive || undefined })
+                  }
+                  canRevert={w.can_revert}
+                  revertPending={revert.isPending}
+                  onRevert={() => revert.mutate({ end: w.week_end })}
+                  status={weekStatus}
+                  placeholder="Steer the week — e.g. 'only amazon this week', 'lean into loot boards', or '25 posts a day'…"
+                />
+              </CardContent>
+            </Card>
+            </Reveal>
           </div>
         )
       }
@@ -613,7 +812,13 @@ export default function PlanPage() {
   const weeklyQ = useWeeklyBrief(date || undefined);
 
   const min = dailyQ.data?.min_date;
-  const max = dailyQ.data?.max_date;
+  // Daily stays capped at today (dailyQ.max_date) — it needs the LIVE deal feed, which
+  // doesn't exist for future dates. Weekly has no such dependency (it's a direction/
+  // cadence plan, not per-slot deals), so let it browse forward far enough to preview an
+  // upcoming seeded sale event (e.g. Independence Day Sale) before its week arrives.
+  const max = view === "weekly"
+    ? new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10)
+    : dailyQ.data?.max_date;
 
   const handleViewChange = (v: "daily" | "weekly") => set({ view: v === "daily" ? null : v });
   const handleDateChange = (val: string) => set({ date: val || null });

@@ -23,6 +23,16 @@ from src.db.models_competitor_intel import CompetitorProfile
 from src.services.intelligence.competitor import latest_benchmarks, latest_profiles
 
 MIN_POSTS = 10
+# avg_views trust gate (see _basic_stats): need this many real view captures, and the
+# mean can't exceed the median by more than this ratio (kills single parse-error spikes).
+_MIN_VIEW_SAMPLE = 8
+_VIEW_OUTLIER_RATIO = 20
+# A real channel doesn't AVERAGE under this many views — an avg below it means the
+# scraper captured placeholders, not real counts (e.g. india_online_deal "avg 2").
+_MIN_PLAUSIBLE_AVG = 5
+# avg_views above this multiple of the channel's subscriber count is impossible (a
+# mis-parsed view number), so the avg is flagged unreliable — allows for forwards/virality.
+_VIEWS_VS_SUBS_CEIL = 3
 UNAVAILABLE = ["reach", "engagement_rate"]
 _UNAVAILABLE_NOTE = (
     "Reach and engagement-rate need channel admin rights; competitor data is the "
@@ -60,10 +70,25 @@ def _basic_stats(dated_views: list[tuple[datetime, int | None]]) -> dict | None:
     span_days = max((max(dates) - min(dates)).days, 0) + 1
     hours = Counter(to_ist(d).hour for d in dates)
     wd_counter = Counter(to_ist(d).weekday() for d in dates)
+    avg_views = round(statistics.fmean(views)) if views else None
+    med_views = round(statistics.median(views)) if views else None
+    # Whether avg_views can be TRUSTED. Some channels scrape with no real view counts
+    # (all placeholders ~1 -> a fake "avg 2") or one parse-error outlier that drags the
+    # mean to nonsense (a single 327,233 -> a fake "avg 16k"). The median is robust to
+    # both, so we gate on: enough real captures, a median above the placeholder floor,
+    # and a mean not wildly above the median.
+    avg_views_reliable = bool(
+        views and len(views) >= _MIN_VIEW_SAMPLE
+        and med_views and med_views > 1
+        and avg_views is not None and avg_views >= _MIN_PLAUSIBLE_AVG
+        and avg_views <= _VIEW_OUTLIER_RATIO * med_views)
     return {
         "posts": len(dates),
         "window_days": span_days,
-        "avg_views_per_post": round(statistics.fmean(views)) if views else None,
+        "avg_views_per_post": avg_views,
+        "median_views": med_views,
+        "avg_views_reliable": avg_views_reliable,
+        "views_sample": len(views),
         "posts_per_day": round(len(dates) / span_days, 2),
         "posts_per_hour_ist": [hours.get(h, 0) for h in range(24)],
         "weekday_distribution": {day: wd_counter.get(i, 0) for i, day in enumerate(WEEKDAYS)},
@@ -71,6 +96,28 @@ def _basic_stats(dated_views: list[tuple[datetime, int | None]]) -> dict | None:
         "last_posted_at": _fmt_date(max(dates)),
         "tenure_label": _tenure_label(min(dates), max(dates), len(dates)),
     }
+
+
+def _view_reliability_by_comp(s: Session) -> dict[int, dict]:
+    """Per-competitor avg_views trust, from raw CompetitorPost views in one query.
+    Reliable = enough real captures, a median above the placeholder floor (>1), and a
+    mean not wildly above the median (no single parse-error spike). Same test as
+    _basic_stats, but computed for the profile-based (full-window) dashboard path."""
+    rows = s.execute(
+        select(CompetitorPost.competitor_id, CompetitorPost.views)
+        .where(CompetitorPost.views.isnot(None))
+    ).all()
+    by_comp: dict[int, list[int]] = defaultdict(list)
+    for cid, v in rows:
+        by_comp[cid].append(v)
+    out: dict[int, dict] = {}
+    for cid, views in by_comp.items():
+        med = round(statistics.median(views))
+        avg = statistics.fmean(views)
+        reliable = (len(views) >= _MIN_VIEW_SAMPLE and med > 1 and avg >= _MIN_PLAUSIBLE_AVG
+                    and avg <= _VIEW_OUTLIER_RATIO * med)
+        out[cid] = {"median": med, "sample": len(views), "reliable": reliable}
+    return out
 
 
 def _entity_name(prefix: str, cp: CompetitorProfile | None, cid: int) -> str:
@@ -320,6 +367,28 @@ def compare(s: Session, max_competitors: int = 6, window_days: int | None = None
             ent["window_mismatch"] = ratio < 0.5 or ratio > 2.0
         else:
             ent["window_mismatch"] = None
+
+    # avg_views trust flag per competitor — the profile-based branch carries only the
+    # MEAN, which lies when views are placeholders (all ~1 -> "avg 2") or a parse-error
+    # spike (one 327,233 -> "avg 16k"). Compute the median from raw posts once and gate.
+    _rel = _view_reliability_by_comp(s)
+    for ent in entities:
+        if ent.get("is_owned"):
+            continue
+        r = _rel.get(ent.get("id"))
+        if ent.get("median_views") is None:
+            ent["median_views"] = r["median"] if r else None
+        if ent.get("views_sample") is None:
+            ent["views_sample"] = r["sample"] if r else 0
+        reliable = bool(r and r["reliable"]) if ent.get("avg_views_reliable") is None \
+            else ent["avg_views_reliable"]
+        # Plausibility ceiling: a post cannot AVERAGE several times the channel's own
+        # subscriber base — views far above subscribers means the scraper mis-parsed the
+        # number (e.g. a 20-post channel "averaging" 327,233 views). Flag as unreliable.
+        avg, subs = ent.get("avg_views_per_post"), ent.get("subscribers")
+        if reliable and subs and avg and avg > _VIEWS_VS_SUBS_CEIL * subs:
+            reliable = False
+        ent["avg_views_reliable"] = reliable
 
     return {
         "entities": entities,

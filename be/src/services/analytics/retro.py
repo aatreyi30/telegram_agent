@@ -372,7 +372,14 @@ def build_weekly_retro(s: Session, week_start: date) -> WeeklyRetro:
     metrics["adjustments"] = _adjustments(rows)
 
     observation, fallback = _narrative_observation(week_start, metrics)
-    narrative = narrate("weekly_retro", observation, metrics, fallback)
+    # When no posts were SCORED (no prediction+outcome pairs), the AI narrate() has been
+    # observed to misread "no posts with a linked prediction" as "no posts at all" and
+    # invent a growth-doom story — false, since posts were published, just not scored.
+    # Use the honest deterministic fallback directly instead of the drifting AI phrasing.
+    if metrics["prediction"]["n_posts"]:
+        narrative = narrate("weekly_retro", observation, metrics, fallback)
+    else:
+        narrative = fallback
 
     row = s.scalar(select(WeeklyRetro).where(WeeklyRetro.week_start == week_start))
     if row is None:

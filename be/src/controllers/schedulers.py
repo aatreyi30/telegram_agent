@@ -153,6 +153,20 @@ def j_stats_refresh() -> dict:
     return {"processed": n, "detail": f"views refreshed (reactions/forwards need admin/bot)"}
 
 
+def j_subscriber_snapshot() -> dict:
+    """First-class DAILY capture of the owned channel's subscriber count -> a clean
+    ParticipantSnapshot + DailySubscriberStat roll. Decoupled from the heavy ANALYTICS
+    job so the follower time-series (weekly Joined/Left/Net) gets a real daily point
+    instead of riding on an interval collector that only fires when the process is up.
+    As a cron job it also gets boot catch-up if a day was missed."""
+    from src.services.collection.telegram_owned import snapshot_subscriber_counts
+    r = snapshot_subscriber_counts()
+    if r.get("status") == "limited":
+        return {"processed": 0, "status": "limited", "detail": f"limited: {r.get('reason')}"}
+    n = r.get("captured", 0)
+    return {"processed": n, "detail": f"captured subscriber count for {n} owned channel(s)"}
+
+
 def j_link_resolution() -> dict:
     from src.services.collection.link_resolution import LinkResolutionEngine
     n = _run_engine(LinkResolutionEngine(), "link_resolution")
@@ -373,6 +387,19 @@ def j_daily_plan() -> dict:
     from src.controllers.service import ensure_daily_ai_plan
     from src.services.analytics.periods import ist_today
     from src.db.session import session_scope
+    # Producer-before-consumer: the plan grounds on deal-dimension data
+    # (category / discount-band / price-band) that lives on normalized_posts, so
+    # normalization MUST be current first. Nothing else guarantees this ordering —
+    # a startup catch-up or an early fire can otherwise run the plan before
+    # normalization has (re)tagged posts, leaving segment_performance empty and the
+    # plan silently falling back to channel-average views with zero dimension
+    # citations (observed: a plan generated ~3 min before a NORMALIZATION_VERSION
+    # re-tag finished cited no category/discount numbers). Best-effort: a normalize
+    # failure must not take the plan dark, so swallow and plan off what exists.
+    try:
+        j_normalize_posts()
+    except Exception:
+        logger.exception("[daily_plan] pre-plan normalize failed — planning off existing data")
     with session_scope() as s:
         row = ensure_daily_ai_plan(s, ist_today())
         n = len((row.blueprint or {}).get("post_slots") or []) if row else 0
@@ -446,6 +473,7 @@ JOBS: list[Job] = [
     Job("competitor_sync", "Competitor Channel Sync", *_every_min(C.COMPETITOR_SYNC_MIN), "high", j_competitor_sync),
     Job("normalize_posts", "Post Normalizer", *_every_min(C.NORMALIZE_POSTS_MIN), "high", j_normalize_posts),
     Job("stats_refresh", "Message Statistics Refresh", *_every_min(C.STATS_REFRESH_MIN), "high", j_stats_refresh),
+    Job("subscriber_snapshot", "Subscriber Count Snapshot", *_daily(C.SUBSCRIBER_SNAPSHOT_TIME), "high", j_subscriber_snapshot),
     # Defer reading runtime settings until SchedulerRegistry.start() to avoid
     # calling get_settings() at module import time (startup/circular import issues).
     # Use the default cadence constant here; the real cadence/trigger will be applied at start().

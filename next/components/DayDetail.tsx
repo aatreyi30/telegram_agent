@@ -250,7 +250,7 @@ export function DayDetail({ start, end }: { start: string; end: string }) {
                 <CardContent className="space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground text-sm">Posts/day</span>
-                    <span className="font-semibold">{d.baseline.avg_posts_per_day.toFixed(1)} vs {d.posts}</span>
+                    <span className="font-semibold">{Math.round(d.baseline.avg_posts_per_day)} vs {d.posts}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground text-sm">Avg views</span>

@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
+  Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
@@ -15,6 +15,10 @@ function humanize(key?: string): string {
   const s = key.replace(/_/g, " ");
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
+
+// "50000" -> "50K" — a fixed-width Y-axis has no room for 5-6 digit view counts
+// (they were clipping to garbage like "0000"). Tooltip keeps the exact number.
+const compactNum = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format;
 
 function Tip({ active, payload, label, unit, countKey, countLabel = "Posts", labelFormatter }: any) {
   if (!active || !payload?.length) return null;
@@ -41,7 +45,7 @@ function Tip({ active, payload, label, unit, countKey, countLabel = "Posts", lab
   );
 }
 
-export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit, countKey, countLabel, xTickFormatter, onPointClick }: {
+export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit, countKey, countLabel, xTickFormatter, onPointClick, yDomain }: {
   data: any[]; dataKey?: string; unit?: string; secondaryKey?: string; secondaryUnit?: string; countKey?: string; countLabel?: string;
   /** Display-only formatter for axis ticks + tooltip title — `data`'s own `label` field
    * stays the raw value (so callers needing the real value, e.g. a click handler, still get it). */
@@ -49,6 +53,11 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
   /** Fires with the RAW `label` of the clicked point (pre-`xTickFormatter`) — e.g. click a
    * day on the daily views chart to drill into that day's detail. */
   onPointClick?: (rawLabel: string) => void;
+  /** Left-axis domain override. Default (omitted) starts at 0 — right for view/post counts,
+   * which are meaningfully compared against zero. A slow-moving series with a high floor
+   * (e.g. subscriber count in the tens of thousands) looks like a flat line hugging the top
+   * when forced to start at 0 — pass ["auto","auto"] to zoom into the actual data range. */
+  yDomain?: [number | string, number | string];
 }) {
   return (
     <ResponsiveContainer width="100%" height={240}>
@@ -73,9 +82,9 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} tickFormatter={xTickFormatter} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} yAxisId="left" />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} yAxisId="left" tickFormatter={compactNum} domain={yDomain} />
         {secondaryKey && (
-          <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} yAxisId="right" orientation="right" />
+          <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} yAxisId="right" orientation="right" tickFormatter={compactNum} />
         )}
         <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} labelFormatter={xTickFormatter} />} />
         <Area yAxisId="left" type="monotone" dataKey={dataKey} stroke={C1} strokeWidth={2} fill="url(#fillC1)" name={humanize(dataKey)} unit={unit} />
@@ -87,19 +96,35 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
   );
 }
 
-export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260, countKey, countLabel }: {
+export function BarsChart({ data, dataKey = "avg_views", unit = "", height = 260, countKey, countLabel, mutedKey }: {
   data: any[]; dataKey?: string; unit?: string; height?: number; countKey?: string; countLabel?: string;
+  /** When set, bars whose row has `row[mutedKey]` truthy (e.g. `below_min_n`) render faded
+   * so an under-sampled bucket never reads as a confident winner next to a well-sampled one. */
+  mutedKey?: string;
 }) {
+  // Long dimension labels (category/discount-band names) collide when drawn horizontally
+  // even with just 5 bars — angle whenever there's more than a handful, not only past 8.
+  const angled = data.length > 4;
+  // A count metric (views/posts/reactions/forwards) is always a whole number — with a small
+  // max (e.g. 2 forwards in an hour), recharts' default tick picker interpolates fractional
+  // ticks (0, 0.5, 1, 1.5, 2), which reads as nonsense for a thing you can't do half of.
+  // Percent metrics (unit === "%") genuinely need decimals (e.g. a 0.26% engagement rate).
+  const allowDecimals = unit === "%";
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+      <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: angled ? 8 : 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false}
-          interval={0} angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? "end" : "middle"}
-          height={data.length > 8 ? 60 : 30} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+          interval={0} angle={angled ? -35 : 0} textAnchor={angled ? "end" : "middle"}
+          height={angled ? 60 : 30} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44}
+          tickFormatter={compactNum} allowDecimals={allowDecimals} />
         <Tooltip content={<Tip unit={unit} countKey={countKey} countLabel={countLabel} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
-        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit} />
+        <Bar dataKey={dataKey} fill={C1} radius={[4, 4, 0, 0]} name={humanize(dataKey)} unit={unit}>
+          {mutedKey && data.map((row, i) => (
+            <Cell key={i} fillOpacity={row?.[mutedKey] ? 0.35 : 1} />
+          ))}
+        </Bar>
       </BarChart>
     </ResponsiveContainer>
   );
@@ -113,7 +138,7 @@ export function MultiLineChart({ data, series, unit = "", height = 280 }: {
       <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} tickFormatter={compactNum} />
         <Tooltip content={<Tip unit={unit} />} />
         <Legend wrapperStyle={{ fontSize: 11, color: AXIS }} />
         {series.map((s, i) => (
@@ -135,7 +160,7 @@ export function StackedBarsChart({ data, keys, unit = "", height = 280 }: {
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false}
           interval={0} angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? "end" : "middle"}
           height={data.length > 8 ? 60 : 30} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} tickFormatter={compactNum} />
         <Tooltip content={<Tip unit={unit} />} cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }} />
         <Legend wrapperStyle={{ fontSize: 11, color: AXIS }} />
         {keys.map((k, i) => (

@@ -12,6 +12,10 @@ It prepends a grounding system prompt that forbids inventing facts, and — best
 effort — records every call to ``ai_traces`` (input, output, reasoning tokens,
 latency, model, call site, channel) for evaluation and the migration.
 
+``complete`` FAILS OVER: if the primary provider errors (e.g. a transient OpenAI
+network blip) and the other provider's key is set, it retries once on that provider
+before giving up — so a single-provider outage no longer blanks the plan narrative.
+
 If the active provider has no API key it reports itself UNAVAILABLE (like every
 other external dependency) rather than failing loudly.
 """
@@ -53,6 +57,11 @@ _REASONING_HEADROOM = 2000
 # provider — "openai" alone doesn't tell you which shape the request must take.
 _REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 
+# Default model to use when we FAIL OVER to a provider (the primary's AI_MODEL only
+# names the primary's model). Keeps the fallback attempt on a sane model without a
+# second env var. ponytail: fixed defaults, add AI_FALLBACK_MODEL if you need to pin one.
+_FALLBACK_MODEL = {"openai": "gpt-4o-mini-2024-07-18", "groq": "llama-3.3-70b-versatile"}
+
 
 def is_reasoning_model(model: str) -> bool:
     return (model or "").lower().startswith(_REASONING_MODEL_PREFIXES)
@@ -86,11 +95,20 @@ class AIClient:
         self.settings = get_settings()
         self.provider = self.settings.ai_provider
         self.model = self.settings.ai_model
-        self._client = None
+        self._clients: dict = {}
+
+    def _api_key_for(self, provider: str) -> str | None:
+        return (self.settings.openai_api_key if provider == "openai"
+                else self.settings.groq_api_key)
 
     def _api_key(self) -> str | None:
-        return (self.settings.openai_api_key if self.provider == "openai"
-                else self.settings.groq_api_key)
+        return self._api_key_for(self.provider)
+
+    def _fallback_provider(self) -> str | None:
+        """The OTHER provider to fail over to when the primary errors — only if its
+        key is set. openai<->groq; None when there's no configured backup."""
+        other = "groq" if self.provider == "openai" else "openai"
+        return other if self._api_key_for(other) else None
 
     def available(self) -> tuple[bool, str | None]:
         if not self._api_key():
@@ -99,15 +117,18 @@ class AIClient:
                            "plans, AI post copy, and insights.")
         return True, None
 
-    def _get_client(self):
-        if self._client is None:
-            if self.provider == "openai":
+    def _client_for(self, provider: str):
+        if provider not in self._clients:
+            if provider == "openai":
                 from openai import OpenAI
-                self._client = OpenAI(api_key=self.settings.openai_api_key)
+                self._clients[provider] = OpenAI(api_key=self.settings.openai_api_key)
             else:
                 from groq import Groq
-                self._client = Groq(api_key=self.settings.groq_api_key)
-        return self._client
+                self._clients[provider] = Groq(api_key=self.settings.groq_api_key)
+        return self._clients[provider]
+
+    def _get_client(self):
+        return self._client_for(self.provider)
 
     @property
     def uses_reasoning(self) -> bool:
@@ -123,52 +144,73 @@ class AIClient:
             return {"max_completion_tokens": max_tokens, "reasoning_effort": effort}
         return {"max_tokens": max_tokens, "temperature": 0.3}
 
+    def _model_for(self, provider: str) -> str:
+        """The model to use on ``provider``: the configured ai_model when it IS the
+        active provider, else that provider's sane default (``_FALLBACK_MODEL``)."""
+        return self.model if provider == self.provider else _FALLBACK_MODEL[provider]
+
     def complete(self, user: str, *, system_extra: str = "", max_tokens: int = 4000,
                  effort: str = "medium", trace_call: str | None = None,
-                 channel_id: int | None = None) -> str:
+                 channel_id: int | None = None, provider: str | None = None) -> str:
         """One-shot grounded completion. Returns the text response and records a trace.
 
         OpenAI reasoning models go through the Responses API so we capture the diarized
         reasoning summary; ``effort`` maps to ``reasoning.effort`` (no-op on Groq).
-        ``trace_call``/``channel_id`` label the persisted trace row.
-        """
-        ok, reason = self.available()
-        if not ok:
-            raise AIUnavailable(reason)
-        client = self._get_client()
+        ``trace_call``/``channel_id`` label the persisted trace row. ``provider`` forces
+        a specific provider for THIS call (e.g. 'groq' for plan generation) regardless of
+        the configured default; the OTHER provider still serves as failover when its key
+        is set."""
         system = GROUNDING_SYSTEM + (("\n\n" + system_extra) if system_extra else "")
-        effort = effort if self.provider == "openai" else self.settings.ai_reasoning_effort
-        started = time.monotonic()
-        try:
-            if self.provider == "openai":
-                out, reasoning, pt, ct, rt = self._openai_complete(client, system, user,
-                                                                   max_tokens, effort)
-            else:
-                out, reasoning, pt, ct, rt = self._groq_complete(client, system, user, max_tokens)
-        except Exception as exc:
-            logger.warning("AI completion failed: %s", exc)
-            _record_trace(call=trace_call, channel_id=channel_id, provider=self.provider,
-                          model=self.model,
-                          reasoning_effort=effort if self.uses_reasoning else None,
-                          system_prompt=system, input=user, ok=0, error=str(exc),
-                          latency_ms=int((time.monotonic() - started) * 1000))
-            raise AIUnavailable(str(exc)) from exc
-        _record_trace(call=trace_call, channel_id=channel_id, provider=self.provider,
-                      model=self.model,
-                      reasoning_effort=effort if self.uses_reasoning else None,
-                      system_prompt=system, input=user, output=out, reasoning=reasoning,
-                      prompt_tokens=pt, completion_tokens=ct, reasoning_tokens=rt,
-                      latency_ms=int((time.monotonic() - started) * 1000))
-        return out
 
-    def _openai_complete(self, client, system: str, user: str, max_tokens: int, effort: str):
+        # Resolve the primary provider (optionally overridden per-call) + a failover to
+        # the other provider when its key is set. Only providers with a key are tried, so
+        # forcing 'groq' with no GROQ_API_KEY cleanly falls through to openai.
+        primary = provider or self.provider
+        other = "groq" if primary == "openai" else "openai"
+        attempts = [(p, self._model_for(p)) for p in (primary, other) if self._api_key_for(p)]
+        if not attempts:
+            key = "GROQ_API_KEY" if primary == "groq" else "OPENAI_API_KEY"
+            raise AIUnavailable(f"AI layer not configured. Set {key} in .env to enable "
+                                "plans, AI post copy, and insights.")
+
+        last_exc: Exception | None = None
+        for provider, model in attempts:
+            eff = effort if provider == "openai" else self.settings.ai_reasoning_effort
+            uses_reasoning = provider == "openai" and is_reasoning_model(model)
+            started = time.monotonic()
+            try:
+                client = self._client_for(provider)
+                if provider == "openai":
+                    out, reasoning, pt, ct, rt = self._openai_complete(
+                        client, model, system, user, max_tokens, eff)
+                else:
+                    out, reasoning, pt, ct, rt = self._groq_complete(
+                        client, model, system, user, max_tokens)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("AI completion failed (%s/%s): %s", provider, model, exc)
+                _record_trace(call=trace_call, channel_id=channel_id, provider=provider,
+                              model=model, reasoning_effort=eff if uses_reasoning else None,
+                              system_prompt=system, input=user, ok=0, error=str(exc),
+                              latency_ms=int((time.monotonic() - started) * 1000))
+                continue
+            _record_trace(call=trace_call, channel_id=channel_id, provider=provider,
+                          model=model, reasoning_effort=eff if uses_reasoning else None,
+                          system_prompt=system, input=user, output=out, reasoning=reasoning,
+                          prompt_tokens=pt, completion_tokens=ct, reasoning_tokens=rt,
+                          latency_ms=int((time.monotonic() - started) * 1000))
+            return out
+        raise AIUnavailable(str(last_exc)) from last_exc
+
+    def _openai_complete(self, client, model: str, system: str, user: str,
+                         max_tokens: int, effort: str):
         """Responses API — returns (text, reasoning_summary, prompt_tok, output_tok, reasoning_tok).
 
         Chat models (gpt-4o*, gpt-4.1*) work here too, but reject the `reasoning` param
         and need no headroom — nothing is spent thinking."""
-        kwargs = {"model": self.model, "instructions": system, "input": user,
+        kwargs = {"model": model, "instructions": system, "input": user,
                   "max_output_tokens": max_tokens}
-        if self.uses_reasoning:
+        if is_reasoning_model(model):
             kwargs["reasoning"] = {"effort": effort, "summary": "auto"}
             kwargs["max_output_tokens"] = max_tokens + _REASONING_HEADROOM
         resp = client.responses.create(**kwargs)
@@ -182,10 +224,10 @@ class AIClient:
             getattr(details, "reasoning_tokens", None) if details else None,
         )
 
-    def _groq_complete(self, client, system: str, user: str, max_tokens: int):
+    def _groq_complete(self, client, model: str, system: str, user: str, max_tokens: int):
         """Chat Completions — returns (text, None, prompt_tok, completion_tok, reasoning_tok)."""
         resp = client.chat.completions.create(
-            model=self.model, max_tokens=max_tokens, temperature=0.3,
+            model=model, max_tokens=max_tokens, temperature=0.3,
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user}],
         )

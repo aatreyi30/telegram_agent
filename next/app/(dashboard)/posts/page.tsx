@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Popover } from "@/components/ui/popover";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DateFilter } from "@/components/ui/date-range-picker";
 import { PageHeader } from "@/components/PageHeader";
 import { PagedNav } from "@/components/PagedNav";
 import { PostPreview } from "@/components/PostPreview";
@@ -28,11 +29,10 @@ import type { DraftItem, QueueItem, StrategyRationale } from "@/types/api";
 import { Plus, Edit, Trash2 } from "lucide-react";
 
 const TABS = [
-  { value: "draft", label: "Draft" },
+  { value: "all", label: "All" },
   { value: "queued", label: "Queued" },
   { value: "published", label: "Published" },
   { value: "blocked", label: "Blocked" },
-  { value: "all", label: "All" },
 ] as const;
 
 /** Normalized shape both DraftItem and QueueItem map onto, so one row/sheet renderer
@@ -154,7 +154,9 @@ function PostsInner() {
   const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
-  const tab = sp.get("status") ?? "draft";
+  // The Draft tab was removed — drafts now appear inline under "All". Default to
+  // "all" and fold any legacy ?status=draft link into it so old bookmarks still resolve.
+  const tab = (sp.get("status") ?? "all") === "draft" ? "all" : (sp.get("status") ?? "all");
   const page = Math.max(1, Number(sp.get("page") || 1));
   const date = sp.get("date") || "";
   const type = sp.get("type") || "";
@@ -164,9 +166,11 @@ function PostsInner() {
   const [editingDraft, setEditingDraft] = useState<DraftItem | null>(null);
   const deleteDraft = useDeleteDraft();
 
-  const isDraftTab = tab === "draft";
   const draftsQ = useDrafts(page);
-  const queueQ = useQueue({ page, date, type, status: (tab === "draft" || tab === "all") ? "" : tab, sort }, 15);
+  const queueQ = useQueue({ page, date, type, status: tab === "all" ? "" : tab, sort }, 15);
+  // Fold unscheduled drafts into the "All" view (top of page 1, when no date/type filter
+  // narrows to scheduled posts) so removing the Draft tab hides nothing.
+  const showDrafts = tab === "all" && page === 1 && !date && !type;
 
   function update(patch: Record<string, string>, keepPage = false) {
     const p = new URLSearchParams(sp.toString());
@@ -219,83 +223,67 @@ function PostsInner() {
         ))}
       </div>
 
-      {/* filters — only meaningful for queue-backed tabs */}
-      {!isDraftTab && (
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => update({ date: e.target.value })}
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs"
-            aria-label="Filter by date"
-          />
-          <Select value={type || "all"} onValueChange={(v) => update({ type: v === "all" ? "" : v })}>
-            <SelectTrigger className="h-9 w-[130px]" aria-label="Filter by type"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All types</SelectItem>
-              <SelectItem value="single">Single deal</SelectItem>
-              <SelectItem value="loot">Loot board</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={sort} onValueChange={(v) => update({ sort: v })}>
-            <SelectTrigger className="h-9 w-[140px]" aria-label="Sort by date"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="soonest">Soonest first</SelectItem>
-              <SelectItem value="latest">Latest first</SelectItem>
-            </SelectContent>
-          </Select>
-          {hasFilters && (
-            <Button variant="ghost" size="sm" onClick={() => update({ date: "", type: "", sort: "" })}>
-              Clear
-            </Button>
-          )}
-        </div>
-      )}
+      {/* filters */}
+      <div className="flex flex-wrap items-center gap-2">
+        <DateFilter
+          mode="single"
+          value={date}
+          onChange={(d) => update({ date: d })}
+        />
+        <Select value={type || "all"} onValueChange={(v) => update({ type: v === "all" ? "" : v })}>
+          <SelectTrigger className="h-9 w-[130px]" aria-label="Filter by type"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All types</SelectItem>
+            <SelectItem value="single">Single deal</SelectItem>
+            <SelectItem value="loot">Loot board</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={sort} onValueChange={(v) => update({ sort: v })}>
+          <SelectTrigger className="h-9 w-[140px]" aria-label="Sort by date"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="soonest">Soonest first</SelectItem>
+            <SelectItem value="latest">Latest first</SelectItem>
+          </SelectContent>
+        </Select>
+        {hasFilters && (
+          <Button variant="ghost" size="sm" onClick={() => update({ date: "", type: "", sort: "" })}>
+            Clear
+          </Button>
+        )}
+      </div>
 
-      {isDraftTab ? (
-        <Async q={draftsQ} rows={3}>
-          {(d) => {
-            const rows = d.items.map(fromDraft);
-            return rows.length ? (
-              <>
-                <p className="text-xs text-muted-foreground">{d.total} draft{d.total === 1 ? "" : "s"} total</p>
-                <PostList rows={rows} onOpen={setActive} onEdit={(r) => handleEdit(r.raw as DraftItem)} onDelete={handleDelete} />
-                <PagedNav page={d.page} pages={d.pages} onPageChange={(n) => update({ page: String(n) }, true)} />
-              </>
-            ) : (
-              <Empty>No drafts yet. The agent creates these automatically from today's plan, or click "Create draft" above.</Empty>
-            );
-          }}
-        </Async>
-      ) : (
-        <Async q={queueQ} rows={3}>
-          {(d) => {
-            const rows = d.items.map(fromQueue);
-            return (
-              <div className="space-y-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusCounts counts={d.counts} />
-                  {Object.keys(d.counts || {}).length === 0 && (
-                    <span className="text-sm text-muted-foreground">Nothing here.</span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground">{d.total} total</span>
-                </div>
-                {rows.length ? (
-                  <>
-                    <PostList rows={rows} onOpen={setActive} />
-                    <PagedNav page={d.page} pages={d.pages} onPageChange={(n) => update({ page: String(n) }, true)} />
-                  </>
-                ) : (
-                  <Empty>
-                    {hasFilters ? "No posts match these filters. Adjust or clear them."
-                      : "Nothing here yet. The agent fills each slot from your daily plan a few minutes before it fires."}
-                  </Empty>
+      <Async q={queueQ} rows={3}>
+        {(d) => {
+          // "All" folds the unscheduled drafts in at the top (page 1, no date/type filter);
+          // each draft row keeps source:"draft" so PostList still shows its edit/delete.
+          const draftRows = showDrafts && draftsQ.data ? draftsQ.data.items.map(fromDraft) : [];
+          const rows = [...draftRows, ...d.items.map(fromQueue)];
+          const draftTotal = showDrafts && draftsQ.data ? draftsQ.data.total : 0;
+          const counts = draftTotal ? { draft: draftTotal, ...d.counts } : d.counts;
+          return (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusCounts counts={counts} />
+                {Object.keys(counts || {}).length === 0 && (
+                  <span className="text-sm text-muted-foreground">Nothing here.</span>
                 )}
+                <span className="ml-auto text-xs text-muted-foreground">{d.total + draftTotal} total</span>
               </div>
-            );
-          }}
-        </Async>
-      )}
+              {rows.length ? (
+                <>
+                  <PostList rows={rows} onOpen={setActive} onEdit={(r) => handleEdit(r.raw as DraftItem)} onDelete={handleDelete} />
+                  <PagedNav page={d.page} pages={d.pages} onPageChange={(n) => update({ page: String(n) }, true)} />
+                </>
+              ) : (
+                <Empty>
+                  {hasFilters ? "No posts match these filters. Adjust or clear them."
+                    : "Nothing here yet. The agent fills each slot from your daily plan a few minutes before it fires."}
+                </Empty>
+              )}
+            </div>
+          );
+        }}
+      </Async>
 
       {/* row detail drawer */}
       <Sheet open={!!active} onOpenChange={(o) => !o && setActive(null)}>

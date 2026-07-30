@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Iterator
+
+# SQLite allows exactly one writer at a time; with the scheduler's many jobs plus live
+# API traffic all opening sessions, concurrent commits were racing for SQLite's lock and
+# occasionally losing even with a 30s busy_timeout. Serializing writers in Python means
+# they queue here instead of colliding at the SQLite layer. RLock so a session_scope
+# call nested inside another one (same thread) doesn't deadlock itself.
+_write_lock = threading.RLock()
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -56,15 +64,16 @@ def get_sessionmaker() -> sessionmaker[Session]:
 @contextmanager
 def session_scope() -> Iterator[Session]:
     """Transactional session context — commit on success, rollback on error."""
-    session = get_sessionmaker()()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    with _write_lock:
+        session = get_sessionmaker()()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
 
 def init_db() -> None:

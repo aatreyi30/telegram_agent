@@ -120,10 +120,32 @@ export function useRegenerateDailyPlan() {
     },
   });
 }
+// Revert the last steer — restore the pre-steer daily plan (no AI call).
+export function useRevertDailyPlan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { date?: string }) => api.post<DailyBrief>("/plan/daily/revert", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.dailyBriefAll() });
+      qc.invalidateQueries({ queryKey: queryKeys.retroLatestAll() });
+    },
+  });
+}
 export function useRegenerateWeeklyPlan() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: { end?: string; directive?: string }) => api.post<WeeklyBrief>("/plan/weekly/regenerate", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.weeklyBriefAll() });
+      qc.invalidateQueries({ queryKey: queryKeys.retroLatestAll() });
+    },
+  });
+}
+// Revert the last steer — restore the pre-steer weekly plan (no AI call).
+export function useRevertWeeklyPlan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { end?: string }) => api.post<WeeklyBrief>("/plan/weekly/revert", body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.weeklyBriefAll() });
       qc.invalidateQueries({ queryKey: queryKeys.retroLatestAll() });

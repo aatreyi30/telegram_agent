@@ -18,7 +18,8 @@ import { cn } from "@/lib/utils";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DateFilter } from "@/components/ui/date-range-picker";
 import { useQueryParams } from "@/lib/use-search-params";
-import { postTypeLabel, merchantLabel, istDate } from "@/lib/format";
+import { postTypeLabel, merchantLabel, categoryLabel, istDate } from "@/lib/format";
+import type { DealGapRow, DimensionCoverage } from "@/types/api";
 
 function minusDays(iso: string, days: number): string {
   const d = new Date(iso + "T00:00:00Z");
@@ -41,6 +42,86 @@ function fmtCompact(n: number | null | undefined): string {
   return n.toLocaleString();
 }
 
+// deal_gap shares/gap are fractions (0-1) from the backend, unlike the rest of this
+// page's already-percent fields — convert here, at the point of display.
+function fmtShare(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "—";
+  return `${Math.round(n * 1000) / 10}%`;
+}
+
+// "categorized 118 of 375 posts (31%)" — the two sides of a deal-gap comparison are
+// categorized at different rates (category is matched from each post's own text, and
+// competitor posts are often sparsely-captioned forwards, so fewer of them hit a category
+// keyword than owned posts' fuller copy), so the gap is not like-for-like unless both
+// coverages are stated. Guards total === 0.
+function coverageLabel(cov: DimensionCoverage | undefined): string {
+  const categorized = cov?.categorized ?? 0;
+  const total = cov?.total ?? 0;
+  const pct = total > 0 ? Math.round((categorized / total) * 100) : 0;
+  return `categorized ${categorized} of ${total} posts (${pct}%)`;
+}
+
+function DealGapCard({ rows, windowDays, minN, ownedCoverage, competitorCoverage }: {
+  rows: DealGapRow[]; windowDays: number; minN: number;
+  ownedCoverage?: DimensionCoverage; competitorCoverage?: DimensionCoverage;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="mb-2 h-1 w-10 rounded-full bg-gradient-to-r from-primary to-primary/50" />
+        <CardTitle className="text-base">Deal-gap — what rivals win with that we're absent from</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Share of posts per category, us vs tracked competitors, over the last {windowDays} days.
+          Only categories with at least {minN} competitor posts are shown.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Us: {coverageLabel(ownedCoverage)} · Competitors: {coverageLabel(competitorCoverage)} —
+          the two sides are categorized at different rates, so this gap is not a clean like-for-like comparison.
+        </p>
+      </CardHeader>
+      <CardContent className="p-0">
+        {rows.length ? (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Category</TableHead>
+                  <TableHead>Our share</TableHead>
+                  <TableHead>Their share</TableHead>
+                  <TableHead>Gap</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((r) => (
+                  <TableRow key={r.category} className={cn("hover:bg-muted/50", r.over_indexed_by_competitors && "bg-amber-500/10")}>
+                    <TableCell className="font-medium">
+                      <div className="flex items-center gap-2">
+                        <span>{categoryLabel(r.category)}</span>
+                        {r.over_indexed_by_competitors && (
+                          <Badge variant="warning" className="text-[10px] font-normal">Competitors over-index</Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="tabular-nums text-xs text-muted-foreground">{fmtShare(r.owned_share)} ({r.owned_n})</TableCell>
+                    <TableCell className="tabular-nums text-xs text-muted-foreground">{fmtShare(r.competitor_share)} ({r.competitor_n})</TableCell>
+                    <TableCell className={cn("tabular-nums font-medium", r.gap > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
+                      {r.gap >= 0 ? "+" : ""}{fmtShare(r.gap)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ) : (
+          <p className="p-10 text-center text-sm text-muted-foreground">
+            Not enough data yet — a category needs at least {minN} competitor posts in this window to show a gap.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 /**
  * A just-added competitor has no `last_collected_at`-style field on this response yet (the
  * comparison entities below never expose it), so we treat "no posts observed" as a proxy for
@@ -57,36 +138,57 @@ function ProcessingBadge({ e }: { e: CompetitorEntity }) {
 }
 
 /**
- * "You 2.1/day · Them 5.3/day (+3.2)" — the diff is a plain subtraction (their posts_per_day
+ * "You 2/day · Them 5/day (+3)" — the diff is a plain subtraction (their posts_per_day
  * minus ours), never a ratio of the delta over our own (often small) value. That ratio pattern
  * was removed because dividing by a small "owned" denominator produces misleadingly huge %s.
+ *
+ * You / Them / delta ALL come from the benchmark row so they share ONE window and always
+ * reconcile (Them − You = delta). The entity's full-span `posts_per_day` is a DIFFERENT
+ * window — mixing it in produced rows like "You 38 · Them 212 (+27)" where 38+27≠212.
+ * We only fall back to the full-span rate when there's no benchmark (and then show no delta).
  */
 function PostsPerDayCell({ e }: { e: CompetitorEntity }) {
-  const theirs = e.posts_per_day;
-  if (theirs == null) return <span className="text-muted-foreground">—</span>;
   const bench = (e.benchmarks ?? []).find((b) => b.dimension === "posts_per_day");
+  const theirs = bench?.competitor_value ?? e.posts_per_day;
+  if (theirs == null) return <span className="text-muted-foreground">—</span>;
   const yours = bench?.owned_value;
-  const delta = bench?.delta;
+  // Derive the shown delta from the SHOWN (rounded) You/Them so it always adds up on
+  // screen — rounding the raw delta separately left rows like "You 40 · Them 19 (-20)"
+  // where 19-40 reads as -21. When there's no owned value, fall back to the raw delta.
+  const shownThem = Math.round(theirs);
+  const shownYou = yours != null ? Math.round(yours) : null;
+  const delta = shownYou != null && bench?.delta != null ? shownThem - shownYou : bench?.delta ?? null;
   return (
-    <span className="text-xs whitespace-nowrap">
-      {yours != null && <span className="text-muted-foreground">You {yours.toFixed(1)}/day · </span>}
-      <span>Them {theirs.toFixed(1)}/day</span>
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      <span className="text-sm font-semibold text-foreground tabular-nums">
+        {shownThem}<span className="ml-0.5 text-xs font-normal text-muted-foreground">/day</span>
+      </span>
+      {delta != null && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              className={cn(
+                "rounded-full px-1.5 py-0.5 text-[10px] font-medium cursor-help",
+                delta > 0 ? "bg-emerald-500/10 text-emerald-600" :
+                delta < 0 ? "bg-red-500/10 text-red-600" : "bg-muted text-muted-foreground",
+              )}
+            >
+              {delta >= 0 ? "+" : ""}{Math.round(delta)}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            {shownYou != null
+              ? `${delta >= 0 ? "+" : ""}${Math.round(delta)} vs your ${shownYou}/day`
+              : `${delta >= 0 ? "+" : ""}${Math.round(delta)} vs your average`}
+          </TooltipContent>
+        </Tooltip>
+      )}
       {e.window_mismatch && (
         <span
-          className="ml-1 text-amber-600 dark:text-amber-400"
+          className="text-amber-600 dark:text-amber-400"
           title="These are computed over very different observation windows (e.g. your months of history vs their few days tracked) — not a like-for-like comparison."
         >
           ⚠
-        </span>
-      )}
-      {delta != null && (
-        <span
-          className={cn(
-            "ml-1 font-medium",
-            delta > 0 ? "text-emerald-600" : delta < 0 ? "text-red-600" : "text-muted-foreground",
-          )}
-        >
-          ({delta >= 0 ? "+" : ""}{delta.toFixed(1)})
         </span>
       )}
     </span>
@@ -135,7 +237,13 @@ function CompetitorsTable({ entities }: { entities: CompetitorEntity[] }) {
               <TableCell className="tabular-nums">{fmtCompact(e.subscribers)}</TableCell>
               <TableCell><PostsPerDayCell e={e} /></TableCell>
               <TableCell className="tabular-nums">{fmtNum(e.posts)}</TableCell>
-              <TableCell className="tabular-nums">{fmtNum(e.avg_views_per_post)}</TableCell>
+              <TableCell className="tabular-nums">
+                {e.avg_views_reliable === false ? (
+                  <span className="text-muted-foreground" title="Views weren't captured reliably for this channel (placeholder/implausible counts), so the average isn't shown.">—</span>
+                ) : (
+                  fmtNum(e.avg_views_per_post)
+                )}
+              </TableCell>
             </TableRow>
           ))}
           {entities.length === 0 && (
@@ -254,7 +362,7 @@ export default function CompetitorDashboardPage() {
 
           const rankingData = [...entities]
             .sort((a: any, b: any) => (b.posts_per_day ?? 0) - (a.posts_per_day ?? 0))
-            .map((e: any) => ({ label: e.name, posts_per_day: e.posts_per_day ?? 0 }));
+            .map((e: any) => ({ label: e.name, posts_per_day: Math.round(e.posts_per_day ?? 0) }));
 
           const coverageData = entities.map((e: any) => ({
             label: e.name, coverage: Math.round((e.merchant_coverage ?? 0) * 1000) / 10,
@@ -294,6 +402,9 @@ export default function CompetitorDashboardPage() {
                   <CompetitorsTable entities={entities} />
                 </CardContent>
               </Card>
+
+              <DealGapCard rows={d.deal_gap?.rows ?? []} windowDays={d.deal_gap?.window_days ?? 30} minN={d.deal_gap?.min_competitor_n ?? 0}
+                ownedCoverage={d.deal_gap?.owned_coverage} competitorCoverage={d.deal_gap?.competitor_coverage} />
 
               {dealTypes.length > 0 && entities.length >= 2 && (
                 <Card>

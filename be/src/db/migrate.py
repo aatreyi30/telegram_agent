@@ -51,7 +51,14 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
     "growth_strategies": [("channel_id", "INTEGER")],
     "growth_recommendations": [("channel_id", "INTEGER")],
     "reasoned_insights": [("channel_id", "INTEGER")],
-    "normalized_posts": [("channel_id", "INTEGER")],
+    "normalized_posts": [
+        ("channel_id", "INTEGER"),
+        # deal-dimension extraction (deal-dimension-intelligence spec)
+        ("category", "VARCHAR(32)"),
+        ("discount_pct", "FLOAT"),
+        ("discount_band", "VARCHAR(16)"),
+        ("price_band", "VARCHAR(16)"),
+    ],
     "competitors": [
         ("category", "VARCHAR(16)"),
         ("resolution_confidence", "FLOAT"),
@@ -71,6 +78,9 @@ _ADDITIONS: dict[str, list[tuple[str, str]]] = {
     # spans more than one calendar day (a collection outage), so it's never silently
     # read as "one day's growth".
     "daily_subscriber_stats": [("spans_days", "INTEGER DEFAULT 1")],
+    # idempotency: the Telegram message id of a successful send, so a retry after a lost
+    # status write never re-sends (double-post guard).
+    "generated_posts": [("telegram_message_id", "INTEGER")],
 }
 
 

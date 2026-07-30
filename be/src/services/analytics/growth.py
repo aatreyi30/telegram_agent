@@ -129,6 +129,27 @@ def compute_growth(
         }
         for r in rows
     ]
+    # When the window's first row is itself a gap catch-up (spans_days > 1), the chart
+    # otherwise starts mid-jump — the subscriber count already landed at its post-gap
+    # level with no visible climb, which reads as "stagnant" even though a real, large
+    # change happened just before the window. Prepend the actual last-known point BEFORE
+    # the gap (a real historical DailySubscriberStat row, not an inferred value) so the
+    # chart can draw that real jump instead of hiding it. joined/left/net stay None here
+    # (not part of this window's totals — the anchor is for chart continuity only).
+    if (rows[0].spans_days or 1) > 1:
+        pre_gap = s.scalar(
+            select(DailySubscriberStat)
+            .where(DailySubscriberStat.channel_id == channel_id,
+                   DailySubscriberStat.stat_date < rows[0].stat_date)
+            .order_by(DailySubscriberStat.stat_date.desc())
+        )
+        if pre_gap is not None:
+            daily.insert(0, {
+                "date": pre_gap.stat_date.isoformat(),
+                "subs_end": pre_gap.subs_end,
+                "joined": None, "left": None, "net": None,
+                "spans_days": 1, "is_gap_anchor": True,
+            })
 
     return {
         "available": True,

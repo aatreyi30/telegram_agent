@@ -43,7 +43,10 @@ def _owned_window_desc(s: Session) -> str:
     return f"owned, last {w['months']} mo"
 
 
-def reasoning_insights(s: Session) -> list[dict]:
+def reasoning_insights(s: Session, limit: int = 10) -> list[dict]:
+    """Highest-confidence insights first, capped like growth_recommendations() — this fed
+    an UNBOUNDED number of rows into every AI prompt (daily + weekly), a real contributor
+    to the weekly plan's Groq 413 "request too large" errors as insights accumulated."""
     return [{"metric": i.metric, "direction": i.direction,
              "change": i.change_value, "unit": i.change_unit,
              "observation": i.observation, "why": i.reasoning,
@@ -51,7 +54,7 @@ def reasoning_insights(s: Session) -> list[dict]:
              "confidence": i.confidence}
             for i in s.scalars(select(ReasonedInsight).where(
                 ReasonedInsight.reasoning_version == REASONING_VERSION)
-                .order_by(ReasonedInsight.confidence.desc()))]
+                .order_by(ReasonedInsight.confidence.desc()).limit(limit))]
 
 
 def growth_recommendations(s: Session, limit: int = 8) -> list[dict]:
@@ -75,7 +78,8 @@ def growth_blueprint(s: Session) -> dict:
 
 def post_type_performance(s: Session) -> list[dict]:
     return [{"post_type": p.post_type, "posts": p.post_count, "share": p.share,
-             "avg_views_per_day": p.avg_views_per_day, "rank": p.rank_by_views_per_day}
+             "avg_views_per_day": p.avg_views_per_day, "avg_views": p.avg_views,
+             "avg_views_per_post": p.avg_views, "rank": p.rank_by_views_per_day}
             for p in s.scalars(select(PostTypePerformance)
                 .where(PostTypePerformance.learning_version == LEARNING_VERSION)
                 .order_by(PostTypePerformance.rank_by_views_per_day))]
@@ -119,16 +123,24 @@ def post_type_performance_range(s: Session, start, end) -> list[dict]:
     out = []
     for descriptor, items in groups.items():
         vpd = []
+        raw_views = []
         for posted_at, views in items:
             if views is None or posted_at is None:
                 continue
+            raw_views.append(views)
             pa = posted_at if posted_at.tzinfo else posted_at.replace(tzinfo=timezone.utc)
             age = max((now - pa).total_seconds() / 86400.0, 1.0)
             vpd.append(views / age)
+        # Real per-post mean of raw view counts in THIS window (the intuitive "avg
+        # views/post"), alongside the age-confounded per-day velocity. Both keys mirror
+        # the snapshot's `post_type_performance` shape so callers can swap window-scoped
+        # for all-time freely (the Plan page's deal-type table now uses this per date).
+        avg_vpp = round(statistics.fmean(raw_views), 1) if raw_views else None
         out.append({
             "post_type": descriptor, "posts": len(items),
             "share": round(len(items) / total, 3),
             "avg_views_per_day": round(statistics.fmean(vpd), 1) if vpd else None,
+            "avg_views": avg_vpp, "avg_views_per_post": avg_vpp,
         })
     out.sort(key=lambda r: (r["avg_views_per_day"] or -1), reverse=True)
     for i, r in enumerate(out):
@@ -163,6 +175,15 @@ def channel_style(s: Session) -> dict:
             "coupon_rate": st.coupon_rate, "multi_deal_rate": st.multi_deal_rate,
             "media_rate": st.media_rate, "posts_per_day": st.posts_per_day,
             "top_hours_ist": st.top_hours_ist}
+
+
+def segment_performance(s: Session) -> dict:
+    """Top/bottom categories and discount bands by engagement rate — dimension-
+    level evidence (deal-dimension-intelligence AC5) so the daily plan can cite
+    a category/discount-band number instead of restating the channel average."""
+    from src.services.analytics import views as vv
+
+    return vv.segment_performance(s)
 
 
 def merchant_profiles(s: Session) -> list[dict]:
@@ -301,13 +322,23 @@ def available_deals(s: Session, limit: int = 15) -> list[dict]:
                 if len(picked) >= limit:
                     break
 
-    return [{"deal_id": d.deal_id, "title": d.title, "merchant_key": d.merchant_key,
+    # NOTE: deliberately no `url`/`deal_id` — every caller (build_plan_context's AI
+    # prompt, the regex/steer feed-vocabulary lookups) only reads merchant_key/category/
+    # title/price. The AI's plan never echoes a specific deal back (its slot schema is
+    # type/time/theme/merchant/why, no deal reference) — jit_fill matches a real deal to
+    # each slot fresh, by merchant+category, at actual post time, not from anything shown
+    # here. Affiliate URLs are long, so `url` alone was ~8,000 of the daily prompt's
+    # ~10,900 DATA tokens.
+    return [{"title": d.title, "merchant_key": d.merchant_key,
              "category": d.category, "current_price": d.current_price,
-             "discount_percent": d.discount_percent, "url": d.clean_url or d.url} for d in picked]
+             "discount_percent": d.discount_percent} for d in picked]
 
 
-def full_briefing_context(s: Session, weekly: bool = False) -> dict:
-    """Everything the briefing generator needs, as one grounded bundle."""
+def full_briefing_context(s: Session, weekly: bool = False, end_day=None) -> dict:
+    """Everything the briefing generator needs, as one grounded bundle. ``end_day``
+    anchors the weekly 7-day window (defaults to the latest owned day) so the AI
+    narrative describes the SAME trailing week the UI table shows — passing it keeps
+    the digest, the table, and the WEEK_START label from drifting apart."""
     out = {
         "channel": channel_overview(s),
         "what_changed_and_why": reasoning_insights(s),
@@ -322,9 +353,35 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
 
         from src.services.analytics.daily_report import _owned_channel
 
-        traj = posting_trajectory(s, days=7)
+        traj = posting_trajectory(s, days=7, end_day=end_day)
         week_start = _date.fromisoformat(traj["days"][0]["date"]) if traj["days"] else None
         end_day = _date.fromisoformat(traj["days"][-1]["date"]) if traj["days"] else None
+        # Window the per-post type benchmark to the same 30 days the DAILY plan uses, so the
+        # weekly narrative's "single X vs loot Y per post" matches the daily table (both
+        # windowed) instead of the all-time snapshot — which said 779/569 while the daily
+        # showed 526/518, contradicting each other on the same metric.
+        if end_day is not None:
+            from datetime import timedelta as _td
+
+            from src.services.analytics.periods import ist_day_bounds_utc as _ib
+            _pw = post_type_performance_range(s, _ib(end_day - _td(days=29))[0], _ib(end_day)[1])
+            if _pw:
+                out["post_type_performance"] = _pw
+        # The real 7-day per-day series (posts + views) — the SAME numbers the weekly UI
+        # shows — so the narrative grounds on actual days ("37 posts Wed, 542 views")
+        # instead of computing a fabricated "43 posts/day". `views_still_maturing` flags
+        # the last ~3-4 days, whose posts are still accumulating views (their avg understates
+        # and is NOT a real dip); the narrative must not read those as a performance drop.
+        out["week_trajectory"] = [
+            {"date": d["date"], "posts": d["posts"],
+             "total_views": round(d.get("views") or 0),
+             "avg_views_per_post": round(d.get("views_avg") or 0),
+             "views_still_maturing": bool(end_day) and (end_day - _date.fromisoformat(d["date"])).days <= 3}
+            for d in traj["days"]]
+        out["week_totals"] = {
+            "posts": sum(d["posts"] for d in traj["days"]),
+            "total_views": round(sum((d.get("views") or 0) for d in traj["days"])),
+        }
         out["prev_week_digest"] = prev_week_digest(s, week_start) if week_start else None
         ch = _owned_channel(s)
         out["follower_deltas"] = (
@@ -338,7 +395,11 @@ def full_briefing_context(s: Session, weekly: bool = False) -> dict:
 
 
 def to_json(data: dict | list) -> str:
-    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+    """Compact (no pretty-print indent) — this only ever feeds an LLM prompt (grep confirms
+    every call site is in ai/*.py building a prompt, never rendered for a human), so the
+    indent whitespace was pure wasted tokens. Cuts ~30% off every AI call's input size —
+    the weekly plan's Groq 413 "request too large" errors were partly this."""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 _REPORT_NUMERIC = (
@@ -554,8 +615,16 @@ def latest_retro(s: Session) -> dict | None:
 def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_day) -> dict[str, dict]:
     """Per-IST-day joined/left/net follower counts for `channel_id` over
     [start_day, end_day], keyed by ISO date — drops in alongside `posting_trajectory`'s
-    day series for the weekly view. Days with no `DailySubscriberStat` row are simply
-    absent from the result (the caller decides the gap-fill default)."""
+    day series for the weekly view. Days with no delta are simply absent (the caller
+    gap-fills to zero).
+
+    Subscriber counts are captured SPARSELY (only when a snapshot lands — often days
+    apart), so per-day joined/left/net simply doesn't exist for uncaptured days. We do
+    NOT invent it (a dumped delta reads as a fake 1-day spike; a spread reads as fake
+    identical days). We return ONLY the days we actually measured, with their real
+    values; the caller marks every other day "not measured" (null), never zero. Note a
+    captured net is the change since the PREVIOUS capture, so after a long gap it covers
+    several days — real, just not a single day's gain."""
     from src.db.models_growth_snapshot import DailySubscriberStat
 
     if channel_id is None:
@@ -568,7 +637,13 @@ def follower_deltas_by_day(s: Session, channel_id: int | None, start_day, end_da
     ).all()
     return {r.stat_date.isoformat(): {"joined": r.subs_joined or 0,
                                        "left": r.subs_left or 0,
-                                       "net": r.subs_net or 0}
+                                       "net": r.subs_net or 0,
+                                       # How many days this captured delta actually
+                                       # covers: >1 means it's the net since the previous
+                                       # snapshot (a gap), NOT a single day's gain. The
+                                       # weekly briefing drops these so a 14-day catch-up
+                                       # (e.g. +1964) can't be cited as a one-day spike.
+                                       "spans_days": getattr(r, "spans_days", None) or 1}
             for r in rows}
 
 
@@ -695,10 +770,15 @@ def style_follower_correlation(s: Session, days: int = 14, end_day=None) -> dict
     rows = []
     for d in style_days:
         fd = deltas.get(d["date"]) or {}
+        # A gap-spanning capture (spans_days > 1) is the net SINCE the last snapshot, not
+        # one day's change — attributing a multi-day catch-up (e.g. +1964 over 14 days) to
+        # a single day both corrupts this day-level correlation and lets the narrative cite
+        # it as a one-day win. Treat such a day as unmeasured for followers.
+        reliable = (fd.get("spans_days") or 1) <= 1
         rows.append({**d,
-                     "followers_joined": fd.get("joined"),
-                     "followers_left": fd.get("left"),
-                     "followers_net": fd.get("net")})
+                     "followers_joined": fd.get("joined") if reliable else None,
+                     "followers_left": fd.get("left") if reliable else None,
+                     "followers_net": fd.get("net") if reliable else None})
 
     paired = [r for r in rows if r.get("posts") and r.get("followers_net") is not None]
     comparisons = [c for c in (_style_follower_split(paired, f)

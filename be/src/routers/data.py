@@ -190,11 +190,23 @@ def plan_daily_regenerate(user: dict = Depends(require_role("editor")),
     return ok(service.regenerate_daily(date=date, directive=directive))
 
 
+@router.post("/plan/daily/revert")
+def plan_daily_revert(user: dict = Depends(require_role("editor")),
+                      date: str | None = Body(None, embed=True)):
+    return ok(service.revert_daily(date=date))
+
+
 @router.post("/plan/weekly/regenerate")
 def plan_weekly_regenerate(user: dict = Depends(require_role("editor")),
                            end: str | None = Body(None, embed=True),
                            directive: str | None = Body(None, embed=True)):
     return ok(service.regenerate_weekly(end=end, directive=directive))
+
+
+@router.post("/plan/weekly/revert")
+def plan_weekly_revert(user: dict = Depends(require_role("editor")),
+                       end: str | None = Body(None, embed=True)):
+    return ok(service.revert_weekly(end=end))
 
 
 @router.get("/weekly")

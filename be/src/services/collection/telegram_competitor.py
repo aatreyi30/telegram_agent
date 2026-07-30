@@ -84,17 +84,25 @@ class CompetitorCollector(BaseCollector):
     async def _run_telethon(self, comp_id: int, job_id: int) -> CollectorResult | None:
         from telethon import TelegramClient
         from telethon.errors import UsernameNotOccupiedError, FloodWaitError
+        from src.shared.telegram import SESSION_LOCK
 
         if not (self.settings.telegram_api_id and self.settings.telegram_api_hash):
             return None
 
+        # Serialize on the process-wide Telegram session lock (shared with owned sync
+        # and the publisher via src/shared/telegram.py): the Telethon .session is one
+        # SQLite file that cannot be opened by two clients at once. Used directly here
+        # rather than the telegram_session() context manager so the existing
+        # FloodWait/Exception handling below stays put. connect() is inside the try so
+        # a "database is locked" on connect still disconnects and releases the lock.
+        SESSION_LOCK.acquire()
         client = TelegramClient(
             self.settings.telegram_session_name,
             self.settings.telegram_api_id,
             self.settings.telegram_api_hash,
         )
-        await client.connect()
         try:
+            await client.connect()
             if not await client.is_user_authorized():
                 logger.debug("[competitor:telethon] session not authorised — skipping Telethon")
                 return None
@@ -143,7 +151,12 @@ class CompetitorCollector(BaseCollector):
             logger.debug("[competitor:telethon] error for %r: %s", self.username, exc)
             return None
         finally:
-            await client.disconnect()
+            try:
+                dc = client.disconnect()
+                if dc is not None:
+                    await dc
+            finally:
+                SESSION_LOCK.release()
 
     async def _resolve_get_entity(self, client):
         """Try to get the Telegram entity for ``self.username``.
