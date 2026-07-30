@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Popover } from "@/components/ui/popover";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DateFilter } from "@/components/ui/date-range-picker";
 import { PageHeader } from "@/components/PageHeader";
 import { PagedNav } from "@/components/PagedNav";
 import { PostPreview } from "@/components/PostPreview";
@@ -224,12 +225,10 @@ function PostsInner() {
 
       {/* filters */}
       <div className="flex flex-wrap items-center gap-2">
-        <input
-          type="date"
+        <DateFilter
+          mode="single"
           value={date}
-          onChange={(e) => update({ date: e.target.value })}
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs"
-          aria-label="Filter by date"
+          onChange={(d) => update({ date: d })}
         />
         <Select value={type || "all"} onValueChange={(v) => update({ type: v === "all" ? "" : v })}>
           <SelectTrigger className="h-9 w-[130px]" aria-label="Filter by type"><SelectValue /></SelectTrigger>

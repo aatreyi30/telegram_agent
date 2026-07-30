@@ -159,25 +159,36 @@ function PostsPerDayCell({ e }: { e: CompetitorEntity }) {
   const shownYou = yours != null ? Math.round(yours) : null;
   const delta = shownYou != null && bench?.delta != null ? shownThem - shownYou : bench?.delta ?? null;
   return (
-    <span className="text-xs whitespace-nowrap">
-      {shownYou != null && <span className="text-muted-foreground">You {shownYou}/day · </span>}
-      <span>Them {shownThem}/day</span>
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      <span className="text-sm font-semibold text-foreground tabular-nums">
+        {shownThem}<span className="ml-0.5 text-xs font-normal text-muted-foreground">/day</span>
+      </span>
+      {delta != null && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              className={cn(
+                "rounded-full px-1.5 py-0.5 text-[10px] font-medium cursor-help",
+                delta > 0 ? "bg-emerald-500/10 text-emerald-600" :
+                delta < 0 ? "bg-red-500/10 text-red-600" : "bg-muted text-muted-foreground",
+              )}
+            >
+              {delta >= 0 ? "+" : ""}{Math.round(delta)}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            {shownYou != null
+              ? `${delta >= 0 ? "+" : ""}${Math.round(delta)} vs your ${shownYou}/day`
+              : `${delta >= 0 ? "+" : ""}${Math.round(delta)} vs your average`}
+          </TooltipContent>
+        </Tooltip>
+      )}
       {e.window_mismatch && (
         <span
-          className="ml-1 text-amber-600 dark:text-amber-400"
+          className="text-amber-600 dark:text-amber-400"
           title="These are computed over very different observation windows (e.g. your months of history vs their few days tracked) — not a like-for-like comparison."
         >
           ⚠
-        </span>
-      )}
-      {delta != null && (
-        <span
-          className={cn(
-            "ml-1 font-medium",
-            delta > 0 ? "text-emerald-600" : delta < 0 ? "text-red-600" : "text-muted-foreground",
-          )}
-        >
-          ({delta >= 0 ? "+" : ""}{Math.round(delta)})
         </span>
       )}
     </span>

@@ -45,7 +45,7 @@ function Tip({ active, payload, label, unit, countKey, countLabel = "Posts", lab
   );
 }
 
-export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit, countKey, countLabel, xTickFormatter, onPointClick }: {
+export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondaryKey, secondaryUnit, countKey, countLabel, xTickFormatter, onPointClick, yDomain }: {
   data: any[]; dataKey?: string; unit?: string; secondaryKey?: string; secondaryUnit?: string; countKey?: string; countLabel?: string;
   /** Display-only formatter for axis ticks + tooltip title — `data`'s own `label` field
    * stays the raw value (so callers needing the real value, e.g. a click handler, still get it). */
@@ -53,6 +53,11 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
   /** Fires with the RAW `label` of the clicked point (pre-`xTickFormatter`) — e.g. click a
    * day on the daily views chart to drill into that day's detail. */
   onPointClick?: (rawLabel: string) => void;
+  /** Left-axis domain override. Default (omitted) starts at 0 — right for view/post counts,
+   * which are meaningfully compared against zero. A slow-moving series with a high floor
+   * (e.g. subscriber count in the tens of thousands) looks like a flat line hugging the top
+   * when forced to start at 0 — pass ["auto","auto"] to zoom into the actual data range. */
+  yDomain?: [number | string, number | string];
 }) {
   return (
     <ResponsiveContainer width="100%" height={240}>
@@ -77,7 +82,7 @@ export function TimelineChart({ data, dataKey = "avg_views", unit = "", secondar
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="label" tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={40} tickFormatter={xTickFormatter} />
-        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} yAxisId="left" tickFormatter={compactNum} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} yAxisId="left" tickFormatter={compactNum} domain={yDomain} />
         {secondaryKey && (
           <YAxis tick={{ fill: AXIS, fontSize: 11 }} tickLine={false} axisLine={false} width={44} yAxisId="right" orientation="right" tickFormatter={compactNum} />
         )}
