@@ -721,6 +721,31 @@ def _active_event_ramp_for(s, day):
     return (wk.blueprint or {}).get("event_ramp") if wk else None
 
 
+def _weekly_posts_per_day_for(s, day):
+    """The weekly plan's ``posts_per_day`` (see CampaignPlanningEngine._weekly_plan)
+    from the persisted WEEKLY plan whose date range actually CONTAINS ``day`` — None
+    if there's no weekly plan for that week.
+
+    Same range-scoped read-only lookup as ``_active_event_ramp_for``, applied to the
+    BASE cadence instead of the event ramp: daily and weekly compute posts/day with
+    the exact same formula (the 14-day active-day median), but independently and at
+    whatever moment each was last generated — normally harmless since it's the same
+    math over the same data, but a stale weekly regenerate (or vice versa) used to
+    leave the two pages silently showing different numbers for the same day (seen
+    live: daily 39, weekly 35). Daily now reads weekly's number as the single source
+    of truth once a weekly plan exists, falling back to its own live computation only
+    when none does (cold start / no weekly plan generated yet)."""
+    from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
+    wk = s.scalar(
+        select(CampaignPlan)
+        .where(CampaignPlan.campaign_version == CAMPAIGN_VERSION,
+               CampaignPlan.plan_type == PlanType.WEEKLY,
+               CampaignPlan.target_date <= day,
+               CampaignPlan.end_date >= day)
+        .order_by(CampaignPlan.generated_at.desc()))
+    return (wk.blueprint or {}).get("posts_per_day") if wk else None
+
+
 def _today_details(s, recommended_posts: int, day=None):
     """Deterministic 'today' details (posting windows, deal-type allocation, merchant
     mix, risks) sized to ``recommended_posts``, reusing the campaign engine's pure
@@ -1120,10 +1145,21 @@ def daily_brief(date: str | None = None, directive: str | None = None,
         yesterday = ctx.daily_report_or_live(s, prev)
         traj = ctx.posting_trajectory(s, days=14, end_day=prev)
         recommended = traj["recent_cadence"]
-        # The TRUE observed baseline (never ramped) — kept separate so the cadence
-        # explanation ("your last N active days ran ~X/day") always states a real
-        # historical fact, never the event-boosted target. See _det_why below.
+        # The TRUE observed baseline (never realigned/ramped) — kept separate so the
+        # cadence explanation ("your last N active days ran ~X/day") always states a
+        # real historical fact about what actually happened, never a target number.
+        # See _det_why below.
         baseline_recommended = recommended
+        # Align to the weekly plan's posts_per_day (single source of truth) once one
+        # exists, so the two pages can never silently disagree on today's count —
+        # same "daily reads weekly's persisted value, never re-derives" principle as
+        # event_ramp below. Falls back to daily's own live computation (`recommended`,
+        # already set above) only when no weekly plan covers this day yet.
+        weekly_aligned = False
+        _weekly_ppd = _weekly_posts_per_day_for(s, day)
+        if _weekly_ppd is not None and _weekly_ppd != recommended:
+            recommended = _weekly_ppd
+            weekly_aligned = True
         # A seeded sale event landing THIS week (Independence Day Sale, Big Billion Days,
         # ...) floors today's count up to the SAME ramped figure the weekly page already
         # shows — reads the persisted weekly plan (single source of truth), never
@@ -1175,6 +1211,8 @@ def daily_brief(date: str | None = None, directive: str | None = None,
                    f"(range {lo}–{hi})")
             if event_ramp and not target_posts and n >= event_ramp["ramped_posts_per_day"]:
                 pace = f"; ramped to ~{n} this week for {event_ramp['event']}."
+            elif weekly_aligned and not target_posts and n == recommended:
+                pace = f"; aligned to ~{n}/day to match this week's plan."
             else:
                 pace = (f"; holding ~{n} matches that pace." if lo <= n <= hi
                         else f"; planning ~{n} today.")

@@ -239,6 +239,51 @@ def test_daily_brief_floors_recommended_posts_to_the_weekly_event_ramp(monkeypat
     assert "Test Sale" not in r2["today"]["cadence_why"]
 
 
+def test_daily_brief_aligns_recommended_posts_to_the_weekly_posts_per_day(monkeypatch):
+    """The gap the operator flagged separately from the event-ramp one: daily and
+    weekly each computed posts/day with the SAME formula but independently, so a
+    stale regenerate on either side left the two pages silently disagreeing (seen
+    live: daily 39, weekly 35). daily_brief must now read the weekly plan's
+    persisted posts_per_day (single source of truth, same pattern as event_ramp)
+    instead of trusting its own live recompute whenever a weekly plan covers the
+    day — but the "ran ~X posts/day" HISTORICAL clause must keep citing the real
+    observed baseline, never the aligned target."""
+    from datetime import date as _date, datetime as _dt, timezone as _tz
+    from src.controllers import service
+    from src.db.models_campaign import CampaignPlan, PlanType
+    from src.db.session import session_scope
+
+    with session_scope() as s:
+        # target_date deliberately differs from the other test's 2026-07-27 row
+        # (shared module DB — campaign_version/plan_type/target_date/is_ai_generated
+        # is a unique key), while still covering 2026-07-29 for the assertion below.
+        s.add(CampaignPlan(
+            plan_type=PlanType.WEEKLY, title="Week of 2026-07-26 (no event)",
+            target_date=_date(2026, 7, 26), end_date=_date(2026, 8, 1),
+            blueprint={"posts_per_day": 25},
+            confidence=0.6, generated_at=_dt.now(_tz.utc), is_ai_generated=True))
+
+    monkeypatch.setattr(
+        "src.ai.planner.generate_day_plan",
+        lambda s, day=None, inputs=None, **_kw: {"available": False, "reason": "down",
+                                                  "plan": None, "digest": "", "facts": []},
+    )
+
+    r = service.daily_brief(date="2026-07-29")   # inside the seeded week's range
+    assert r["today"]["recommended_posts"] == 25
+    cw = r["today"]["cadence_why"]
+    assert "aligned to ~25/day to match this week's plan" in cw
+    # Historical fact stays true (the fixture's history doesn't reach July -> 0),
+    # never silently replaced by the aligned target.
+    assert "ran ~0 posts/day" in cw
+
+    # Outside the seeded week's range: no weekly plan covers it -> daily falls back
+    # to its own live computation, unaffected by the unrelated week's number.
+    r2 = service.daily_brief(date="2026-07-05")
+    assert r2["today"]["recommended_posts"] != 25
+    assert "aligned to" not in r2["today"]["cadence_why"]
+
+
 def test_daily_brief_upcoming_event_callout_ignores_context_only_events(monkeypatch):
     """A plain observance/holiday (e.g. "Friendship Day") must never surface the
     "consider ramping" callout — only a sale-flavored event (type in _RAMP) should.
