@@ -732,17 +732,28 @@ def _fallback_day_plan(day, plan_ctx: dict) -> dict:
 
 
 def _stash_directive_constraints(plan: dict, directive: str | None,
-                                 steer_intent: dict | None, plan_ctx: dict) -> None:
+                                 steer_intent: dict | None, plan_ctx: dict,
+                                 constraint_directive: str | None = None) -> None:
     """Stash the steer's HARD constraints on the plan so persist_ai_plan's enforcers apply
     them AFTER padding/reconciliation. Runs for BOTH a real AI plan and a deterministic
     fallback — a fallback that ignored the steer would silently drop e.g. an 'only amazon'
     pin. Prefers the AI-interpreted intent (universal steer); else the regex parse. Both
-    yield the same constraint keys, matched only against real feed values (nothing invented)."""
-    if not directive:
+    yield the same constraint keys, matched only against real feed values (nothing invented).
+
+    ``constraint_directive`` — when given — is what the regex fallback parses INSTEAD of
+    ``directive``. Callers that decorate ``directive`` with extra prompt-only context (e.g.
+    "ALREADY POSTED TODAY: 06:01 loot amazon/general; ...", which repeats real merchant
+    names purely for the AI's awareness) must pass the operator's ACTUAL raw text here —
+    otherwise that decoration gets regex-scanned as if it were the operator's own request,
+    and a plain "regenerate with no steer" ends up hard-pinned to whatever merchant the
+    already-posted history happened to use. Defaults to ``directive`` so callers that only
+    ever pass real operator text are unaffected."""
+    _raw = constraint_directive if constraint_directive is not None else directive
+    if not _raw:
         return
     from src.services.generation.directives import parse_directive_constraints
     _cons = steer_intent if steer_intent is not None else parse_directive_constraints(
-        directive, plan_ctx.get("available_merchants"), plan_ctx.get("available_categories"))
+        _raw, plan_ctx.get("available_merchants"), plan_ctx.get("available_categories"))
     if any(_cons.get(k) is not None for k in ("merchants", "categories",
            "exclude_merchants", "exclude_categories", "after_min", "before_min",
            "price_min", "price_max")):
@@ -756,7 +767,8 @@ def _stash_directive_constraints(plan: dict, directive: str | None,
 
 
 def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
-                       directive: str | None = None, steer_intent: dict | None = None) -> dict:
+                       directive: str | None = None, steer_intent: dict | None = None,
+                       constraint_directive: str | None = None) -> dict:
     """Grounded AI day plan for ``day`` (default: latest owned day). Returns the raw
     digest + parsed plan and the facts it was given (so callers can fact-check).
     ``inputs`` supplies the deterministic targets the AI expands into a slot schedule.
@@ -764,7 +776,11 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     guidance injected into the prompt as a highest-priority block (mirroring the
     yesterday's-reconciliation note below) that the AI must honor or explicitly
     reject in the digest — it never bypasses the downstream fact-check, since the
-    plan's cited numbers are still verified against ``facts`` regardless."""
+    plan's cited numbers are still verified against ``facts`` regardless.
+    ``constraint_directive`` — see ``_stash_directive_constraints`` — is the operator's
+    RAW text for hard-constraint parsing, when ``directive`` has been decorated with
+    extra prompt-only context (e.g. an "already posted today" note) that must never
+    itself be mistaken for a steer."""
     from datetime import timedelta
 
     from src.services.analytics.day import latest_owned_date
@@ -884,7 +900,8 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         logger.warning("[ai.planner] AI unavailable for day plan (%s) — using "
                        "deterministic fallback", e)
         fallback = _fallback_day_plan(day, plan_ctx)
-        _stash_directive_constraints(fallback, directive, steer_intent, plan_ctx)
+        _stash_directive_constraints(fallback, directive, steer_intent, plan_ctx,
+                                     constraint_directive=constraint_directive)
         return {"available": True, "digest": "AI planner unavailable "
                 f"({e}) — a deterministic fallback plan is active (covers every "
                 "posting window with a loot/single mix); regenerate once the AI "
@@ -903,7 +920,8 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
         logger.warning("[ai.planner] day plan rejected (%s) — using deterministic fallback "
                        "(likely_truncation=%s, plan_text_len=%d)", _reason, _truncated, len(plan_text or ""))
         fallback = _fallback_day_plan(day, plan_ctx)
-        _stash_directive_constraints(fallback, directive, steer_intent, plan_ctx)
+        _stash_directive_constraints(fallback, directive, steer_intent, plan_ctx,
+                                     constraint_directive=constraint_directive)
         return {"available": True, "digest": digest or (
                 "AI planner returned an unusable plan — a deterministic "
                 "fallback plan is active; regenerate for a grounded plan."),
@@ -915,7 +933,8 @@ def generate_day_plan(s: Session, day=None, inputs: dict | None = None,
     _repair_plan_diversity(plan.get("post_slots") or [], plan_ctx.get("available_merchants"),
                            plan_ctx.get("available_categories"),
                            available_pairs=_feed_pair_counts or None)
-    _stash_directive_constraints(plan, directive, steer_intent, plan_ctx)
+    _stash_directive_constraints(plan, directive, steer_intent, plan_ctx,
+                                 constraint_directive=constraint_directive)
     return {"available": True, "digest": digest, "plan": plan, "facts": facts,
             "feed_pairs": _feed_pair_counts}
 

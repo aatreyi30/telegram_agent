@@ -861,12 +861,16 @@ def _today_details(s, recommended_posts: int, day=None):
 
 def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                         directive: str | None = None, recent_max_30d: int | None = None,
-                        steer_intent: dict | None = None) -> dict:
+                        steer_intent: dict | None = None,
+                        constraint_directive: str | None = None) -> dict:
     """The cache-miss generation path for the daily AI plan: call the planner
     (honoring ``directive`` if given), fact-check its cited numbers against the same
     facts it was grounded on, and persist a `CampaignPlan` row pinned to ``day``.
     ``recent_max_30d`` (when the caller has it) feeds the G10 persist-time clamp —
-    ``recommended`` doubles as the clamp's recent-median bound.
+    ``recommended`` doubles as the clamp's recent-median bound. ``constraint_directive``
+    — see ``generate_day_plan`` — is the operator's RAW steer text, when ``directive``
+    has been decorated with extra prompt-only context that must never itself be
+    mistaken for a steer.
 
     Shared by `daily_brief` (normal first-request-of-the-day miss) and
     `regenerate_daily` (forced fresh generation after deleting the stale cache row)
@@ -883,6 +887,8 @@ def _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
     directive_kwargs = {"directive": directive} if directive is not None else {}
     if steer_intent is not None:
         directive_kwargs["steer_intent"] = steer_intent
+    if constraint_directive is not None:
+        directive_kwargs["constraint_directive"] = constraint_directive
     ai_res = generate_day_plan(s, day, inputs={
         "recommended_posts": recommended,
         "posting_windows": windows,
@@ -1072,7 +1078,8 @@ def _reason_deal_type_split(allocation: list[dict], history_days: int = 0) -> No
 
 
 def daily_brief(date: str | None = None, directive: str | None = None,
-                target_posts: int | None = None, steer_intent: dict | None = None) -> dict:
+                target_posts: int | None = None, steer_intent: dict | None = None,
+                constraint_directive: str | None = None) -> dict:
     """The daily plan: what happened YESTERDAY + what to do TODAY, with a cadence
     recommendation grounded in the recent posting trajectory (not the stale lifetime
     baseline). AI writes the narrative + slots best-effort; the numbers are
@@ -1209,7 +1216,8 @@ def daily_brief(date: str | None = None, directive: str | None = None,
         else:
             gen = _daily_ai_generate(s, day, recommended, windows, allocation, merchants, evt,
                                       directive=directive, recent_max_30d=recent_max_30d,
-                                      steer_intent=steer_intent)
+                                      steer_intent=steer_intent,
+                                      constraint_directive=constraint_directive)
             ai_ok, plan, digest, fc_status, plan_row = (
                 gen["ai_ok"], gen["plan"], gen["digest"], gen["fc_status"], gen["row"])
 
@@ -1823,20 +1831,26 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
         # fails — otherwise a failed regen (e.g. AI at quota) destroys the good plan.
         old_snap = ({c.name: getattr(old, c.name) for c in CampaignPlan.__table__.columns
                      if c.name != "id"} if old is not None else None)
-        # A JSON-safe snapshot of the PRE-steer plan, stored on the new row so the operator
-        # can REVERT to exactly this plan (no regeneration, no AI cost). Only the display/
-        # restore fields (all JSON-safe); target_date/plan_type/version are constants on
-        # rebuild, generated_at is stamped fresh. The nested blueprint's own `_pre_steer` is
-        # stripped so undo is one level deep and snapshots can't nest unboundedly.
+        # A JSON-safe snapshot of the TRUE ORIGINAL (never-steered) plan, stored on the
+        # new row so "Revert" always restores the day exactly as it was before ANY
+        # steer — not just before the most recent one. If `old` is ITSELF already a
+        # steered plan (it carries its own `_pre_steer`), that nested snapshot IS the
+        # true original — reuse it as-is rather than overwriting it with `old`'s own
+        # (already-steered) state, which would make each successive steer erase how
+        # to get back to the real starting point. Only when `old` is itself unsteered
+        # do we snapshot `old` directly.
         pre_steer_snap = None
         if old is not None:
-            _obp = {k: v for k, v in (old.blueprint or {}).items() if k != "_pre_steer"}
-            pre_steer_snap = {
-                "title": old.title, "blueprint": _obp,
-                "expected_outcome": old.expected_outcome, "confidence": old.confidence,
-                "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
-                "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
-                "report_ids": old.report_ids, "operator_directive": old.operator_directive}
+            _existing_pre_steer = (old.blueprint or {}).get("_pre_steer")
+            if _existing_pre_steer is not None:
+                pre_steer_snap = _existing_pre_steer
+            else:
+                pre_steer_snap = {
+                    "title": old.title, "blueprint": old.blueprint or {},
+                    "expected_outcome": old.expected_outcome, "confidence": old.confidence,
+                    "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
+                    "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
+                    "report_ids": old.report_ids, "operator_directive": old.operator_directive}
         # For a mid-day steer of TODAY, freeze what already went out: slots whose IST
         # time has passed are already posted (immutable). Capture them so (a) the AI is
         # told not to replan them, and (b) we splice them back over the fresh plan so a
@@ -1912,8 +1926,15 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
             "already went out and can't be changed. If my request only affects times/windows that "
             "have ALREADY passed today (e.g. asking to change the morning when it's afternoon), say "
             "so plainly — there's nothing left to reschedule for that window today.")
+    # constraint_directive is the operator's RAW steer text (possibly None/empty) —
+    # NEVER `composed`, which gets decorated with the "ALREADY POSTED TODAY" note
+    # above (listing real merchant names purely for the AI's awareness). Without this
+    # split, an EMPTY steer box still produced a non-empty `composed` string once that
+    # note was appended, which the regex fallback then misread as "the operator wants
+    # only <merchant>" — permanently re-pinning the day to whatever merchant history
+    # happened to contain, even though nothing was actually steered.
     result = daily_brief(date=day.isoformat(), directive=composed, target_posts=_target,
-                         steer_intent=intent)
+                         steer_intent=intent, constraint_directive=directive)
     # Success is measured by an actual AI plan being PERSISTED — not result["available"]
     # (daily_brief still returns available=True with the deterministic fallback when the
     # AI is down). If no AI row landed, the regeneration failed: restore the old plan.
@@ -1986,10 +2007,13 @@ def regenerate_daily(date: str | None = None, directive: str | None = None) -> d
 
 
 def revert_daily(date: str | None = None) -> dict:
-    """Undo the last steer/regenerate for ``date`` — restore the plan that existed BEFORE
-    it, from the snapshot `regenerate_daily` stashed under blueprint._pre_steer. No AI call:
-    it rebuilds the exact prior row. One level of undo. Refuses when there's no snapshot (the
-    day was never steered) or the day has already elapsed."""
+    """Undo ALL steering for ``date`` — restore the plan exactly as it was before the
+    FIRST steer/regenerate, from the snapshot `regenerate_daily` stashed under
+    blueprint._pre_steer (each successive steer carries the same original snapshot
+    forward rather than overwriting it with its own already-steered state, so this
+    always reaches the true starting point regardless of how many steers happened in
+    between). No AI call: rebuilds the exact original row. Refuses when there's no
+    snapshot (the day was never steered) or the day has already elapsed."""
     from datetime import date as date_cls, datetime, timezone
     from sqlalchemy import delete
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
@@ -2106,8 +2130,9 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
 
         # Snapshot the old weekly row (all cols but id) BEFORE deleting — used BOTH to
         # restore-on-failure (a bad regen never blanks the week) AND, on success, as the
-        # one-level-of-undo snapshot "Revert steer" restores (same contract as daily's
-        # blueprint._pre_steer).
+        # snapshot "Revert steer" restores (same contract as daily's blueprint._pre_steer
+        # — see the daily regenerate for why this always points at the TRUE original,
+        # not just the state one steer back).
         old = s.scalar(select(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
             CampaignPlan.plan_type == PlanType.WEEKLY,
@@ -2116,13 +2141,16 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
                      if c.name != "id"} if old is not None else None)
         pre_steer_snap = None
         if old is not None:
-            _obp = {k: v for k, v in (old.blueprint or {}).items() if k != "_pre_steer"}
-            pre_steer_snap = {
-                "title": old.title, "blueprint": _obp,
-                "expected_outcome": old.expected_outcome, "confidence": old.confidence,
-                "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
-                "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
-                "report_ids": old.report_ids, "operator_directive": old.operator_directive}
+            _existing_pre_steer = (old.blueprint or {}).get("_pre_steer")
+            if _existing_pre_steer is not None:
+                pre_steer_snap = _existing_pre_steer
+            else:
+                pre_steer_snap = {
+                    "title": old.title, "blueprint": old.blueprint or {},
+                    "expected_outcome": old.expected_outcome, "confidence": old.confidence,
+                    "is_ai_generated": old.is_ai_generated, "ai_digest": old.ai_digest,
+                    "cited_numbers": old.cited_numbers, "factcheck_status": old.factcheck_status,
+                    "report_ids": old.report_ids, "operator_directive": old.operator_directive}
 
         s.execute(delete(CampaignPlan).where(
             CampaignPlan.campaign_version == CAMPAIGN_VERSION,
@@ -2192,10 +2220,11 @@ def regenerate_weekly(end: str | None = None, directive: str | None = None) -> d
 
 
 def revert_weekly(end: str | None = None) -> dict:
-    """Undo the last steer/regenerate for the week containing ``end`` — restore the plan
-    that existed BEFORE it, from the snapshot `regenerate_weekly` stashed under
-    blueprint._pre_steer. No AI call: rebuilds the exact prior row. One level of undo.
-    Same contract as `revert_daily`, scoped to the weekly plan_type/target_date."""
+    """Undo ALL steering for the week containing ``end`` — restore the plan exactly as
+    it was before the FIRST steer/regenerate, from the snapshot `regenerate_weekly`
+    stashed under blueprint._pre_steer. No AI call: rebuilds the exact original row.
+    Same contract as `revert_daily` (always the true original, not one step back),
+    scoped to the weekly plan_type/target_date."""
     from datetime import date as date_cls, datetime, timezone, timedelta
     from sqlalchemy import delete
     from src.db.models_campaign import CAMPAIGN_VERSION, CampaignPlan, PlanType
